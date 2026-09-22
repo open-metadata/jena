@@ -122,6 +122,26 @@ exits_with_error() {
   [[ "$output" == *ERROR* ]]
 }
 
+# The server process, not just the image default, must run without root. docker top lists the
+# container's processes from outside, so the probe cannot match itself.
+server_process_uid_is() {
+  local actual
+  actual=$(docker top "$CONTAINER" -eo pid,uid,args | awk '/fuseki-server\.jar/ { print $2; exit }')
+  [ "$actual" = "$1" ]
+}
+
+refuses_volume_with() {
+  local output
+  if output=$(docker run --rm -v "$VOLUME:/fuseki" -e ADMIN_PASSWORD="$PASSWORD" "$IMAGE" 2>&1); then
+    return 1
+  fi
+  [[ "$output" == *"$1"* ]]
+}
+
+volume_owner_is() {
+  [ "$(docker run --rm -v "$VOLUME:/fuseki" --entrypoint stat "$IMAGE" -c '%u:%g %a' /fuseki)" = "$1" ]
+}
+
 echo "== Defaults: stock Fuseki, extension off =="
 start -e FUSEKI_DATASETS=ds
 check "dataset seeded from FUSEKI_DATASETS" dataset_exists ds
@@ -158,6 +178,27 @@ before=$(docker exec "$CONTAINER" sha256sum /fuseki/configuration/openmetadata.t
 start -e FUSEKI_DATASETS=openmetadata -e OPENMETADATA_EXTENSION_ENABLED=true -e FUSEKI_UNION_DEFAULT_GRAPH=true
 check "configuration file unchanged" [ "$(docker exec "$CONTAINER" sha256sum /fuseki/configuration/openmetadata.ttl)" = "$before" ]
 check "environment settings still apply to it" header_equals openmetadata X-OpenMetadata-Union-Default-Graph true
+
+echo "== Runs without root =="
+check "the server process runs as uid 1000" server_process_uid_is 1000
+check "files it creates belong to uid 1000" [ "$(docker exec "$CONTAINER" stat -c %u /fuseki/databases/openmetadata)" = "1000" ]
+fresh_volume
+check "a new volume starts owned by 1000:0, group-writable" volume_owner_is "1000:0 775"
+
+echo "== Upgrading a volume written by a root-running image =="
+docker run --rm --user 0 --entrypoint sh -v "$VOLUME:/fuseki" "$IMAGE" -c \
+  'mkdir -p /fuseki/databases/legacy && echo kept > /fuseki/databases/legacy/data \
+   && chown -R 0:0 /fuseki && chmod -R 755 /fuseki'
+check "a root-owned volume is refused with the fix" refuses_volume_with "fsGroupChangePolicy: OnRootMismatch"
+docker run --rm --user 0 --entrypoint chown -v "$VOLUME:/fuseki" "$IMAGE" -R 1000:0 /fuseki
+start -e FUSEKI_DATASETS=migrated
+check "it starts after the documented chown" dataset_exists migrated
+check "existing data survives the migration" [ "$(docker exec "$CONTAINER" cat /fuseki/databases/legacy/data)" = "kept" ]
+
+echo "== Arbitrary uid in group 0 (OpenShift) =="
+fresh_volume
+start --user 123456:0 -e FUSEKI_DATASETS=arbitrary
+check "a random uid in group 0 can create datasets" dataset_exists arbitrary
 
 echo "== Invalid settings fail fast =="
 check "missing ADMIN_PASSWORD" exits_with_error

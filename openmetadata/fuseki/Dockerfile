@@ -13,10 +13,10 @@
 #
 # Built from the released Apache Jena Fuseki distribution, verified against its published SHA-512.
 # The layout and environment contract match daschswiss/apache-jena-fuseki (stain/jena-docker
-# lineage) so this image replaces it in place: FUSEKI_BASE=/fuseki holds configuration/*.ttl,
-# databases/ and shiro.ini. With no OpenMetadata variables set it runs stock Fuseki; the
-# OpenMetadata Graph Store extension and the performance settings are opt-in environment
-# variables, documented in README.md.
+# lineage), so this image replaces it after a one-time ownership fix of the volume, because it
+# runs as non-root: FUSEKI_BASE=/fuseki holds configuration/*.ttl, databases/ and shiro.ini.
+# With no OpenMetadata variables set it runs stock Fuseki; the OpenMetadata Graph Store extension
+# and the performance settings are opt-in environment variables, documented in README.md.
 
 ARG FUSEKI_VERSION=6.2.0
 # From https://downloads.apache.org/jena/binaries/apache-jena-fuseki-6.2.0.tar.gz.sha512
@@ -80,11 +80,25 @@ COPY dataset.ttl.template /jena-fuseki/dataset.ttl.template
 COPY docker-entrypoint.sh healthcheck.sh /
 RUN chmod 755 /docker-entrypoint.sh /healthcheck.sh
 
+# The server runs as this non-root uid, matching upstream Jena's Docker kit. A new named volume
+# copies the ownership below; group 0 with group write keeps it usable under OpenShift, which
+# runs containers as an arbitrary uid in group 0. Volumes written by a root-running image need
+# the one-time ownership fix in README.md.
+ARG FUSEKI_UID=1000
+RUN groupadd --gid "${FUSEKI_UID}" fuseki \
+    && useradd --uid "${FUSEKI_UID}" --gid fuseki --home-dir /fuseki --no-create-home \
+        --shell /usr/sbin/nologin fuseki \
+    && mkdir -p /fuseki \
+    && chown "${FUSEKI_UID}:0" /fuseki \
+    && chmod 0775 /fuseki
+
 VOLUME /fuseki
 WORKDIR /jena-fuseki
 EXPOSE 3030
 
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 --start-period=30s CMD /healthcheck.sh
 
+# Numeric, so Kubernetes can verify runAsNonRoot without a pod-level runAsUser.
+USER ${FUSEKI_UID}:${FUSEKI_UID}
 ENTRYPOINT ["/usr/bin/tini", "--", "/docker-entrypoint.sh"]
 CMD ["/jena-fuseki/fuseki-server"]

@@ -5,8 +5,9 @@ Store extension. **This is not an Apache Software Foundation release**; report F
 [apache/jena](https://github.com/apache/jena).
 
 The layout and environment contract match `daschswiss/apache-jena-fuseki` (the
-[stain/jena-docker](https://github.com/stain/jena-docker) lineage), so this image replaces it in place:
-the same volume, dataset files and `ADMIN_PASSWORD` keep working.
+[stain/jena-docker](https://github.com/stain/jena-docker) lineage), so this image replaces it: the same
+volume, dataset files and `ADMIN_PASSWORD` keep working after a one-time ownership fix, because this
+image runs as non-root (see [Running as non-root](#running-as-non-root)).
 
 With only `ADMIN_PASSWORD` set, the server behaves like stock Fuseki. Everything else, including the
 extension, is an opt-in environment variable.
@@ -89,13 +90,43 @@ work and releases the writer before the client gives up.
 The extension is enabled by a symlink `/fuseki/extra/openmetadata-fuseki-extensions.jar` pointing at the
 jar in the image, so it always matches the running image. Other jars in `extra/` are left alone.
 
-The container runs as root, as the DaSCH image does, so existing volumes stay writable. To run as
-another user, make `/fuseki` writable by it.
+## Running as non-root
+
+The server runs as uid 1000 (`USER 1000:1000`, numeric so Kubernetes can verify `runAsNonRoot`),
+matching upstream Jena's Docker kit. `/fuseki` in the image is owned by `1000:0` and group-writable,
+and a new named volume copies that ownership, so a fresh volume needs no setup. Group 0 write access
+also covers OpenShift, which runs containers as an arbitrary uid in group 0. Build with
+`--build-arg FUSEKI_UID=<uid>` to change the uid.
+
+The image cannot change ownership of data that already exists in a volume. At start, the entrypoint
+checks that the volume root and its data directories are writable, and if not, stops with the fix
+instead of letting Fuseki fail on its first write. Bind mounts behave like existing volumes: make
+the host directory writable by uid 1000.
+
+**Kubernetes** fixes ownership when it mounts the volume:
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch   # only walks the volume while its root does not match
+```
+
+**Docker**, once, with the container stopped:
+
+```bash
+docker run --rm --user 0 --entrypoint chown -v <volume>:/fuseki openmetadata/fuseki:6.2.0 -R 1000:0 /fuseki
+```
+
+Starting as root to fix ownership and then dropping privileges would avoid that step, but leaves
+root as the image's declared user, which image scanners flag and restricted Kubernetes pods
+reject unless every pod sets `runAsUser`.
 
 ## Replacing daschswiss/apache-jena-fuseki
 
-Swap the image and keep the volume. Existing `configuration/*.ttl` files are loaded unchanged, and the
-environment settings above apply to them without editing, including union and timeouts. DaSCH's
+The DaSCH image runs as root, so its volumes are root-owned. Apply the ownership fix above once, then
+swap the image and keep the volume. Existing `configuration/*.ttl` files are loaded unchanged, and
+the environment settings above apply to them without editing, including union and timeouts. DaSCH's
 built-in `dsp-repo` dataset is not created by this image.
 
 ## Build and test

@@ -47,9 +47,36 @@ require_positive_integer() {
   [[ "$2" =~ ^[1-9][0-9]*$ ]] || fail "$1 must be a positive integer, got '$2'"
 }
 
+# A volume written by an image that ran as root keeps its root-owned files: building this image
+# cannot change data that already exists in a volume. Stop before Fuseki opens a database it
+# cannot write. Only the volume root and data directories are checked, because configuration
+# files are often read-only mounts, and symlinks are skipped because the extension link points
+# into the read-only image.
+first_unwritable_path() {
+  local directory
+  if [ ! -w "$FUSEKI_BASE" ]; then
+    echo "$FUSEKI_BASE"
+    return
+  fi
+  for directory in "$FUSEKI_BASE/databases" "$FUSEKI_BASE/lucene"; do
+    if [ -d "$directory" ]; then
+      find "$directory" ! -type l ! -writable -print -quit 2> /dev/null || true
+    fi
+  done
+}
+
 prepare_base() {
-  mkdir -p "$FUSEKI_BASE/configuration" "$FUSEKI_BASE/databases" \
-    || fail "$FUSEKI_BASE is not writable by uid $(id -u)"
+  local unwritable
+  unwritable=$(first_unwritable_path)
+  unwritable="${unwritable%%$'\n'*}"
+  if [ -n "$unwritable" ]; then
+    log ERROR "$unwritable is not writable by uid $(id -u). A volume written by an image that"
+    log ERROR "ran as root needs a one-time ownership fix, with the container stopped:"
+    log ERROR "  Docker:     docker run --rm --user 0 --entrypoint chown -v <volume>:/fuseki openmetadata/fuseki:${FUSEKI_VERSION:-<version>} -R $(id -u):0 /fuseki"
+    log ERROR "  Kubernetes: securityContext.fsGroup: $(id -g) with fsGroupChangePolicy: OnRootMismatch"
+    exit 1
+  fi
+  mkdir -p "$FUSEKI_BASE/configuration" "$FUSEKI_BASE/databases"
 }
 
 # Rendered on every start, so ADMIN_PASSWORD changes take effect. Set FUSEKI_MANAGE_SHIRO=false
