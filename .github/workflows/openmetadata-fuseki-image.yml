@@ -1,0 +1,157 @@
+#  Copyright 2026 Collate
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# Builds, tests and publishes openmetadata/fuseki. Pull requests build and test only. Publishing
+# happens only for release/<fuseki-version> branches: on push, or on demand with the branch as input.
+name: OpenMetadata Fuseki image
+
+on:
+  push:
+    branches:
+      - "release/**"
+    paths:
+      - "openmetadata/fuseki/**"
+      - ".github/workflows/openmetadata-fuseki-image.yml"
+  pull_request:
+    paths:
+      - "openmetadata/fuseki/**"
+      - ".github/workflows/openmetadata-fuseki-image.yml"
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "Release branch to build and publish, for example release/6.2.0"
+        required: true
+        default: "release/6.2.0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openmetadata-fuseki-${{ github.event_name == 'workflow_dispatch' && inputs.release_branch || github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: openmetadata/fuseki
+  CONTEXT: openmetadata/fuseki
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Inputs are passed through env, never interpolated into the script, to avoid injection.
+      - name: Decide whether this run publishes
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCHED_BRANCH: ${{ inputs.release_branch }}
+          PUSHED_BRANCH: ${{ github.ref_name }}
+          PUSHED_COMMIT: ${{ github.sha }}
+        run: |
+          publish=false
+          branch=""
+          checkout=""
+          if [ "$EVENT" != "pull_request" ]; then
+            branch="$PUSHED_BRANCH"
+            checkout="$PUSHED_COMMIT"
+            if [ "$EVENT" = "workflow_dispatch" ]; then
+              branch="$DISPATCHED_BRANCH"
+              checkout="$DISPATCHED_BRANCH"
+            fi
+            if [[ ! "$branch" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Images are published only from release/<version> branches, not '$branch'"
+              exit 1
+            fi
+            publish=true
+          fi
+          {
+            echo "publish=$publish"
+            echo "branch=$branch"
+            echo "checkout=$checkout"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.target.outputs.checkout }}
+
+      - name: Check the release branch matches the pinned Fuseki version
+        id: version
+        env:
+          BRANCH: ${{ steps.target.outputs.branch }}
+          PUBLISH: ${{ steps.target.outputs.publish }}
+        run: |
+          pinned=$(sed -n 's/^ARG FUSEKI_VERSION=//p' "$CONTEXT/Dockerfile")
+          if [ "$PUBLISH" = "true" ] && [ "${BRANCH#release/}" != "$pinned" ]; then
+            echo "::error::$BRANCH must build Fuseki ${BRANCH#release/}, but the Dockerfile pins $pinned"
+            exit 1
+          fi
+          {
+            echo "version=$pinned"
+            echo "commit=$(git rev-parse --short=7 HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: openmetadata/fuseki/extension/pom.xml
+
+      - name: Test the extension
+        working-directory: openmetadata/fuseki/extension
+        run: mvn -B -ntp verify
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build for the smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.CONTEXT }}
+          load: true
+          tags: openmetadata-fuseki:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        working-directory: ${{ env.CONTEXT }}
+        run: ./test/smoke-test.sh openmetadata-fuseki:smoke
+
+      - name: Check Docker Hub credentials
+        if: steps.target.outputs.publish == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_OPENMETADATA_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_OPENMETADATA_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Add DOCKERHUB_OPENMETADATA_USERNAME and DOCKERHUB_OPENMETADATA_TOKEN to this repository's Actions secrets"
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@v4
+        if: steps.target.outputs.publish == 'true'
+
+      - uses: docker/login-action@v4
+        if: steps.target.outputs.publish == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_OPENMETADATA_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_OPENMETADATA_TOKEN }}
+
+      - name: Publish
+        if: steps.target.outputs.publish == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.CONTEXT }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.commit }}
+          cache-from: type=gha
