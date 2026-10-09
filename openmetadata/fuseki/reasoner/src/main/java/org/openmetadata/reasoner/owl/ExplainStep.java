@@ -15,8 +15,8 @@ package org.openmetadata.reasoner.owl;
 import com.clarkparsia.owlapi.explanation.BlackBoxExplanation;
 import com.clarkparsia.owlapi.explanation.SatisfiabilityConverter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.openmetadata.reasoner.InputRejectedException;
@@ -32,11 +32,12 @@ import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.reasoner.OWLReasoner;
 
 /**
- * Computes one justification, a minimal set of closure axioms that entails the target, with OWL
- * API's black-box explanation over HermiT. Only one is computed, never all of them; the step's
- * deadline bounds the search, and running out of time is INCOMPLETE, not a statement about the
- * entailment. A target that is not entailed is reported NOT_ENTAILED, which proves nothing about
- * its negation.
+ * Computes one justification, a minimal set of closure axioms that entails the target: OWL API's
+ * black-box explanation over HermiT for an entailment, and a minimal inconsistent subset for an
+ * inconsistency, which the black-box generator cannot find because owl:Thing gives it no signature
+ * to expand from. Only one is computed, never all of them; the step's deadline bounds the search,
+ * and running out of time is INCOMPLETE, not a statement about the entailment. A target that is not
+ * entailed is reported NOT_ENTAILED, which proves nothing about its negation.
  */
 public final class ExplainStep implements Step {
   @Override
@@ -58,12 +59,12 @@ public final class ExplainStep implements Step {
     try {
       watchdog.guard(reasoner::interrupt);
       final boolean consistent = reasoner.isConsistent();
-      final OWLClassExpression unsatisfiable;
+      final Collection<OWLAxiom> justification;
       if (axiom == null) {
         if (consistent) {
           return answer("NOT_ENTAILED", target, input);
         }
-        unsatisfiable = factory.getOWLThing();
+        justification = new MinimalInconsistentSubset(watchdog).find(ontology);
       } else {
         if (!consistent) {
           return answer("INCONSISTENT", target, input);
@@ -71,18 +72,18 @@ public final class ExplainStep implements Step {
         if (!reasoner.isEntailed(axiom)) {
           return answer("NOT_ENTAILED", target, input);
         }
-        unsatisfiable = new SatisfiabilityConverter(factory).convert(axiom);
-      }
-      final BlackBoxExplanation generator =
-          new BlackBoxExplanation(
-              ontology,
-              Engine.explanationFactory(created -> watchdog.guard(created::interrupt)),
-              reasoner);
-      final Set<OWLAxiom> justification;
-      try {
-        justification = generator.getExplanation(unsatisfiable);
-      } finally {
-        generator.dispose();
+        final OWLClassExpression unsatisfiable =
+            new SatisfiabilityConverter(factory).convert(axiom);
+        final BlackBoxExplanation generator =
+            new BlackBoxExplanation(
+                ontology,
+                Engine.explanationFactory(created -> watchdog.guard(created::interrupt)),
+                reasoner);
+        try {
+          justification = generator.getExplanation(unsatisfiable);
+        } finally {
+          generator.dispose();
+        }
       }
       final List<String> axioms =
           justification.stream()

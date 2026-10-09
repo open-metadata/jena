@@ -24,7 +24,6 @@ import org.semanticweb.owlapi.formats.TurtleDocumentFormat;
 import org.semanticweb.owlapi.io.FileDocumentSource;
 import org.semanticweb.owlapi.io.OWLOntologyDocumentSource;
 import org.semanticweb.owlapi.io.OWLOntologyLoaderMetaData;
-import org.semanticweb.owlapi.io.OWLParserException;
 import org.semanticweb.owlapi.io.RDFParserMetaData;
 import org.semanticweb.owlapi.io.StringDocumentSource;
 import org.semanticweb.owlapi.model.IRI;
@@ -34,6 +33,8 @@ import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.model.OWLOntologyCreationException;
 import org.semanticweb.owlapi.model.OWLOntologyLoaderConfiguration;
 import org.semanticweb.owlapi.model.OWLOntologyManager;
+import org.semanticweb.owlapi.model.OWLRuntimeException;
+import org.semanticweb.owlapi.model.UnloadableImportException;
 
 /**
  * Parses local documents into OWL API without ever touching the network: the closure document has
@@ -138,7 +139,10 @@ final class OntologyLoader {
     final OWLOntology ontology;
     try {
       ontology = manager.loadOntologyFromOntologyDocument(source, configuration());
-    } catch (final OWLOntologyCreationException | OWLParserException e) {
+    } catch (final UnloadableImportException e) {
+      throw InputRejectedException.of(
+          "INVALID_INPUT", "IMPORT_NOT_ALLOWED", "The document declares imports; none are allowed");
+    } catch (final OWLOntologyCreationException | OWLRuntimeException e) {
       throw InputRejectedException.of("INVALID_INPUT", "PARSE_ERROR", firstLine(e.getMessage()));
     }
     if (ontology.importsDeclarations().findAny().isPresent()) {
