@@ -1,0 +1,21 @@
+OpenMetadata reasoner worker for Apache Jena Fuseki
+Copyright 2026 Collate
+
+This directory is not an Apache Software Foundation release. It bundles third-party software
+under their own licences; THIRD-PARTY.md lists every jar, its licence and its source, and the
+licence texts are in licenses/.
+
+HermiT (https://github.com/owlcs/hermit-reasoner), Copyright 2008-2015 the Department of
+Computer Science of the University of Oxford, is licensed under the GNU Lesser General Public
+License version 3 or later. It includes JAutomata (LGPL-2.1) and uses dk.brics.automaton
+(Copyright Anders Moeller, BSD). The source of the OpenMetadata build is in source/.
+
+ELK (https://github.com/liveontologies/elk-reasoner), Copyright the Department of Computer
+Science, University of Oxford, and the ELK contributors, is licensed under the Apache License 2.0.
+
+The OWL API (https://github.com/owlcs/owlapi), Copyright The University of Manchester and the
+OWL API contributors, is licensed under the Apache License 2.0 or the GNU LGPL version 3, and is
+used here under the Apache License 2.0.
+
+This product includes software developed at The Apache Software Foundation
+(https://www.apache.org/): Apache Axiom, Apache Commons RDF and an Apache Geronimo specification.
