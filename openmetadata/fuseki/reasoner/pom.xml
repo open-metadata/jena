@@ -358,6 +358,26 @@
               <outputDirectory>${reasoner.directory}</outputDirectory>
             </configuration>
           </execution>
+          <execution>
+            <!-- The integration tests run the packaged worker on the image's classpath:
+                 fuseki-server.jar first, then target/reasoner/*. -->
+            <id>fuseki-server-jar</id>
+            <phase>pre-integration-test</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.apache.jena</groupId>
+                  <artifactId>jena-fuseki-server</artifactId>
+                  <version>${jena.version}</version>
+                  <destFileName>fuseki-server.jar</destFileName>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${project.build.directory}/fuseki</outputDirectory>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
       <plugin>
@@ -368,9 +388,11 @@
           <trimStackTrace>false</trimStackTrace>
           <systemPropertyVariables>
             <reasoner.directory>${reasoner.directory}</reasoner.directory>
+            <reasoner.fusekiServerJar>${project.build.directory}/fuseki/fuseki-server.jar</reasoner.fusekiServerJar>
             <reasoner.dependencies>${project.basedir}/dependencies.sha256</reasoner.dependencies>
             <reasoner.thirdParty>${project.basedir}/THIRD-PARTY.md</reasoner.thirdParty>
-            <reasoner.worker.jar>${project.build.finalName}.jar</reasoner.worker.jar>
+            <reasoner.workerJar>${project.build.finalName}.jar</reasoner.workerJar>
+            <reasoner.hermitJar>hermit-reasoner-${hermit.version}.jar</reasoner.hermitJar>
           </systemPropertyVariables>
         </configuration>
         <executions>
