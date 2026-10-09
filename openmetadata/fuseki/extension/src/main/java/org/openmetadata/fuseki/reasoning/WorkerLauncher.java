@@ -144,11 +144,19 @@ public final class WorkerLauncher {
     }
   }
 
+  /**
+   * Runs one step and records its outcome in {@code <step>.status.json}; the outcome is returned
+   * even when that file cannot be written, which is logged.
+   */
   public StepOutcome run(final Path stepFilePath) throws IOException {
     final Path stepFile = stepFilePath.toAbsolutePath().normalize();
-    final Path statusFile = sibling(stepFile, ".status.json");
     final StepOutcome outcome = launch(stepFile);
-    writeAtomically(statusFile, JSON.toString(outcome.toJson()) + "\n");
+    final Path statusFile = sibling(stepFile, ".status.json");
+    try {
+      writeAtomically(statusFile, JSON.toString(outcome.toJson()) + "\n");
+    } catch (final IOException e) {
+      LOG.error("Cannot write {}: {}", statusFile, e.toString());
+    }
     return outcome;
   }
 
