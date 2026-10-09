@@ -1,0 +1,7 @@
+OUTCOME CLASSIFIED
+CHECK SubClassOf(<http://example.org/dl-union#Stakeholder> <http://example.org/dl-union#Party>) ENTAILED
+CHECK SubClassOf(<http://example.org/dl-union#Stakeholder> <http://example.org/dl-union#Person>) NOT_ENTAILED
+SUBCLASS <http://example.org/dl-union#Contact> <http://example.org/dl-union#Party>
+SUBCLASS <http://example.org/dl-union#Organization> <http://example.org/dl-union#Contact>
+SUBCLASS <http://example.org/dl-union#Person> <http://example.org/dl-union#Contact>
+SUBCLASS <http://example.org/dl-union#Stakeholder> <http://example.org/dl-union#Contact>

@@ -1,0 +1,4 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/dl-cardinality-data#ExactlyTwoCodes> <http://example.org/dl-cardinality-data#TwoCodes>
+TYPE <http://example.org/dl-cardinality-data#item> <http://example.org/dl-cardinality-data#TwoCodes>
+UNSATISFIABLE <http://example.org/dl-cardinality-data#Clash>

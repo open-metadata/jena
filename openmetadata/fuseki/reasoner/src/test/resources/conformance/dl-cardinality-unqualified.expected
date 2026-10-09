@@ -1,0 +1,4 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/dl-cardinality-unqualified#CoOwned> <http://example.org/dl-cardinality-unqualified#Shared>
+SUBCLASS <http://example.org/dl-cardinality-unqualified#Shared> <http://example.org/dl-cardinality-unqualified#Owned>
+UNSATISFIABLE <http://example.org/dl-cardinality-unqualified#Clash>

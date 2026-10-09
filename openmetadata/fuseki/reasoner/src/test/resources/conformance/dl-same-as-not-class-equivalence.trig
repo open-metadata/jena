@@ -1,0 +1,15 @@
+# owl:sameAs between two IRIs that are both classes and individuals (punning) makes the
+# individuals equal and never the classes equivalent: a concept mapping is not class equivalence.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-same-as-not-class-equivalence#>
+PREFIX ext:  <http://example.com/crm#>
+
+GRAPH <urn:fixture:dl-same-as-not-class-equivalence> {
+  <http://example.org/dl-same-as-not-class-equivalence> a owl:Ontology .
+  :Customer a owl:Class , owl:NamedIndividual ; owl:sameAs ext:Client .
+  ext:Client a owl:Class , owl:NamedIndividual .
+  :alice a owl:NamedIndividual , :Customer .
+}

@@ -1,0 +1,23 @@
+# Two import closures in one working dataset share an imported ontology and use the same class
+# IRIs with different axioms. Each closure is classified on its own; conclusions never leak
+# between them. Used by imports-isolation-a and imports-isolation-b.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/imports-isolation#>
+
+GRAPH <urn:fixture:imports-isolation:shared> {
+  <http://example.org/imports-isolation/shared> a owl:Ontology .
+  :Customer a owl:Class .
+  :Party a owl:Class .
+  :Organization a owl:Class .
+}
+GRAPH <urn:fixture:imports-isolation:context-a> {
+  <http://example.org/imports-isolation/a> a owl:Ontology ; owl:imports <http://example.org/imports-isolation/shared> .
+  :Customer rdfs:subClassOf :Party .
+}
+GRAPH <urn:fixture:imports-isolation:context-b> {
+  <http://example.org/imports-isolation/b> a owl:Ontology ; owl:imports <http://example.org/imports-isolation/shared> .
+  :Customer rdfs:subClassOf :Organization .
+}

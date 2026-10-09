@@ -1,0 +1,27 @@
+# Transitive, symmetric and inverse properties and a property chain, over explicit assertions.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-property-assertions#>
+
+GRAPH <urn:fixture:dl-property-assertions> {
+  <http://example.org/dl-property-assertions> a owl:Ontology .
+  :locatedIn a owl:ObjectProperty , owl:TransitiveProperty .
+  :relatedTo a owl:ObjectProperty , owl:SymmetricProperty .
+  :hasPart a owl:ObjectProperty ; owl:inverseOf :partOf .
+  :partOf a owl:ObjectProperty .
+  :hasParent a owl:ObjectProperty .
+  :hasBrother a owl:ObjectProperty .
+  :hasUncle a owl:ObjectProperty ; owl:propertyChainAxiom ( :hasParent :hasBrother ) .
+  :rack1 a owl:NamedIndividual ; :locatedIn :room1 .
+  :room1 a owl:NamedIndividual ; :locatedIn :site1 .
+  :site1 a owl:NamedIndividual .
+  :glossaryA a owl:NamedIndividual ; :relatedTo :glossaryB .
+  :glossaryB a owl:NamedIndividual .
+  :schema1 a owl:NamedIndividual ; :hasPart :table1 .
+  :table1 a owl:NamedIndividual .
+  :ann a owl:NamedIndividual ; :hasParent :ben .
+  :ben a owl:NamedIndividual ; :hasBrother :carl .
+  :carl a owl:NamedIndividual .
+}

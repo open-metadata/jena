@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-nested-expressions",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-nested-expressions",
+    "graphs": [
+      "urn:fixture:dl-nested-expressions"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-nested-expressions:entailments",
+  "checks": "dl-nested-expressions.checks.ofn"
+}

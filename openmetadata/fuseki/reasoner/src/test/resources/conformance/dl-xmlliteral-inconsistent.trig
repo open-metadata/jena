@@ -1,0 +1,12 @@
+# Two different XML fragments are two values, so a functional property holding both is not.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-xmlliteral-inconsistent#>
+
+GRAPH <urn:fixture:dl-xmlliteral-inconsistent> {
+  <http://example.org/dl-xmlliteral-inconsistent> a owl:Ontology .
+  :markup a owl:DatatypeProperty , owl:FunctionalProperty .
+  :term1 a owl:NamedIndividual ; :markup "<b>Customer</b>"^^rdf:XMLLiteral , "<i>Customer</i>"^^rdf:XMLLiteral .
+}

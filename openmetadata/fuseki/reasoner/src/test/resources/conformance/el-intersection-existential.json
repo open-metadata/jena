@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "el-intersection-existential",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-intersection-existential",
+    "graphs": [
+      "urn:fixture:el-intersection-existential"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-intersection-existential:entailments",
+  "checks": "el-intersection-existential.checks.ofn"
+}

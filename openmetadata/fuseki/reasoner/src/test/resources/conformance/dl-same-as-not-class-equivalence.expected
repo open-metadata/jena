@@ -1,0 +1,7 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.com/crm#Client> <http://example.org/dl-same-as-not-class-equivalence#alice>) NOT_ENTAILED
+CHECK EquivalentClasses(<http://example.com/crm#Client> <http://example.org/dl-same-as-not-class-equivalence#Customer>) NOT_ENTAILED
+CHECK SameIndividual(<http://example.com/crm#Client> <http://example.org/dl-same-as-not-class-equivalence#Customer>) ENTAILED
+CHECK SubClassOf(<http://example.org/dl-same-as-not-class-equivalence#Customer> <http://example.com/crm#Client>) NOT_ENTAILED
+SAME <http://example.com/crm#Client> <http://example.org/dl-same-as-not-class-equivalence#Customer>
+TYPE <http://example.org/dl-same-as-not-class-equivalence#alice> <http://example.org/dl-same-as-not-class-equivalence#Customer>

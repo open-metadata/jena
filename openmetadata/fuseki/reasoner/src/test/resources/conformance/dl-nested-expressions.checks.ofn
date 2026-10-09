@@ -1,0 +1,4 @@
+Ontology(
+  SubClassOf(<http://example.org/dl-nested-expressions#Loader> <http://example.org/dl-nested-expressions#GovernedSource>)
+  ClassAssertion(<http://example.org/dl-nested-expressions#GovernedSource> <http://example.org/dl-nested-expressions#job1>)
+)

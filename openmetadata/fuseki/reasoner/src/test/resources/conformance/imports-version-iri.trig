@@ -1,0 +1,16 @@
+# An import by version IRI resolves to the imported ontology in the closure.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/imports-version-iri#>
+
+GRAPH <urn:fixture:imports-version-iri:root> {
+  <http://example.org/imports-version-iri> a owl:Ontology ; owl:imports <http://example.org/imports-version-iri/base/1.0> .
+  :Customer a owl:Class ; rdfs:subClassOf :Party .
+}
+GRAPH <urn:fixture:imports-version-iri:base> {
+  <http://example.org/imports-version-iri/base> a owl:Ontology ; owl:versionIRI <http://example.org/imports-version-iri/base/1.0> .
+  :Party a owl:Class ; rdfs:subClassOf :Agent .
+  :Agent a owl:Class .
+}

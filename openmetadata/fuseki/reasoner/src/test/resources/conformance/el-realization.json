@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "el-realization",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-realization",
+    "graphs": [
+      "urn:fixture:el-realization"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-realization:entailments",
+  "checks": "el-realization.checks.ofn"
+}

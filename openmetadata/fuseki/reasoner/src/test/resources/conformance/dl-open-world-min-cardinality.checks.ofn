@@ -1,0 +1,5 @@
+Ontology(
+  ClassAssertion(ObjectSomeValuesFrom(<http://example.org/dl-open-world-min-cardinality#hasAccount> <http://example.org/dl-open-world-min-cardinality#Account>) <http://example.org/dl-open-world-min-cardinality#bob>)
+  ObjectPropertyAssertion(<http://example.org/dl-open-world-min-cardinality#hasAccount> <http://example.org/dl-open-world-min-cardinality#bob> <http://example.org/dl-open-world-min-cardinality#acct1>)
+  NegativeObjectPropertyAssertion(<http://example.org/dl-open-world-min-cardinality#hasAccount> <http://example.org/dl-open-world-min-cardinality#bob> <http://example.org/dl-open-world-min-cardinality#acct1>)
+)

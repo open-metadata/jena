@@ -1,0 +1,7 @@
+OUTCOME CLASSIFIED
+CHECK DifferentIndividuals(<http://example.org/dl-open-world-max-cardinality#mail1> <http://example.org/dl-open-world-max-cardinality#mail2>) NOT_ENTAILED
+CHECK SameIndividual(<http://example.org/dl-open-world-max-cardinality#mail1> <http://example.org/dl-open-world-max-cardinality#mail2>) ENTAILED
+SAME <http://example.org/dl-open-world-max-cardinality#mail1> <http://example.org/dl-open-world-max-cardinality#mail2>
+TYPE <http://example.org/dl-open-world-max-cardinality#alice> <http://example.org/dl-open-world-max-cardinality#Person>
+VALUE <http://example.org/dl-open-world-max-cardinality#alice> <http://example.org/dl-open-world-max-cardinality#hasEmail> <http://example.org/dl-open-world-max-cardinality#mail1>
+VALUE <http://example.org/dl-open-world-max-cardinality#alice> <http://example.org/dl-open-world-max-cardinality#hasEmail> <http://example.org/dl-open-world-max-cardinality#mail2>

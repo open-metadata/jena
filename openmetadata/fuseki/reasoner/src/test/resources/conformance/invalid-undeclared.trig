@@ -1,0 +1,11 @@
+# OWL 2 DL needs every entity declared; projection must emit the declarations.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/invalid-undeclared#>
+
+GRAPH <urn:fixture:invalid-undeclared> {
+  <http://example.org/invalid-undeclared> a owl:Ontology .
+  :Customer a owl:Class ; rdfs:subClassOf :Party .
+}

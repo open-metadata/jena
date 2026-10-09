@@ -1,0 +1,12 @@
+# A functional identifier attribute with two different values.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-data-functional-inconsistent#>
+
+GRAPH <urn:fixture:dl-data-functional-inconsistent> {
+  <http://example.org/dl-data-functional-inconsistent> a owl:Ontology .
+  :identifier a owl:DatatypeProperty , owl:FunctionalProperty .
+  :table1 a owl:NamedIndividual ; :identifier "tbl-0001" , "tbl-0002" .
+}

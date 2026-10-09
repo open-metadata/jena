@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-top-bottom",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-top-bottom",
+    "graphs": [
+      "urn:fixture:el-top-bottom"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-top-bottom:entailments"
+}

@@ -1,0 +1,4 @@
+Ontology(
+  SubClassOf(<http://example.org/dl-cardinality-qualified#PairStewarded> ObjectMaxCardinality(2 <http://example.org/dl-cardinality-qualified#hasSteward> <http://example.org/dl-cardinality-qualified#Engineer>))
+  SubClassOf(<http://example.org/dl-cardinality-qualified#CriticalDataset> ObjectExactCardinality(2 <http://example.org/dl-cardinality-qualified#hasSteward> <http://example.org/dl-cardinality-qualified#Person>))
+)

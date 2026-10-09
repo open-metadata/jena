@@ -1,0 +1,3 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/imports-two-level#Customer> <http://example.org/imports-two-level#Party>
+SUBCLASS <http://example.org/imports-two-level#RetailCustomer> <http://example.org/imports-two-level#Customer>

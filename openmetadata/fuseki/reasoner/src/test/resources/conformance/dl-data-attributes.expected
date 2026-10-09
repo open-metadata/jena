@@ -1,0 +1,5 @@
+OUTCOME CLASSIFIED
+TYPE <http://example.org/dl-data-attributes#table1> <http://example.org/dl-data-attributes#Counted>
+TYPE <http://example.org/dl-data-attributes#table1> <http://example.org/dl-data-attributes#Identified>
+TYPE <http://example.org/dl-data-attributes#table1> <http://example.org/dl-data-attributes#Scored>
+TYPE <http://example.org/dl-data-attributes#table2> <http://example.org/dl-data-attributes#Identified>

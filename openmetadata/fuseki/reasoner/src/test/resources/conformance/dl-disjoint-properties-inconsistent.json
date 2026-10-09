@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-disjoint-properties-inconsistent",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-disjoint-properties-inconsistent",
+    "graphs": [
+      "urn:fixture:dl-disjoint-properties-inconsistent"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-disjoint-properties-inconsistent:entailments"
+}

@@ -1,0 +1,6 @@
+Ontology(
+  SameIndividual(<http://example.org/dl-functional#ownerA> <http://example.org/dl-functional#ownerB>)
+  ClassAssertion(<http://example.org/dl-functional#Team> <http://example.org/dl-functional#ownerB>)
+  SameIndividual(<http://example.org/dl-functional#userX> <http://example.org/dl-functional#userY>)
+  DifferentIndividuals(<http://example.org/dl-functional#userX> <http://example.org/dl-functional#userY>)
+)

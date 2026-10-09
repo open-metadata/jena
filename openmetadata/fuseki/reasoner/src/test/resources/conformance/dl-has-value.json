@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-has-value",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-has-value",
+    "graphs": [
+      "urn:fixture:dl-has-value"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-has-value:entailments"
+}

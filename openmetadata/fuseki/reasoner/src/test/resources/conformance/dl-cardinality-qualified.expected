@@ -1,0 +1,7 @@
+OUTCOME CLASSIFIED
+CHECK SubClassOf(<http://example.org/dl-cardinality-qualified#CriticalDataset> ObjectExactCardinality(2 <http://example.org/dl-cardinality-qualified#hasSteward> <http://example.org/dl-cardinality-qualified#Person>)) NOT_ENTAILED
+CHECK SubClassOf(<http://example.org/dl-cardinality-qualified#PairStewarded> ObjectMaxCardinality(2 <http://example.org/dl-cardinality-qualified#hasSteward> <http://example.org/dl-cardinality-qualified#Engineer>)) ENTAILED
+SUBCLASS <http://example.org/dl-cardinality-qualified#CriticalDataset> <http://example.org/dl-cardinality-qualified#WellStewarded>
+SUBCLASS <http://example.org/dl-cardinality-qualified#Engineer> <http://example.org/dl-cardinality-qualified#Person>
+SUBCLASS <http://example.org/dl-cardinality-qualified#PairStewarded> <http://example.org/dl-cardinality-qualified#WellStewarded>
+UNSATISFIABLE <http://example.org/dl-cardinality-qualified#Conflicted>

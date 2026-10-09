@@ -1,0 +1,20 @@
+# VALUE (has-value) restrictions, with an individual and with a typed literal.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-has-value#>
+
+GRAPH <urn:fixture:dl-has-value> {
+  <http://example.org/dl-has-value> a owl:Ontology .
+  :residentOf a owl:ObjectProperty .
+  :status a owl:DatatypeProperty .
+  :eu a owl:NamedIndividual .
+  :EuResident a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :residentOf ; owl:hasValue :eu ] .
+  :Verified a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :status ; owl:hasValue "verified"^^xsd:string ] .
+  :Partner a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :residentOf ; owl:hasValue :eu ] .
+  :c1 a owl:NamedIndividual ; :residentOf :eu .
+  :c2 a owl:NamedIndividual ; :status "verified"^^xsd:string .
+  :c3 a owl:NamedIndividual ; :status "pending"^^xsd:string .
+  :c4 a owl:NamedIndividual , :Partner .
+}

@@ -1,0 +1,8 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/el-intersection-existential#CustomerWithEmail> <http://example.org/el-intersection-existential#alice>) ENTAILED
+CHECK SubClassOf(<http://example.org/el-intersection-existential#CustomerWithEmail> <http://example.org/el-intersection-existential#RegisteredCustomer>) NOT_ENTAILED
+CHECK SubClassOf(<http://example.org/el-intersection-existential#RegisteredCustomer> <http://example.org/el-intersection-existential#Party>) ENTAILED
+SUBCLASS <http://example.org/el-intersection-existential#Customer> <http://example.org/el-intersection-existential#Party>
+SUBCLASS <http://example.org/el-intersection-existential#CustomerWithEmail> <http://example.org/el-intersection-existential#Customer>
+SUBCLASS <http://example.org/el-intersection-existential#RegisteredCustomer> <http://example.org/el-intersection-existential#CustomerWithEmail>
+TYPE <http://example.org/el-intersection-existential#alice> <http://example.org/el-intersection-existential#RegisteredCustomer>
