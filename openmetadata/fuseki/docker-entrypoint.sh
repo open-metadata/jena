@@ -22,6 +22,7 @@ set -euo pipefail
 : "${FUSEKI_HEAP:=4g}"
 : "${FUSEKI_UNION_DEFAULT_GRAPH:=false}"
 : "${OPENMETADATA_EXTENSION_ENABLED:=false}"
+: "${OPENMETADATA_REASONING_ENABLED:=false}"
 
 EXTENSION_JAR="$FUSEKI_HOME/extensions/openmetadata-fuseki-extensions.jar"
 EXTENSION_LINK="$FUSEKI_BASE/extra/openmetadata-fuseki-extensions.jar"
@@ -45,6 +46,23 @@ require_boolean() {
 
 require_positive_integer() {
   [[ "$2" =~ ^[1-9][0-9]*$ ]] || fail "$1 must be a positive integer, got '$2'"
+}
+
+# A size in the JVM's -Xmx notation, at least the given minimum in MiB.
+require_size() {
+  local name="$1" value="$2" minimum_mib="$3"
+  [[ "$value" =~ ^([1-9][0-9]{0,12})([kKmMgGtT]?)$ ]] \
+    || fail "$name must be a size such as 512m or 2g, got '$value'"
+  local number="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2],,}" bytes
+  case "$unit" in
+    k) bytes=$((number * 1024)) ;;
+    m) bytes=$((number * 1024 * 1024)) ;;
+    g) bytes=$((number * 1024 * 1024 * 1024)) ;;
+    t) bytes=$((number * 1024 * 1024 * 1024 * 1024)) ;;
+    *) bytes=$number ;;
+  esac
+  [ "$bytes" -ge $((minimum_mib * 1024 * 1024)) ] \
+    || fail "$name must be at least ${minimum_mib}m, got '$value'"
 }
 
 # A volume written by an image that ran as root keeps its root-owned files: building this image
@@ -130,6 +148,36 @@ configure_extension() {
   fi
 }
 
+# The reasoner worker is a separate JVM that the extension launches one step at a time, with its
+# own flags; these settings size it and the memory budget checked before every step (README.md).
+# Values are validated whenever they are set, so a typo fails now rather than at enablement. With
+# OPENMETADATA_REASONING_ENABLED unset nothing changes: no worker is ever launched.
+configure_reasoning() {
+  require_boolean OPENMETADATA_REASONING_ENABLED "$OPENMETADATA_REASONING_ENABLED"
+  if [ -n "${OPENMETADATA_REASONER_HEAP:-}" ]; then
+    require_size OPENMETADATA_REASONER_HEAP "$OPENMETADATA_REASONER_HEAP" 16
+  fi
+  # The floor is what the worker's launch flags cap: metaspace, code cache and direct memory,
+  # plus stacks and GC structures.
+  if [ -n "${OPENMETADATA_REASONER_OFF_HEAP:-}" ]; then
+    require_size OPENMETADATA_REASONER_OFF_HEAP "$OPENMETADATA_REASONER_OFF_HEAP" 512
+  fi
+  local floor="${OPENMETADATA_REASONER_PAGE_CACHE_FLOOR:-}"
+  if [ -n "$floor" ] \
+    && [[ ! "$floor" =~ ^(0|(0|[1-9][0-9]?|100)%|[1-9][0-9]{0,12}[kKmMgGtT]?)$ ]]; then
+    fail "OPENMETADATA_REASONER_PAGE_CACHE_FLOOR must be a size such as 2g or a percentage of the serving datasets' size such as 50%, got '$floor'"
+  fi
+  if [ -n "${OPENMETADATA_REASONER_CPUS:-}" ]; then
+    require_positive_integer OPENMETADATA_REASONER_CPUS "$OPENMETADATA_REASONER_CPUS"
+  fi
+  if [ "$OPENMETADATA_REASONING_ENABLED" = "true" ]; then
+    [ "$OPENMETADATA_EXTENSION_ENABLED" = "true" ] \
+      || fail "OPENMETADATA_REASONING_ENABLED=true needs OPENMETADATA_EXTENSION_ENABLED=true; the extension launches the worker"
+    mkdir -p "$FUSEKI_BASE/reasoning"
+    log INFO "Reasoning enabled: worker heap ${OPENMETADATA_REASONER_HEAP:-2g}; the extension reports whether the memory budget fits"
+  fi
+}
+
 compose_jvm_args() {
   if [ -z "${JVM_ARGS:-}" ]; then
     JVM_ARGS="-Xms$FUSEKI_HEAP -Xmx$FUSEKI_HEAP"
@@ -194,6 +242,7 @@ prepare_base
 render_shiro
 seed_datasets
 configure_extension
+configure_reasoning
 compose_jvm_args
 render_server_context
 

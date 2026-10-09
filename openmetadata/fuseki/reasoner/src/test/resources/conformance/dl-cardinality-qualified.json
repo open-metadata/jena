@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-cardinality-qualified",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-cardinality-qualified",
+    "graphs": [
+      "urn:fixture:dl-cardinality-qualified"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-cardinality-qualified:entailments",
+  "checks": "dl-cardinality-qualified.checks.ofn"
+}

@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-domain-range",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-domain-range",
+    "graphs": [
+      "urn:fixture:el-domain-range"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-domain-range:entailments"
+}

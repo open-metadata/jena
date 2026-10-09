@@ -1,0 +1,8 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/el-realization#Manager> <http://example.org/el-realization#alice>) NOT_ENTAILED
+CHECK ClassAssertion(<http://example.org/el-realization#Person> <http://example.org/el-realization#bob>) ENTAILED
+SUBCLASS <http://example.org/el-realization#Employee> <http://example.org/el-realization#Person>
+SUBCLASS <http://example.org/el-realization#Manager> <http://example.org/el-realization#Employee>
+TYPE <http://example.org/el-realization#alice> <http://example.org/el-realization#Employee>
+TYPE <http://example.org/el-realization#bob> <http://example.org/el-realization#Manager>
+TYPE <http://example.org/el-realization#carol> <http://example.org/el-realization#Person>

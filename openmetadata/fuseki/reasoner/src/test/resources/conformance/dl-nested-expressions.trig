@@ -1,0 +1,25 @@
+# Nested expressions combining union, intersection, existential and universal restrictions.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-nested-expressions#>
+
+GRAPH <urn:fixture:dl-nested-expressions> {
+  <http://example.org/dl-nested-expressions> a owl:Ontology .
+  :feeds a owl:ObjectProperty .
+  :governedBy a owl:ObjectProperty .
+  :Raw a owl:Class .
+  :Curated a owl:Class .
+  :Policy a owl:Class .
+  :GovernedSource a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :feeds ;
+      owl:someValuesFrom [ a owl:Class ; owl:unionOf ( :Raw
+        [ a owl:Class ; owl:intersectionOf ( :Curated [ a owl:Restriction ; owl:onProperty :governedBy ; owl:allValuesFrom :Policy ] ) ] ) ] ] .
+  :Pipeline a owl:Class ; rdfs:subClassOf
+      [ a owl:Restriction ; owl:onProperty :feeds ; owl:someValuesFrom :Curated ] ,
+      [ a owl:Restriction ; owl:onProperty :feeds ; owl:allValuesFrom
+        [ a owl:Restriction ; owl:onProperty :governedBy ; owl:allValuesFrom :Policy ] ] .
+  :Loader a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :feeds ; owl:someValuesFrom :Curated ] .
+  :job1 a owl:NamedIndividual , [ a owl:Restriction ; owl:onProperty :feeds ;
+      owl:someValuesFrom [ a owl:Class ; owl:unionOf ( :Raw :Curated ) ] ] .
+}

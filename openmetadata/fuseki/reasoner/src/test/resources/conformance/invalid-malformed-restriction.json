@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-malformed-restriction",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-malformed-restriction",
+    "graphs": [
+      "urn:fixture:invalid-malformed-restriction"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-malformed-restriction:entailments"
+}

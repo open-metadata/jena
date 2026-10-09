@@ -1,0 +1,3 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/el-domain-range#Lead> <http://example.org/el-domain-range#TeamGroupManager>
+SUBCLASS <http://example.org/el-domain-range#TeamGroupManager> <http://example.org/el-domain-range#Manager>

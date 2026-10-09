@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-transitive-in-cardinality",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-transitive-in-cardinality",
+    "graphs": [
+      "urn:fixture:invalid-transitive-in-cardinality"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-transitive-in-cardinality:entailments"
+}

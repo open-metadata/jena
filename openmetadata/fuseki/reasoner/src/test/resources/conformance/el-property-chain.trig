@@ -1,0 +1,17 @@
+# A property chain (hasParent o hasBrother -> hasUncle) used inside nested existentials.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-property-chain#>
+
+GRAPH <urn:fixture:el-property-chain> {
+  <http://example.org/el-property-chain> a owl:Ontology .
+  :hasParent a owl:ObjectProperty .
+  :hasBrother a owl:ObjectProperty .
+  :hasUncle a owl:ObjectProperty ; owl:propertyChainAxiom ( :hasParent :hasBrother ) .
+  :Man a owl:Class .
+  :Child a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :hasParent ;
+      owl:someValuesFrom [ a owl:Restriction ; owl:onProperty :hasBrother ; owl:someValuesFrom :Man ] ] .
+  :Nephew a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :hasUncle ; owl:someValuesFrom :Man ] .
+}

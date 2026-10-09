@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-universal",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-universal",
+    "graphs": [
+      "urn:fixture:dl-universal"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-universal:entailments",
+  "checks": "dl-universal.checks.ofn"
+}

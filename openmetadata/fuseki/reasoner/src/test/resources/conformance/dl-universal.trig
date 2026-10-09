@@ -1,0 +1,18 @@
+# ONLY (universal restriction): it is not a missing-value check; it propagates a type to the
+# values that exist, and a value of unknown type is inferred, not a violation.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-universal#>
+
+GRAPH <urn:fixture:dl-universal> {
+  <http://example.org/dl-universal> a owl:Ontology .
+  :ownedBy a owl:ObjectProperty .
+  :Customer a owl:Class .
+  :Account a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :ownedBy ; owl:allValuesFrom :Customer ] .
+  :acct1 a owl:NamedIndividual , :Account ; :ownedBy :p1 .
+  :acct2 a owl:NamedIndividual , :Account .
+  :p1 a owl:NamedIndividual .
+  :p2 a owl:NamedIndividual .
+}

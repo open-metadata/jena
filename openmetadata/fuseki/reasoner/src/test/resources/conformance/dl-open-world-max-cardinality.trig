@@ -1,0 +1,17 @@
+# Open world without a unique name assumption: two values under "at most one" make the values
+# equal; it is not an inconsistency, and different IRIs are not different individuals.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-open-world-max-cardinality#>
+
+GRAPH <urn:fixture:dl-open-world-max-cardinality> {
+  <http://example.org/dl-open-world-max-cardinality> a owl:Ontology .
+  :hasEmail a owl:ObjectProperty .
+  :Person a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :hasEmail ;
+      owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .
+  :alice a owl:NamedIndividual , :Person ; :hasEmail :mail1 , :mail2 .
+  :mail1 a owl:NamedIndividual .
+  :mail2 a owl:NamedIndividual .
+}

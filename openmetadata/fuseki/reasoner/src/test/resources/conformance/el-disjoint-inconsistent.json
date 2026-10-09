@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "el-disjoint-inconsistent",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-disjoint-inconsistent",
+    "graphs": [
+      "urn:fixture:el-disjoint-inconsistent"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-disjoint-inconsistent:entailments",
+  "checks": "el-disjoint-inconsistent.checks.ofn"
+}

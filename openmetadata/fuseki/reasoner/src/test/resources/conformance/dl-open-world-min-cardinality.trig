@@ -1,0 +1,17 @@
+# Open world: a required value that is not asserted is not a violation, and a fact that is not
+# entailed is not refuted either. Both a statement and its negation can be NOT_ENTAILED.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-open-world-min-cardinality#>
+
+GRAPH <urn:fixture:dl-open-world-min-cardinality> {
+  <http://example.org/dl-open-world-min-cardinality> a owl:Ontology .
+  :hasAccount a owl:ObjectProperty .
+  :Account a owl:Class .
+  :Customer a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :hasAccount ;
+      owl:minQualifiedCardinality "1"^^xsd:nonNegativeInteger ; owl:onClass :Account ] .
+  :bob a owl:NamedIndividual , :Customer .
+  :acct1 a owl:NamedIndividual , :Account .
+}

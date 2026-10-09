@@ -1,0 +1,3 @@
+root http://example.org/imports-isolation/b
+graph urn:fixture:imports-isolation:context-b
+graph urn:fixture:imports-isolation:shared

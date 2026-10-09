@@ -1,0 +1,4 @@
+Ontology(
+  ClassAssertion(<http://example.org/el-realization#Person> <http://example.org/el-realization#bob>)
+  ClassAssertion(<http://example.org/el-realization#Manager> <http://example.org/el-realization#alice>)
+)

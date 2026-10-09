@@ -1,0 +1,10 @@
+OUTCOME CLASSIFIED
+CHECK SubClassOf(<http://example.org/el-named-hierarchy#A> <http://example.org/el-named-hierarchy#C>) ENTAILED
+CHECK SubClassOf(<http://example.org/el-named-hierarchy#C> <http://example.org/el-named-hierarchy#A>) NOT_ENTAILED
+EQUIVALENT <http://example.org/el-named-hierarchy#B> <http://example.org/el-named-hierarchy#D>
+SUBCLASS <http://example.org/el-named-hierarchy#A> <http://example.org/el-named-hierarchy#B>
+SUBCLASS <http://example.org/el-named-hierarchy#A> <http://example.org/el-named-hierarchy#D>
+SUBCLASS <http://example.org/el-named-hierarchy#B> <http://example.org/el-named-hierarchy#C>
+SUBCLASS <http://example.org/el-named-hierarchy#D> <http://example.org/el-named-hierarchy#C>
+SUBCLASS <http://example.org/el-named-hierarchy#E> <http://example.org/el-named-hierarchy#B>
+SUBCLASS <http://example.org/el-named-hierarchy#E> <http://example.org/el-named-hierarchy#D>

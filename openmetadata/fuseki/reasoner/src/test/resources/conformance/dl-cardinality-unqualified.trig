@@ -1,0 +1,21 @@
+# Unqualified object cardinalities (no filler): owl:minCardinality, owl:maxCardinality and
+# owl:cardinality.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-cardinality-unqualified#>
+
+GRAPH <urn:fixture:dl-cardinality-unqualified> {
+  <http://example.org/dl-cardinality-unqualified> a owl:Ontology .
+  :owner a owl:ObjectProperty .
+  :Shared a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :owner ;
+      owl:minCardinality "2"^^xsd:nonNegativeInteger ] .
+  :SingleOwner a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :owner ;
+      owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .
+  :CoOwned a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :owner ;
+      owl:cardinality "2"^^xsd:nonNegativeInteger ] .
+  :Owned a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :owner ;
+      owl:minCardinality "1"^^xsd:nonNegativeInteger ] .
+  :Clash a owl:Class ; rdfs:subClassOf :Shared , :SingleOwner .
+}

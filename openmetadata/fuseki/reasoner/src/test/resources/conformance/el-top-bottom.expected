@@ -1,0 +1,6 @@
+OUTCOME CLASSIFIED
+EQUIVALENT <http://example.org/el-top-bottom#Entity> <http://www.w3.org/2002/07/owl#Thing>
+SUBCLASS <http://example.org/el-top-bottom#Asset> <http://example.org/el-top-bottom#Entity>
+SUBCLASS <http://example.org/el-top-bottom#Dataset> <http://example.org/el-top-bottom#Asset>
+SUBCLASS <http://example.org/el-top-bottom#Untyped> <http://example.org/el-top-bottom#Entity>
+UNSATISFIABLE <http://example.org/el-top-bottom#Retired>

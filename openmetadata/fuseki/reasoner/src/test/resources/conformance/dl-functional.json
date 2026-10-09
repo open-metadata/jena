@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-functional",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-functional",
+    "graphs": [
+      "urn:fixture:dl-functional"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-functional:entailments",
+  "checks": "dl-functional.checks.ofn"
+}

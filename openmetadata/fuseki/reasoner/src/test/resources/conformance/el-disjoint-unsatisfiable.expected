@@ -1,0 +1,6 @@
+OUTCOME CLASSIFIED
+CHECK SubClassOf(<http://example.org/el-disjoint-unsatisfiable#Contractor> owl:Nothing) ENTAILED
+CHECK SubClassOf(<http://example.org/el-disjoint-unsatisfiable#Employee> owl:Nothing) NOT_ENTAILED
+SUBCLASS <http://example.org/el-disjoint-unsatisfiable#Employee> <http://example.org/el-disjoint-unsatisfiable#Person>
+UNSATISFIABLE <http://example.org/el-disjoint-unsatisfiable#Contractor>
+UNSATISFIABLE <http://example.org/el-disjoint-unsatisfiable#TemporaryContractor>

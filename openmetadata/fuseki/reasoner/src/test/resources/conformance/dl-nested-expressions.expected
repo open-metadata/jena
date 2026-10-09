@@ -1,0 +1,4 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/dl-nested-expressions#GovernedSource> <http://example.org/dl-nested-expressions#job1>) NOT_ENTAILED
+CHECK SubClassOf(<http://example.org/dl-nested-expressions#Loader> <http://example.org/dl-nested-expressions#GovernedSource>) NOT_ENTAILED
+SUBCLASS <http://example.org/dl-nested-expressions#Pipeline> <http://example.org/dl-nested-expressions#GovernedSource>

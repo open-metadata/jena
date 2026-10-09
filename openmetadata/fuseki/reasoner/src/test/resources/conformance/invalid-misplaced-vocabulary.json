@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-misplaced-vocabulary",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-misplaced-vocabulary",
+    "graphs": [
+      "urn:fixture:invalid-misplaced-vocabulary"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-misplaced-vocabulary:entailments"
+}

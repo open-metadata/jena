@@ -15,12 +15,19 @@
 # The layout and environment contract match daschswiss/apache-jena-fuseki (stain/jena-docker
 # lineage), so this image replaces it after a one-time ownership fix of the volume, because it
 # runs as non-root: FUSEKI_BASE=/fuseki holds configuration/*.ttl, databases/ and shiro.ini.
-# With no OpenMetadata variables set it runs stock Fuseki; the OpenMetadata Graph Store extension
-# and the performance settings are opt-in environment variables, documented in README.md.
+# With no OpenMetadata variables set it runs stock Fuseki; the OpenMetadata Graph Store extension,
+# the reasoner and the performance settings are opt-in environment variables, documented in
+# README.md.
 
 ARG FUSEKI_VERSION=6.2.0
 # From https://downloads.apache.org/jena/binaries/apache-jena-fuseki-6.2.0.tar.gz.sha512
 ARG FUSEKI_SHA512=ba65f5867d2d4741b2ed9e2af5a0d4fbb447909894ab2a0c6bc4dac8997f4fe339c87b13c48d45d054977769f0f8bf763ea346b1f7792d5cdc458041bd43a132
+# OpenMetadata's HermiT build (LGPL-3.0), built from source at this commit of
+# https://github.com/open-metadata/hermit-reasoner (branch openmetadata-build, pull request #1).
+# Moves to the released artifact, verified by checksum, once that build is released.
+ARG HERMIT_REPOSITORY=https://github.com/open-metadata/hermit-reasoner.git
+ARG HERMIT_COMMIT=bb78447a0563958eb52409e10a592022c14ff934
+ARG HERMIT_VERSION=1.4.6.519-om.1
 
 FROM eclipse-temurin:21-jre-jammy AS distribution
 ARG FUSEKI_VERSION
@@ -41,7 +48,8 @@ RUN set -eux; \
     rm -f /jena-fuseki/fuseki.war
 RUN /jena-fuseki/fuseki-server --version 2>&1 | grep -qx "Apache Jena version ${FUSEKI_VERSION}"
 
-FROM eclipse-temurin:21-jdk-jammy AS extension
+# Jars are architecture-independent, so builder stages run natively on the build host.
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-jammy AS extension
 WORKDIR /build
 COPY --from=distribution /jena-fuseki/fuseki-server.jar /build/fuseki-server.jar
 COPY extension/src/main/java /build/src
@@ -52,6 +60,47 @@ RUN mkdir classes \
         $(find src -name '*.java') \
     && jar --create --file openmetadata-fuseki-extensions.jar -C classes . -C resources .
 
+# The reasoner worker and its dependencies, run as a separate JVM with the classpath
+# /jena-fuseki/fuseki-server.jar:/jena-fuseki/reasoner/*. Jena is provided by fuseki-server.jar;
+# the build fails if the jar Maven compiled against is not byte for byte the one the image ships,
+# or if any third-party jar differs from dependencies.sha256.
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-21 AS reasoner
+ARG FUSEKI_VERSION
+ARG HERMIT_REPOSITORY
+ARG HERMIT_COMMIT
+ARG HERMIT_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN set -eux; \
+    git init --quiet hermit; \
+    git -C hermit fetch --quiet --depth 1 "$HERMIT_REPOSITORY" "$HERMIT_COMMIT"; \
+    git -C hermit checkout --quiet --detach FETCH_HEAD; \
+    test "$(git -C hermit rev-parse HEAD)" = "$HERMIT_COMMIT"; \
+    cd hermit; \
+    mvn -B -ntp -Dmaven.test.skip=true -Dmaven.javadoc.skip=true install; \
+    test -f "target/hermit-reasoner-${HERMIT_VERSION}-sources.jar"
+COPY reasoner/pom.xml /build/reasoner/pom.xml
+RUN cd reasoner && mvn -B -ntp dependency:go-offline
+COPY reasoner/src/main /build/reasoner/src/main
+COPY reasoner/dependencies.sha256 reasoner/NOTICE reasoner/THIRD-PARTY.md /build/reasoner/
+COPY reasoner/licenses /build/reasoner/licenses
+COPY reasoner/bin /build/reasoner/bin
+COPY --from=distribution /jena-fuseki/fuseki-server.jar /build/fuseki-server.jar
+RUN set -eux; \
+    cd reasoner; \
+    mvn -B -ntp -Dmaven.test.skip=true package; \
+    cmp /build/fuseki-server.jar \
+        "/root/.m2/repository/org/apache/jena/jena-fuseki-server/${FUSEKI_VERSION}/jena-fuseki-server-${FUSEKI_VERSION}.jar"; \
+    (cd target/reasoner && sha256sum --strict --check /build/reasoner/dependencies.sha256); \
+    expected=$(($(wc -l < dependencies.sha256) + 2)); \
+    test "$(ls target/reasoner/*.jar | wc -l)" -eq "$expected"; \
+    mkdir -p /out/reasoner/source /out/reasoner/bin; \
+    cp target/reasoner/*.jar /out/reasoner/; \
+    cp "/build/hermit/target/hermit-reasoner-${HERMIT_VERSION}-sources.jar" /out/reasoner/source/; \
+    cp -r NOTICE THIRD-PARTY.md licenses /out/reasoner/; \
+    cp bin/reasoner /out/reasoner/bin/reasoner
+
 FROM eclipse-temurin:21-jre-jammy
 ARG FUSEKI_VERSION
 
@@ -61,11 +110,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 LABEL org.opencontainers.image.title="Apache Jena Fuseki packaged by OpenMetadata"
-LABEL org.opencontainers.image.description="Apache Jena Fuseki ${FUSEKI_VERSION} with an optional OpenMetadata Graph Store extension. Not an Apache Software Foundation release."
+LABEL org.opencontainers.image.description="Apache Jena Fuseki ${FUSEKI_VERSION} with an optional OpenMetadata Graph Store extension and reasoner worker. Not an Apache Software Foundation release."
 LABEL org.opencontainers.image.version="${FUSEKI_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/open-metadata/jena"
 LABEL org.opencontainers.image.documentation="https://github.com/open-metadata/jena/tree/main/openmetadata/fuseki"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+# The reasoner worker in /jena-fuseki/reasoner bundles HermiT (LGPL-3.0-or-later); see its
+# THIRD-PARTY.md.
+LABEL org.opencontainers.image.licenses="Apache-2.0 AND LGPL-3.0-or-later"
 LABEL org.opencontainers.image.vendor="OpenMetadata"
 
 ENV FUSEKI_VERSION=${FUSEKI_VERSION} \
@@ -75,6 +126,9 @@ ENV FUSEKI_VERSION=${FUSEKI_VERSION} \
 COPY --from=distribution /jena-fuseki /jena-fuseki
 COPY --from=extension /build/openmetadata-fuseki-extensions.jar \
     /jena-fuseki/extensions/openmetadata-fuseki-extensions.jar
+# Read-only in the image, never on the volume: an upgrade can never leave stale worker jars, and
+# no reasoner dependency is ever loaded by the Fuseki JVM.
+COPY --from=reasoner /out/reasoner /jena-fuseki/reasoner
 COPY shiro.ini /jena-fuseki/shiro.ini
 COPY dataset.ttl.template /jena-fuseki/dataset.ttl.template
 COPY docker-entrypoint.sh healthcheck.sh /

@@ -1,0 +1,14 @@
+# A class expression that no axiom uses, here a restriction left behind when the triple linking
+# it was not written. OWL API ignores it; the worker rejects the closure instead.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/invalid-unused-expression#>
+
+GRAPH <urn:fixture:invalid-unused-expression> {
+  <http://example.org/invalid-unused-expression> a owl:Ontology .
+  :hasAccount a owl:ObjectProperty .
+  :Account a owl:Class .
+  [ a owl:Restriction ; owl:onProperty :hasAccount ; owl:someValuesFrom :Account ] .
+}

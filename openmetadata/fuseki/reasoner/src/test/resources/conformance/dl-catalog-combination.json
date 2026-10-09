@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-catalog-combination",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-catalog-combination",
+    "graphs": [
+      "urn:fixture:dl-catalog-combination"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-catalog-combination:entailments",
+  "checks": "dl-catalog-combination.checks.ofn"
+}
