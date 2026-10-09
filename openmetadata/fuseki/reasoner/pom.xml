@@ -1,0 +1,387 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 Collate
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+  The OpenMetadata reasoner worker: a batch program that the Fuseki extension launches as a separate
+  JVM, one step at a time. It never runs inside the Fuseki JVM. The image runs it with
+  -cp '/jena-fuseki/fuseki-server.jar:/jena-fuseki/reasoner/*'; `mvn package` assembles that
+  directory in target/reasoner. Jena is provided by fuseki-server.jar: jena-fuseki-server below is
+  the same shaded jar, byte for byte, so the tests run against exactly the classes the image ships.
+  Libraries that fuseki-server.jar already bundles (newer) are excluded rather than shadowed.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.open-metadata</groupId>
+  <artifactId>openmetadata-fuseki-reasoner</artifactId>
+  <version>6.2.0</version>
+  <name>OpenMetadata Fuseki reasoner worker</name>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <jena.version>6.2.0</jena.version>
+    <owlapi.version>5.5.1</owlapi.version>
+    <hermit.version>1.4.6.519-om.1</hermit.version>
+    <elk.version>0.6.0</elk.version>
+    <guava.version>33.2.0-jre</guava.version>
+    <junit.version>5.11.4</junit.version>
+    <surefire.version>3.1.2</surefire.version>
+    <reasoner.directory>${project.build.directory}/reasoner</reasoner.directory>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- One OWL API version for HermiT (built against 5.5.1) and ELK (built against 5.1.20). -->
+      <dependency>
+        <groupId>net.sourceforge.owlapi</groupId>
+        <artifactId>owlapi-api</artifactId>
+        <version>${owlapi.version}</version>
+        <exclusions>
+          <!-- fuseki-server.jar bundles newer releases of these (Caffeine 3.2.4, commons-io
+               2.22.0, SLF4J 2.0.18); the copies OWL API declares would only be shadowed. -->
+          <exclusion>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>net.sourceforge.owlapi</groupId>
+        <artifactId>owlapi-impl</artifactId>
+        <version>${owlapi.version}</version>
+        <exclusions>
+          <!-- fuseki-server.jar bundles newer releases of these (Caffeine 3.2.4, commons-io
+               2.22.0, SLF4J 2.0.18); the copies OWL API declares would only be shadowed. -->
+          <exclusion>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>net.sourceforge.owlapi</groupId>
+        <artifactId>owlapi-parsers</artifactId>
+        <version>${owlapi.version}</version>
+        <exclusions>
+          <!-- fuseki-server.jar bundles newer releases of these (Caffeine 3.2.4, commons-io
+               2.22.0, SLF4J 2.0.18); the copies OWL API declares would only be shadowed. -->
+          <exclusion>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>net.sourceforge.owlapi</groupId>
+        <artifactId>owlapi-tools</artifactId>
+        <version>${owlapi.version}</version>
+        <exclusions>
+          <!-- fuseki-server.jar bundles newer releases of these (Caffeine 3.2.4, commons-io
+               2.22.0, SLF4J 2.0.18); the copies OWL API declares would only be shadowed. -->
+          <exclusion>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>net.sourceforge.owlapi</groupId>
+        <artifactId>owlapi-apibinding</artifactId>
+        <version>${owlapi.version}</version>
+        <exclusions>
+          <!-- fuseki-server.jar bundles newer releases of these (Caffeine 3.2.4, commons-io
+               2.22.0, SLF4J 2.0.18); the copies OWL API declares would only be shadowed. -->
+          <exclusion>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+          </exclusion>
+          <!-- RDF4J Rio parsers, JSON-LD and Apache HttpClient: not needed to read local documents. -->
+          <exclusion>
+            <groupId>net.sourceforge.owlapi</groupId>
+            <artifactId>owlapi-rio</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>net.sourceforge.owlapi</groupId>
+            <artifactId>owlapi-oboformat</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>com.google.guava</groupId>
+        <artifactId>guava</artifactId>
+        <version>${guava.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>com.google.guava</groupId>
+            <artifactId>listenablefuture</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>com.google.j2objc</groupId>
+            <artifactId>j2objc-annotations</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.checkerframework</groupId>
+            <artifactId>checker-qual</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>com.google.errorprone</groupId>
+            <artifactId>error_prone_annotations</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- First, so it is also first on the test classpath, as on the worker's launch classpath. -->
+    <dependency>
+      <groupId>org.apache.jena</groupId>
+      <artifactId>jena-fuseki-server</artifactId>
+      <version>${jena.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- OpenMetadata build of HermiT (LGPL-3.0), built from source; see the Dockerfile. -->
+    <dependency>
+      <groupId>org.open-metadata</groupId>
+      <artifactId>hermit-reasoner</artifactId>
+      <version>${hermit.version}</version>
+      <exclusions>
+        <!-- An uber jar duplicating every OWL API module; the modules are declared below. -->
+        <exclusion>
+          <groupId>net.sourceforge.owlapi</groupId>
+          <artifactId>owlapi-distribution</artifactId>
+        </exclusion>
+        <!-- Split package with jcl-over-slf4j in fuseki-server.jar, which serves the same API. -->
+        <exclusion>
+          <groupId>commons-logging</groupId>
+          <artifactId>commons-logging</artifactId>
+        </exclusion>
+        <!-- Only HermiT's command line uses it; fuseki-server.jar bundles 1.11.0. -->
+        <exclusion>
+          <groupId>commons-cli</groupId>
+          <artifactId>commons-cli</artifactId>
+        </exclusion>
+        <!-- Woodstox registers itself JVM-wide as the javax.xml.stream implementation through
+             META-INF/services; Axiom uses the JDK's StAX parser instead. The StAX API itself is
+             part of the JDK (java.xml), so the Geronimo copy could never load. -->
+        <exclusion>
+          <groupId>org.codehaus.woodstox</groupId>
+          <artifactId>woodstox-core-asl</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.codehaus.woodstox</groupId>
+          <artifactId>stax2-api</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.geronimo.specs</groupId>
+          <artifactId>geronimo-stax-api_1.0_spec</artifactId>
+        </exclusion>
+        <!-- Axiom's attachment (MIME), mail and XPath support; HermiT uses only XML
+             canonicalization of rdf:XMLLiteral values. That path does need javax.activation
+             (StAXBuilder references DataSource), which the JDK no longer ships, so the Geronimo
+             activation API stays; the dl-xmlliteral fixtures cover it. -->
+        <exclusion>
+          <groupId>org.apache.geronimo.specs</groupId>
+          <artifactId>geronimo-javamail_1.4_spec</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.james</groupId>
+          <artifactId>apache-mime4j-core</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>jaxen</groupId>
+          <artifactId>jaxen</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>owlapi-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>owlapi-impl</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>owlapi-parsers</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>owlapi-tools</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>owlapi-apibinding</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.github.liveontologies</groupId>
+      <artifactId>elk-owlapi</artifactId>
+      <version>${elk.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-api</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+        <includes>
+          <include>openmetadata-reasoner.properties</include>
+        </includes>
+      </resource>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>false</filtering>
+        <excludes>
+          <exclude>openmetadata-reasoner.properties</exclude>
+        </excludes>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.version}</version>
+        <configuration>
+          <trimStackTrace>false</trimStackTrace>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <outputDirectory>${reasoner.directory}</outputDirectory>
+          <archive>
+            <manifestEntries>
+              <Implementation-Title>${project.name}</Implementation-Title>
+              <Implementation-Version>${project.version}</Implementation-Version>
+              <OpenMetadata-HermiT-Version>${hermit.version}</OpenMetadata-HermiT-Version>
+              <OpenMetadata-ELK-Version>${elk.version}</OpenMetadata-ELK-Version>
+              <OpenMetadata-OWLAPI-Version>${owlapi.version}</OpenMetadata-OWLAPI-Version>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <!-- The worker's runtime jars, next to the worker jar: the image copies this directory. -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>reasoner-classpath</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <includeScope>runtime</includeScope>
+              <outputDirectory>${reasoner.directory}</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>${surefire.version}</version>
+        <configuration>
+          <trimStackTrace>false</trimStackTrace>
+          <systemPropertyVariables>
+            <reasoner.directory>${reasoner.directory}</reasoner.directory>
+            <reasoner.dependencies>${project.basedir}/dependencies.sha256</reasoner.dependencies>
+            <reasoner.thirdParty>${project.basedir}/THIRD-PARTY.md</reasoner.thirdParty>
+            <reasoner.worker.jar>${project.build.finalName}.jar</reasoner.worker.jar>
+          </systemPropertyVariables>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
