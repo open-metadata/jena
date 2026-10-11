@@ -23,8 +23,8 @@ ARG FUSEKI_VERSION=6.2.0
 # From https://downloads.apache.org/jena/binaries/apache-jena-fuseki-6.2.0.tar.gz.sha512
 ARG FUSEKI_SHA512=ba65f5867d2d4741b2ed9e2af5a0d4fbb447909894ab2a0c6bc4dac8997f4fe339c87b13c48d45d054977769f0f8bf763ea346b1f7792d5cdc458041bd43a132
 # OpenMetadata's HermiT build (LGPL-3.0), built from source at this commit of
-# https://github.com/open-metadata/hermit-reasoner (branch openmetadata-build, pull request #1).
-# Moves to the released artifact, verified by checksum, once that build is released.
+# https://github.com/open-metadata/hermit-reasoner, which pull request #1 merged into master
+# (0e2dbb2f). Moves to the released artifact, verified by checksum, once that build is released.
 ARG HERMIT_REPOSITORY=https://github.com/open-metadata/hermit-reasoner.git
 ARG HERMIT_COMMIT=bb78447a0563958eb52409e10a592022c14ff934
 ARG HERMIT_VERSION=1.4.6.519-om.1
@@ -64,7 +64,8 @@ RUN mkdir classes \
 # /jena-fuseki/fuseki-server.jar:/jena-fuseki/reasoner/*. Jena is provided by fuseki-server.jar;
 # the build fails if the jar Maven compiled against is not byte for byte the one the image ships,
 # or if any third-party jar differs from dependencies.sha256.
-FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-21 AS reasoner
+# Pinned by digest, so a rebuild of the same commit uses the same Maven and JDK.
+FROM --platform=$BUILDPLATFORM maven:3.9.16-eclipse-temurin-21@sha256:99e61abcff91a9b1333463bd8451fb18495d6eba9250ac66a338b518f8278320 AS reasoner
 ARG FUSEKI_VERSION
 ARG HERMIT_REPOSITORY
 ARG HERMIT_COMMIT

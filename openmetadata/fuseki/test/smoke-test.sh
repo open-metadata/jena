@@ -407,6 +407,9 @@ classify_step contain wedged 3000
 run_step contain wedged &
 check "a worker starts" wait_for_worker
 docker exec "$CONTAINER" kill -STOP "$(worker_pid)"
+check "the worker inherits no ADMIN_PASSWORD" bash -c \
+  "! docker exec $CONTAINER sh -c 'tr \"\\000\" \"\\n\" < /proc/$(worker_pid)/environ' | grep -q ADMIN_PASSWORD"
+check "a step requested while a worker runs is BUSY" [ "$(docker exec "$CONTAINER" "$REASONER" run "$JOBS/contain/load.json" 2> /dev/null | jq -r .status)" = "BUSY" ]
 wait
 check "a stopped worker is killed after its deadline" step_ended contain wedged INCOMPLETE "TIME_BUDGET: the worker did not exit"
 echo "      SIGTERM to exit: $(step_field contain wedged .terminationLatencyMillis) ms, step $(step_field contain wedged .elapsedMillis) ms"
@@ -422,7 +425,8 @@ check "a bulk load starts" wait_for_worker
 sleep 3
 docker exec "$CONTAINER" kill -KILL "$(worker_pid)"
 wait
-check "a worker killed during a write reports INTERRUPTED" step_ended kill load INTERRUPTED KILLED_BY_SIGNAL_9
+# The launcher never sends SIGKILL on its own here, so it reads it as the cgroup OOM killer's.
+check "a worker SIGKILLed during a write reports its memory budget" step_ended kill load INCOMPLETE MEMORY_BUDGET
 check "and leaves no result manifest" docker exec "$CONTAINER" test ! -e "$JOBS/kill/load.result.json"
 check "Fuseki is intact" serving_intact
 rm -f "/tmp/$CONTAINER.serving.nt"
