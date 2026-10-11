@@ -13,13 +13,15 @@
 package org.openmetadata.fuseki.reasoning;
 
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * The reasoning settings, read from the same environment variables the entrypoint validates, so the
- * Fuseki module and the command line in {@code docker exec} agree. Invalid values throw an
- * IllegalArgumentException naming the variable.
+ * The reasoning settings, read from the same environment variables the entrypoint validates and
+ * with the same rules, so the Fuseki module and the command line in {@code docker exec} agree with
+ * the entrypoint: an empty value is unset, and test/reasoning-settings.cases holds the values both
+ * are tested against. Invalid values throw an IllegalArgumentException naming the variable.
  *
  * @param enabled OPENMETADATA_REASONING_ENABLED
  * @param workerHeap H_w, OPENMETADATA_REASONER_HEAP: the worker's -Xms and -Xmx
@@ -61,9 +63,17 @@ public record ReasoningSettings(
 
   public static final int DEFAULT_PAGE_CACHE_FLOOR_PERCENT = 50;
   private static final Pattern PERCENT = Pattern.compile("(0|[1-9][0-9]?|100)%");
-  private static final Pattern POSITIVE_INTEGER = Pattern.compile("[1-9][0-9]{0,5}");
+  private static final Pattern CPU_COUNT = Pattern.compile("[1-9][0-9]{0,5}");
 
-  public static ReasoningSettings fromEnvironment(final Map<String, String> environment) {
+  public static ReasoningSettings fromEnvironment(final Map<String, String> variables) {
+    // The entrypoint treats an empty variable as unset, and docker exec passes it through as is.
+    final Map<String, String> environment = new HashMap<>();
+    variables.forEach(
+        (name, value) -> {
+          if (value != null && !value.isEmpty()) {
+            environment.put(name, value);
+          }
+        });
     final String enabledValue = environment.getOrDefault(ENABLED, "false");
     if (!enabledValue.equals("true") && !enabledValue.equals("false")) {
       throw new IllegalArgumentException(
@@ -112,9 +122,9 @@ public record ReasoningSettings(
     final int cpus;
     if (environment.containsKey(CPUS)) {
       final String value = environment.get(CPUS);
-      if (!POSITIVE_INTEGER.matcher(value).matches()) {
+      if (!CPU_COUNT.matcher(value).matches()) {
         throw new IllegalArgumentException(
-            CPUS + " must be a positive integer, got '" + value + "'");
+            CPUS + " must be a positive integer of at most 6 digits, got '" + value + "'");
       }
       cpus = Integer.parseInt(value);
     } else {

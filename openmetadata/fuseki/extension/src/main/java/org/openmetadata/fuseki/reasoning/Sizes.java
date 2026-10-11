@@ -16,18 +16,21 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Memory sizes in the JVM's -Xmx notation: bytes, or a number with a k, m, g or t suffix. */
+/**
+ * Memory sizes in the JVM's -Xmx notation: bytes, or a number with a k, m, g or t suffix. At most
+ * 13 digits and a byte count that fits in a long, as the entrypoint's size_bytes accepts.
+ */
 public final class Sizes {
   public static final long KIB = 1024;
   public static final long MIB = 1024 * KIB;
   public static final long GIB = 1024 * MIB;
-  private static final Pattern SIZE = Pattern.compile("([1-9][0-9]{0,15})([kKmMgGtT]?)");
+  private static final Pattern SIZE = Pattern.compile("([1-9][0-9]{0,12})([kKmMgGtT]?)");
 
   private Sizes() {}
 
   /** Parses a size; throws IllegalArgumentException naming {@code name} when it is invalid. */
   public static long parse(final String name, final String value) {
-    final Matcher matcher = SIZE.matcher(value == null ? "" : value.trim());
+    final Matcher matcher = SIZE.matcher(value == null ? "" : value);
     if (!matcher.matches()) {
       throw new IllegalArgumentException(
           name + " must be a size such as 512m or 2g, got '" + value + "'");

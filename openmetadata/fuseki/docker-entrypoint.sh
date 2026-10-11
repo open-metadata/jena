@@ -48,21 +48,33 @@ require_positive_integer() {
   [[ "$2" =~ ^[1-9][0-9]*$ ]] || fail "$1 must be a positive integer, got '$2'"
 }
 
+# The reasoner settings are validated here and again by the extension's ReasoningSettings, with
+# the same rules: an empty value is unset, sizes have at most 13 digits and must fit in a signed
+# 64-bit byte count, and CPU counts have at most 6 digits. test/reasoning-settings.cases holds the
+# values both are tested against.
+
 # A size in the JVM's -Xmx notation, at least the given minimum in MiB.
 require_size() {
-  local name="$1" value="$2" minimum_mib="$3"
-  [[ "$value" =~ ^([1-9][0-9]{0,12})([kKmMgGtT]?)$ ]] \
+  local name="$1" value="$2" minimum_mib="$3" bytes
+  bytes=$(size_bytes "$value") \
     || fail "$name must be a size such as 512m or 2g, got '$value'"
-  local number="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2],,}" bytes
-  case "$unit" in
-    k) bytes=$((number * 1024)) ;;
-    m) bytes=$((number * 1024 * 1024)) ;;
-    g) bytes=$((number * 1024 * 1024 * 1024)) ;;
-    t) bytes=$((number * 1024 * 1024 * 1024 * 1024)) ;;
-    *) bytes=$number ;;
-  esac
   [ "$bytes" -ge $((minimum_mib * 1024 * 1024)) ] \
     || fail "$name must be at least ${minimum_mib}m, got '$value'"
+}
+
+# Prints a size in bytes, or fails for a malformed size or one beyond a signed 64-bit count, which
+# bash arithmetic would otherwise wrap around.
+size_bytes() {
+  [[ "$1" =~ ^([1-9][0-9]{0,12})([kKmMgGtT]?)$ ]] || return 1
+  local number="${BASH_REMATCH[1]}" multiplier=1
+  case "${BASH_REMATCH[2],,}" in
+    k) multiplier=1024 ;;
+    m) multiplier=$((1024 * 1024)) ;;
+    g) multiplier=$((1024 * 1024 * 1024)) ;;
+    t) multiplier=$((1024 * 1024 * 1024 * 1024)) ;;
+  esac
+  ((number <= 9223372036854775807 / multiplier)) || return 1
+  echo $((number * multiplier))
 }
 
 # A volume written by an image that ran as root keeps its root-owned files: building this image
@@ -148,12 +160,9 @@ configure_extension() {
   fi
 }
 
-# The reasoner worker is a separate JVM that the extension launches one step at a time, with its
-# own flags; these settings size it and the memory budget checked before every step (README.md).
-# Values are validated whenever they are set, so a typo fails now rather than at enablement. With
-# OPENMETADATA_REASONING_ENABLED unset nothing changes: no worker is ever launched.
-configure_reasoning() {
-  require_boolean OPENMETADATA_REASONING_ENABLED "$OPENMETADATA_REASONING_ENABLED"
+# Values are validated whenever they are set, so a typo fails at start rather than at enablement.
+validate_reasoning_settings() {
+  require_boolean OPENMETADATA_REASONING_ENABLED "${OPENMETADATA_REASONING_ENABLED:-false}"
   if [ -n "${OPENMETADATA_REASONER_HEAP:-}" ]; then
     require_size OPENMETADATA_REASONER_HEAP "$OPENMETADATA_REASONER_HEAP" 16
   fi
@@ -163,13 +172,21 @@ configure_reasoning() {
     require_size OPENMETADATA_REASONER_OFF_HEAP "$OPENMETADATA_REASONER_OFF_HEAP" 512
   fi
   local floor="${OPENMETADATA_REASONER_PAGE_CACHE_FLOOR:-}"
-  if [ -n "$floor" ] \
-    && [[ ! "$floor" =~ ^(0|(0|[1-9][0-9]?|100)%|[1-9][0-9]{0,12}[kKmMgGtT]?)$ ]]; then
+  if [ -n "$floor" ] && [[ ! "$floor" =~ ^(0|[1-9][0-9]?|100)%$ ]] && [ "$floor" != "0" ] \
+    && ! size_bytes "$floor" > /dev/null; then
     fail "OPENMETADATA_REASONER_PAGE_CACHE_FLOOR must be a size such as 2g or a percentage of the serving datasets' size such as 50%, got '$floor'"
   fi
-  if [ -n "${OPENMETADATA_REASONER_CPUS:-}" ]; then
-    require_positive_integer OPENMETADATA_REASONER_CPUS "$OPENMETADATA_REASONER_CPUS"
+  local cpus="${OPENMETADATA_REASONER_CPUS:-}"
+  if [ -n "$cpus" ] && [[ ! "$cpus" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    fail "OPENMETADATA_REASONER_CPUS must be a positive integer of at most 6 digits, got '$cpus'"
   fi
+}
+
+# The reasoner worker is a separate JVM that the extension launches one step at a time, with its
+# own flags; these settings size it and the memory budget checked before every step (README.md).
+# With OPENMETADATA_REASONING_ENABLED unset nothing changes: no worker is ever launched.
+configure_reasoning() {
+  validate_reasoning_settings
   if [ "$OPENMETADATA_REASONING_ENABLED" = "true" ]; then
     [ "$OPENMETADATA_EXTENSION_ENABLED" = "true" ] \
       || fail "OPENMETADATA_REASONING_ENABLED=true needs OPENMETADATA_EXTENSION_ENABLED=true; the extension launches the worker"
@@ -238,21 +255,28 @@ has_config_argument() {
   return 1
 }
 
-prepare_base
-render_shiro
-seed_datasets
-configure_extension
-configure_reasoning
-compose_jvm_args
-render_server_context
+main() {
+  prepare_base
+  render_shiro
+  seed_datasets
+  configure_extension
+  configure_reasoning
+  compose_jvm_args
+  render_server_context
 
-if [ -e "$SERVER_CONFIG" ] && [ "$(basename "${1:-}")" = "fuseki-server" ]; then
-  if has_config_argument "$@"; then
-    log WARN "A --config argument was given; FUSEKI_*_TIMEOUT_MS are ignored. Set ja:context there."
-  else
-    set -- "$@" "--config=$SERVER_CONFIG"
-    log INFO "Server context from environment: $SERVER_CONFIG"
+  if [ -e "$SERVER_CONFIG" ] && [ "$(basename "${1:-}")" = "fuseki-server" ]; then
+    if has_config_argument "$@"; then
+      log WARN "A --config argument was given; FUSEKI_*_TIMEOUT_MS are ignored. Set ja:context there."
+    else
+      set -- "$@" "--config=$SERVER_CONFIG"
+      log INFO "Server context from environment: $SERVER_CONFIG"
+    fi
   fi
-fi
 
-exec "$@"
+  exec "$@"
+}
+
+# Sourcing the script defines its functions without running it, so tests can call the validation.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

@@ -43,8 +43,11 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONER_CPUS` | half the container's CPUs, at least 1 | Worker `-XX:ActiveProcessorCount`. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
-must be positive integers; sizes use the JVM's notation (`512m`, `2g`); booleans must be `true` or
-`false`. The reasoner variables are validated whenever they are set, even with reasoning off.
+must be positive integers; sizes use the JVM's notation (`512m`, `2g`) with at most 13 digits;
+booleans must be `true` or `false`. An empty value counts as unset. The reasoner variables are
+validated whenever they are set, even with reasoning off, and the extension and `bin/reasoner`
+read them with the same rules; `test/reasoning-settings.cases` lists the values both are tested
+against.
 
 Timeouts are server-wide because Fuseki reads them only from an assembler: the entrypoint renders a
 small `--config` file containing a server-level `ja:context`, which applies to every dataset in
