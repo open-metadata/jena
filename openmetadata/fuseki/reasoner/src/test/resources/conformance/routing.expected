@@ -33,6 +33,7 @@ el-equivalence-cycle ELK
 el-intersection-existential ELK
 el-named-hierarchy ELK
 el-property-chain ELK
+el-range-assertions HermiT
 el-realization ELK
 el-reflexive ELK
 el-sub-property-values HermiT

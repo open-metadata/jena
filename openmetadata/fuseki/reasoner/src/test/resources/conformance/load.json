@@ -39,6 +39,7 @@
     "el-named-hierarchy.trig",
     "el-property-chain.trig",
     "el-realization.trig",
+    "el-range-assertions.trig",
     "el-reflexive.trig",
     "el-sub-property-values.trig",
     "el-top-bottom.trig",

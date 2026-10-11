@@ -1,0 +1,15 @@
+# A property range together with assertions: in OWL 2 EL, but ELK 0.6.0 reports possibly
+# incomplete results for it, so the closure is classified with HermiT. The range types the value.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-range-assertions#>
+
+GRAPH <urn:fixture:el-range-assertions> {
+  <http://example.org/el-range-assertions> a owl:Ontology .
+  :manages a owl:ObjectProperty ; rdfs:range :Team .
+  :Team a owl:Class .
+  :alice a owl:NamedIndividual ; :manages :platform .
+  :platform a owl:NamedIndividual .
+}

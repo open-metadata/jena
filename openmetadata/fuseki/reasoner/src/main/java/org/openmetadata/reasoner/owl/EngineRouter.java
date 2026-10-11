@@ -124,6 +124,12 @@ final class EngineRouter {
         gaps.add(type.getName());
       }
     }
+    // ELK 0.6.0 reports a range together with assertions as possibly incomplete at run time; the
+    // classifier would fall back to HermiT, so the closure goes there directly.
+    if (ontology.axioms(AxiomType.OBJECT_PROPERTY_RANGE).findAny().isPresent()
+        && ontology.axioms(AxiomType.OBJECT_PROPERTY_ASSERTION).findAny().isPresent()) {
+      gaps.add("object property ranges together with object property assertions");
+    }
     if (values.needsEngine()) {
       gaps.add("object property values ELK does not compute: " + values.reason());
     }

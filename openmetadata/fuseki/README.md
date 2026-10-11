@@ -346,7 +346,7 @@ git -C /tmp/hermit-reasoner checkout "$commit"
 (cd /tmp/hermit-reasoner && mvn -B -Dmaven.test.skip=true -Dmaven.javadoc.skip=true install)
 ```
 
-`mvn verify` in `reasoner/` runs the conformance suite, which has fifty-two fixtures covering every
+`mvn verify` in `reasoner/` runs the conformance suite, which has fifty-three fixtures covering every
 authorable OWL construct, imports, inconsistency and open-world cases, each with a hand-derived
 expected report. It runs every fixture that routes to ELK through HermiT as well and requires
 identical results, and compares the property values it reads from closures with HermiT's for every
