@@ -12,10 +12,8 @@
  */
 package org.openmetadata.reasoner.owl;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.TreeSet;
+import java.util.Locale;
+import java.util.function.Consumer;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
@@ -27,9 +25,13 @@ import org.apache.jena.vocabulary.RDFS;
 /**
  * The finite, named entailments of one consistent closure, independent of the engine that computed
  * them: the direct class hierarchy, equivalences, unsatisfiable classes, the direct types of named
- * individuals and, from HermiT, their object property values and equalities. Anonymous existential
- * witnesses are never materialized. An inconsistent closure has none of these: the consequences of
- * an inconsistent ontology are not useful facts.
+ * individuals, their object property values and, from HermiT, their equalities. Anonymous
+ * existential witnesses are never materialized. An inconsistent closure has none of these: the
+ * consequences of an inconsistent ontology are not useful facts.
+ *
+ * <p>Facts are not kept here: each is handed to a sink as it is found, so a large closure's output
+ * is never held in memory. The classifier records every fact exactly once; this class counts them
+ * and refuses an output larger than its limit.
  */
 final class Classification {
   enum Kind {
@@ -43,6 +45,10 @@ final class Classification {
 
   /** One entailment over named entities, identified by IRIs. */
   record Fact(Kind kind, String first, String second, String third) {
+    private static final Node SUBCLASS_OF = RDFS.subClassOf.asNode();
+    private static final Node EQUIVALENT_CLASS = OWL2.equivalentClass.asNode();
+    private static final Node SAME_AS = OWL2.sameAs.asNode();
+
     String line() {
       final StringBuilder line =
           new StringBuilder(kind.name()).append(" <").append(first).append('>');
@@ -54,42 +60,87 @@ final class Classification {
       }
       return line.toString();
     }
-  }
 
-  private static final Comparator<Fact> ORDER =
-      Comparator.comparing(Fact::kind)
-          .thenComparing(Fact::first)
-          .thenComparing(Fact::second, Comparator.nullsFirst(Comparator.naturalOrder()))
-          .thenComparing(Fact::third, Comparator.nullsFirst(Comparator.naturalOrder()));
+    /** How many triples {@link #triples} persists for this fact. */
+    int tripleCount() {
+      return switch (kind) {
+        case EQUIVALENT -> 4;
+        case SAME -> 2;
+        default -> 1;
+      };
+    }
+
+    /**
+     * The triples persisted for this fact. Equivalent classes are also written as mutual
+     * subclasses, so {@code rdfs:subClassOf*} property paths cross them; unsatisfiable classes are
+     * written equivalent to {@code owl:Nothing}.
+     */
+    void triples(final Consumer<Triple> out) {
+      final Node one = NodeFactory.createURI(first);
+      final Node other = second == null ? null : NodeFactory.createURI(second);
+      switch (kind) {
+        case SUBCLASS -> out.accept(Triple.create(one, SUBCLASS_OF, other));
+        case EQUIVALENT -> {
+          out.accept(Triple.create(one, EQUIVALENT_CLASS, other));
+          out.accept(Triple.create(other, EQUIVALENT_CLASS, one));
+          out.accept(Triple.create(one, SUBCLASS_OF, other));
+          out.accept(Triple.create(other, SUBCLASS_OF, one));
+        }
+        case UNSATISFIABLE ->
+            out.accept(Triple.create(one, EQUIVALENT_CLASS, OWL2.Nothing.asNode()));
+        case TYPE -> out.accept(Triple.create(one, RDF.type.asNode(), other));
+        case VALUE -> out.accept(Triple.create(one, other, NodeFactory.createURI(third)));
+        case SAME -> {
+          out.accept(Triple.create(one, SAME_AS, other));
+          out.accept(Triple.create(other, SAME_AS, one));
+        }
+      }
+    }
+  }
 
   private final boolean consistent;
-  private final TreeSet<Fact> facts = new TreeSet<>(ORDER);
+  private final Consumer<Fact> sink;
+  private final long maxTriples;
+  private final long[] counts = new long[Kind.values().length];
+  private long triples;
 
-  private Classification(final boolean consistent) {
+  private Classification(
+      final boolean consistent, final Consumer<Fact> sink, final long maxTriples) {
     this.consistent = consistent;
+    this.sink = sink;
+    this.maxTriples = maxTriples;
   }
 
-  static Classification consistent() {
-    return new Classification(true);
+  /**
+   * @param maxTriples the most triples the facts may persist; one more throws {@link
+   *     OutputTooLarge}, so a huge output is refused as soon as it is known
+   */
+  static Classification consistent(final Consumer<Fact> sink, final long maxTriples) {
+    return new Classification(true, sink, maxTriples);
   }
 
   static Classification inconsistent() {
-    return new Classification(false);
+    return new Classification(false, fact -> {}, 0);
   }
 
   boolean isConsistent() {
     return consistent;
   }
 
-  /** Records a fact; false when it was already recorded. */
-  boolean add(final Kind kind, final String first, final String second, final String third) {
+  void add(final Kind kind, final String first, final String second, final String third) {
     if (!consistent) {
       throw new IllegalStateException("An inconsistent closure has no entailments to record");
     }
-    return facts.add(new Fact(kind, first, second, third));
+    final Fact fact = new Fact(kind, first, second, third);
+    triples += fact.tripleCount();
+    if (triples > maxTriples) {
+      throw new OutputTooLarge(maxTriples);
+    }
+    counts[kind.ordinal()]++;
+    sink.accept(fact);
   }
 
-  /** Records an unordered pair once, so the result never depends on iteration order. */
+  /** Records an unordered pair in a canonical order, so the result never depends on iteration. */
   void addPair(final Kind kind, final String one, final String other) {
     if (one.compareTo(other) <= 0) {
       add(kind, one, other, null);
@@ -99,54 +150,22 @@ final class Classification {
   }
 
   long count(final Kind kind) {
-    return facts.stream().filter(fact -> fact.kind() == kind).count();
-  }
-
-  List<String> lines() {
-    return facts.stream().map(Fact::line).toList();
-  }
-
-  /**
-   * The triples persisted for this closure. Equivalent classes are also written as mutual
-   * subclasses, so {@code rdfs:subClassOf*} property paths cross them; unsatisfiable classes are
-   * written equivalent to {@code owl:Nothing}.
-   */
-  List<Triple> triples() {
-    final List<Triple> triples = new ArrayList<>();
-    final Node subClassOf = RDFS.subClassOf.asNode();
-    final Node equivalentClass = OWL2.equivalentClass.asNode();
-    final Node sameAs = OWL2.sameAs.asNode();
-    for (final Fact fact : facts) {
-      final Node first = NodeFactory.createURI(fact.first());
-      final Node second = fact.second() == null ? null : NodeFactory.createURI(fact.second());
-      switch (fact.kind()) {
-        case SUBCLASS -> triples.add(Triple.create(first, subClassOf, second));
-        case EQUIVALENT -> {
-          triples.add(Triple.create(first, equivalentClass, second));
-          triples.add(Triple.create(second, equivalentClass, first));
-          triples.add(Triple.create(first, subClassOf, second));
-          triples.add(Triple.create(second, subClassOf, first));
-        }
-        case UNSATISFIABLE ->
-            triples.add(Triple.create(first, equivalentClass, OWL2.Nothing.asNode()));
-        case TYPE -> triples.add(Triple.create(first, RDF.type.asNode(), second));
-        case VALUE ->
-            triples.add(Triple.create(first, second, NodeFactory.createURI(fact.third())));
-        case SAME -> {
-          triples.add(Triple.create(first, sameAs, second));
-          triples.add(Triple.create(second, sameAs, first));
-        }
-      }
-    }
-    return triples;
+    return counts[kind.ordinal()];
   }
 
   JsonObject countsJson() {
     final JsonObject json = new JsonObject();
     json.put("consistent", consistent);
     for (final Kind kind : Kind.values()) {
-      json.put(kind.name().toLowerCase(java.util.Locale.ROOT), count(kind));
+      json.put(kind.name().toLowerCase(Locale.ROOT), count(kind));
     }
     return json;
+  }
+
+  /** Unchecked, to leave lambdas; the step turns it into a rejection. */
+  static final class OutputTooLarge extends RuntimeException {
+    OutputTooLarge(final long limit) {
+      super("More than " + limit + " entailment triples");
+    }
   }
 }

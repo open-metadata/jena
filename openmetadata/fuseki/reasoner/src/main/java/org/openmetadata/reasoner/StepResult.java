@@ -13,6 +13,7 @@
 package org.openmetadata.reasoner;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,9 +101,12 @@ public final class StepResult {
     return this;
   }
 
-  /** The canonical report lines, written when the step file asks for a report. */
+  /**
+   * The canonical report lines, written when the step file asks for a report. The list is kept, not
+   * copied: a step hands over a list it no longer changes.
+   */
   public StepResult report(final List<String> lines) {
-    this.report = List.copyOf(lines);
+    this.report = Collections.unmodifiableList(lines);
     return this;
   }
 

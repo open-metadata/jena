@@ -12,8 +12,12 @@
  */
 package org.openmetadata.reasoner;
 
+import java.io.BufferedOutputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -150,12 +154,20 @@ public final class StepRunner {
   }
 
   private static void writeReport(final Path path, final List<String> lines) throws IOException {
-    final StringBuilder text = new StringBuilder();
-    lines.forEach(line -> text.append(line).append('\n'));
-    writeAtomically(path, text.toString().getBytes(StandardCharsets.UTF_8));
+    writeAtomically(
+        path,
+        out -> {
+          final Writer writer = new OutputStreamWriter(out, StandardCharsets.UTF_8);
+          for (final String line : lines) {
+            writer.write(line);
+            writer.write('\n');
+          }
+          writer.flush();
+        });
   }
 
-  static void writeAtomically(final Path path, final byte[] content) throws IOException {
+  /** Writes what a {@link Content} produces into {@code path}, through a temporary file. */
+  static void writeAtomically(final Path path, final Content content) throws IOException {
     final Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
     try (FileChannel channel =
         FileChannel.open(
@@ -163,14 +175,19 @@ public final class StepRunner {
             StandardOpenOption.CREATE,
             StandardOpenOption.TRUNCATE_EXISTING,
             StandardOpenOption.WRITE)) {
-      final ByteBuffer buffer = ByteBuffer.wrap(content);
-      while (buffer.hasRemaining()) {
-        channel.write(buffer);
-      }
+      final OutputStream out = new BufferedOutputStream(Channels.newOutputStream(channel), 1 << 16);
+      content.writeTo(out);
+      out.flush();
       channel.force(true);
     }
     Files.move(
         temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+  }
+
+  /** The bytes of a file, written to the stream it is given, which it must not close. */
+  @FunctionalInterface
+  interface Content {
+    void writeTo(OutputStream out) throws IOException;
   }
 
   /** The result manifest. The first write wins, so the watchdog and the step never interleave. */
@@ -198,8 +215,10 @@ public final class StepRunner {
       written = true;
       final long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
       try {
-        final String json = JSON.toString(result.toJson(stepId, kind, elapsed)) + "\n";
-        writeAtomically(path, json.getBytes(StandardCharsets.UTF_8));
+        final byte[] json =
+            (JSON.toString(result.toJson(stepId, kind, elapsed)) + "\n")
+                .getBytes(StandardCharsets.UTF_8);
+        writeAtomically(path, out -> out.write(json));
       } catch (final IOException | RuntimeException e) {
         LOG.error("Cannot write the result manifest {}", path, e);
       }

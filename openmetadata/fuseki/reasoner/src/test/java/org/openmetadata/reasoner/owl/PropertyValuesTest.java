@@ -175,13 +175,19 @@ class PropertyValuesTest {
     final PropertyValues analysis = PropertyValues.analyse(ontology);
     final EngineRouter.Route route = EngineRouter.route(ontology, EngineChoice.AUTO, analysis);
     try (Watchdog watchdog = new Watchdog(120_000, expired -> {})) {
-      final Classification classification =
-          Classifier.run(ontology, route, analysis, List.of(), watchdog, Limits.DEFAULTS)
-              .classification();
       final TreeSet<String> values = new TreeSet<>();
-      classification.lines().stream()
-          .filter(line -> line.startsWith("VALUE "))
-          .forEach(values::add);
+      Classifier.run(
+          ontology,
+          route,
+          analysis,
+          List.of(),
+          watchdog,
+          Limits.DEFAULTS,
+          fact -> {
+            if (fact.kind() == Classification.Kind.VALUE) {
+              assertTrue(values.add(fact.line()), () -> "recorded twice: " + fact.line());
+            }
+          });
       return values;
     }
   }

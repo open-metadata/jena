@@ -19,6 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.zip.GZIPOutputStream;
+import org.apache.jena.dboe.base.file.Location;
+import org.apache.jena.graph.NodeFactory;
+import org.apache.jena.sparql.core.DatasetGraph;
+import org.apache.jena.system.Txn;
+import org.apache.jena.tdb2.DatabaseMgr;
+import org.apache.jena.tdb2.sys.TDBInternal;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -129,6 +135,30 @@ GRAPH <urn:c> {
   }
 
   @Test
+  void aRejectedClassificationLeavesThePreviousOutputGraphIntact() {
+    final String output = ", \"output\": \"urn:c:entailments\"";
+    final Path first =
+        Jobs.write(job, "first", Jobs.classify("first", "http://example.org/c", "urn:c", output));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(first));
+    final long written = outputTriples(first);
+    assertTrue(written > 0);
+    assertEquals(written, graphSize("urn:c:entailments"));
+
+    final Path rejected =
+        Jobs.write(
+            job,
+            "rejected",
+            Jobs.classify(
+                "rejected",
+                "http://example.org/c",
+                "urn:c",
+                output + ", \"limits\": {\"maxOutputTriples\": 1}"));
+    assertEquals(ExitCodes.INPUT_REJECTED, Jobs.run(rejected));
+    assertEquals("OUTPUT_TOO_LARGE", Jobs.firstProblem(rejected));
+    assertEquals(written, graphSize("urn:c:entailments"));
+  }
+
+  @Test
   void aCheckAboutAnUnknownEntityIsInvalidNotNotEntailed() throws Exception {
     Jobs.file(
         job,
@@ -155,6 +185,26 @@ GRAPH <urn:c> {
     Files.writeString(step, "{ broken");
     assertEquals(ExitCodes.INVALID_STEP, Jobs.run(step));
     assertEquals("INVALID_STEP", Jobs.outcome(step));
+  }
+
+  private static long outputTriples(final Path step) {
+    return Jobs.manifest(step)
+        .getObj("entailments")
+        .get("outputTriples")
+        .getAsNumber()
+        .value()
+        .longValue();
+  }
+
+  private long graphSize(final String graph) {
+    final DatasetGraph dataset =
+        DatabaseMgr.connectDatasetGraph(Location.create(job.resolve("working")));
+    try {
+      return Txn.calculateRead(
+          dataset, () -> dataset.getGraph(NodeFactory.createURI(graph)).size());
+    } finally {
+      TDBInternal.expel(dataset);
+    }
   }
 
   private void assertLimit(final String limits, final String code) {

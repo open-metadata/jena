@@ -15,11 +15,12 @@ package org.openmetadata.reasoner.owl;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
-import org.openmetadata.reasoner.InputRejectedException;
 import org.openmetadata.reasoner.Limits;
 import org.openmetadata.reasoner.Watchdog;
 import org.openmetadata.reasoner.owl.Classification.Kind;
@@ -71,8 +72,8 @@ final class Classifier {
       final PropertyValues values,
       final List<Check> checks,
       final Watchdog watchdog,
-      final Limits limits)
-      throws InputRejectedException {
+      final Limits limits,
+      final Consumer<Classification.Fact> sink) {
     String fallback = null;
     if (route.engine() == Engine.ELK) {
       final ElkReasoner elk = Engine.elk(ontology);
@@ -90,7 +91,8 @@ final class Classifier {
                   null,
                   values,
                   watchdog,
-                  limits);
+                  limits,
+                  sink);
           return new Outcome(
               classification,
               Engine.ELK,
@@ -106,7 +108,7 @@ final class Classifier {
     try {
       watchdog.guard(hermit::interrupt);
       final Classification classification =
-          collect(hermit, ontology, hermit.isConsistent(), hermit, values, watchdog, limits);
+          collect(hermit, ontology, hermit.isConsistent(), hermit, values, watchdog, limits, sink);
       final List<CheckResult> results = new ArrayList<>();
       for (final Check check : checks) {
         results.add(checkWithHermit(hermit, classification, check, watchdog));
@@ -131,8 +133,8 @@ final class Classifier {
       final Reasoner hermit,
       final PropertyValues values,
       final Watchdog watchdog,
-      final Limits limits)
-      throws InputRejectedException {
+      final Limits limits,
+      final Consumer<Classification.Fact> sink) {
     if (!consistent) {
       return Classification.inconsistent();
     }
@@ -145,8 +147,8 @@ final class Classifier {
       }
     }
     reasoner.precomputeInferences(inferences.toArray(InferenceType[]::new));
-    final Classification classification = Classification.consistent();
-    final OutputBudget budget = new OutputBudget(limits.maxOutputTriples());
+    final Classification classification =
+        Classification.consistent(sink, limits.maxOutputTriples());
     final Set<OWLClass> unsatisfiable = reasoner.getUnsatisfiableClasses().getEntitiesMinusBottom();
     for (final OWLClass owlClass :
         sorted(ontology.classesInSignature().filter(c -> !c.isBuiltIn()))) {
@@ -154,24 +156,21 @@ final class Classifier {
       final String iri = iri(owlClass);
       if (unsatisfiable.contains(owlClass)) {
         classification.add(Kind.UNSATISFIABLE, iri, null, null);
-        budget.spend(1);
         continue;
       }
+      // Each pair is recorded from its first class in IRI order; built-in classes such as
+      // owl:Thing are never visited, so a pair with one is recorded from the other side.
       for (final OWLClass equivalent : sorted(reasoner.getEquivalentClasses(owlClass).entities())) {
-        if (!equivalent.equals(owlClass) && !equivalent.isOWLNothing()) {
+        if (!equivalent.isOWLNothing()
+            && (equivalent.isBuiltIn() || iri.compareTo(iri(equivalent)) < 0)) {
           classification.addPair(Kind.EQUIVALENT, iri, iri(equivalent));
-          budget.spend(2);
         }
       }
       reasoner
           .getSuperClasses(owlClass, true)
           .entities()
           .filter(superClass -> !superClass.isOWLThing())
-          .forEach(
-              superClass -> {
-                classification.add(Kind.SUBCLASS, iri, iri(superClass), null);
-                budget.spend(1);
-              });
+          .forEach(superClass -> classification.add(Kind.SUBCLASS, iri, iri(superClass), null));
     }
     final List<OWLNamedIndividual> individuals = sorted(ontology.individualsInSignature());
     final Map<OWLNamedIndividual, Set<OWLNamedIndividual>> equal = new HashMap<>();
@@ -182,10 +181,9 @@ final class Classifier {
             reasoner.getSameIndividuals(individual).entities().collect(Collectors.toSet());
         if (same.size() > 1) {
           equal.put(individual, same);
-          for (final OWLNamedIndividual other : same) {
-            if (!other.equals(individual)) {
-              classification.addPair(Kind.SAME, iri(individual), iri(other));
-              budget.spend(1);
+          for (final OWLNamedIndividual other : sorted(same.stream())) {
+            if (iri(individual).compareTo(iri(other)) < 0) {
+              classification.add(Kind.SAME, iri(individual), iri(other), null);
             }
           }
         }
@@ -203,7 +201,6 @@ final class Classifier {
                 (subject, objects) -> {
                   for (final OWLNamedIndividual object : objects) {
                     classification.add(Kind.VALUE, iri(subject), iri(property), iri(object));
-                    budget.spend(1);
                   }
                 });
       }
@@ -215,11 +212,10 @@ final class Classifier {
           .getTypes(individual, true)
           .entities()
           .filter(type -> !type.isOWLThing())
-          .forEach(
-              type -> {
-                classification.add(Kind.TYPE, iri, iri(type), null);
-                budget.spend(1);
-              });
+          .forEach(type -> classification.add(Kind.TYPE, iri, iri(type), null));
+      // Equal individuals can give the same value more than once; only this individual's values
+      // are remembered, so the set stays small.
+      final Set<String> recorded = new HashSet<>();
       for (final OWLNamedIndividual same : equal.getOrDefault(individual, Set.of(individual))) {
         ontology
             .objectPropertyAssertionAxioms(same)
@@ -231,14 +227,13 @@ final class Classifier {
                   final OWLNamedIndividual object = assertion.getObject().asOWLNamedIndividual();
                   for (final OWLNamedIndividual value :
                       equal.getOrDefault(object, Set.of(object))) {
-                    if (classification.add(Kind.VALUE, iri, property, iri(value))) {
-                      budget.spend(1);
+                    if (recorded.add(property + ' ' + iri(value))) {
+                      classification.add(Kind.VALUE, iri, property, iri(value));
                     }
                   }
                 });
       }
     }
-    budget.verify();
     return classification;
   }
 
@@ -337,36 +332,5 @@ final class Classifier {
     return entities
         .sorted(Comparator.comparing(Classifier::iri))
         .collect(Collectors.toCollection(ArrayList::new));
-  }
-
-  /** Counts persisted triples as they are found, so a huge output is refused early. */
-  private static final class OutputBudget {
-    private final long limit;
-    private long spent;
-
-    OutputBudget(final long limit) {
-      this.limit = limit;
-    }
-
-    void spend(final long triples) {
-      spent += triples;
-      if (spent > limit) {
-        throw new OutputTooLarge(limit);
-      }
-    }
-
-    void verify() throws InputRejectedException {
-      if (spent > limit) {
-        throw InputRejectedException.of(
-            "LIMIT_EXCEEDED", "OUTPUT_TOO_LARGE", "More than " + limit + " entailment triples");
-      }
-    }
-  }
-
-  /** Unchecked, to leave lambdas; the step turns it into a rejection. */
-  static final class OutputTooLarge extends RuntimeException {
-    OutputTooLarge(final long limit) {
-      super("More than " + limit + " entailment triples");
-    }
   }
 }

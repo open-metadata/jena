@@ -157,7 +157,12 @@ A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping 
 over an admission limit is rejected with its problems, never classified with something dropped.
 
 Each step writes `<step>.result.json`, and the launcher writes `<step>.status.json` and
-`<step>.log`. The status is one of:
+`<step>.log`. A step file with `"report": true` also gets `<step>.report.txt`, a sorted listing of
+the step's answer for tests and diagnosis; for `CLASSIFY` it repeats the output graph, so it is off
+by default and keeps only its first 100,000 lines. `CLASSIFY` writes entailments into the output
+graph as it finds them, inside one transaction that commits only when the step completes, so a step
+that fails or runs out of budget leaves the previous contents of the graph in place. The status is
+one of:
 
 | Status | Meaning |
 |---|---|
