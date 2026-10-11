@@ -35,9 +35,10 @@ import org.semanticweb.owlapi.reasoner.OWLReasoner;
  * Computes one justification, a minimal set of closure axioms that entails the target: OWL API's
  * black-box explanation over HermiT for an entailment, and a minimal inconsistent subset for an
  * inconsistency, which the black-box generator cannot find because owl:Thing gives it no signature
- * to expand from. Only one is computed, never all of them; the step's deadline bounds the search,
- * and running out of time is INCOMPLETE, not a statement about the entailment. A target that is not
- * entailed is reported NOT_ENTAILED, which proves nothing about its negation.
+ * to expand from. Only one is computed, never all of them. The step's deadline bounds the search in
+ * time and {@code maxExplainChecks} in consistency checks, each on a fresh reasoner; running out of
+ * time is INCOMPLETE and of checks LIMIT_EXCEEDED, neither a statement about the entailment. A
+ * target that is not entailed is reported NOT_ENTAILED, which proves nothing about its negation.
  */
 public final class ExplainStep implements Step {
   @Override
@@ -55,6 +56,7 @@ public final class ExplainStep implements Step {
         step.explain().inconsistency() ? null : parse(step.explain().axiom(), input);
     final String target = axiom == null ? "INCONSISTENCY" : axiom.toString();
 
+    final ExplainBudget budget = new ExplainBudget(step.limits().maxExplainChecks());
     final OWLReasoner reasoner = Engine.hermit(ontology);
     try {
       watchdog.guard(reasoner::interrupt);
@@ -64,7 +66,7 @@ public final class ExplainStep implements Step {
         if (consistent) {
           return answer("NOT_ENTAILED", target, input);
         }
-        justification = new MinimalInconsistentSubset(watchdog).find(ontology);
+        justification = new MinimalInconsistentSubset(watchdog, budget).find(ontology);
       } else {
         if (!consistent) {
           return answer("INCONSISTENT", target, input);
@@ -77,7 +79,11 @@ public final class ExplainStep implements Step {
         final BlackBoxExplanation generator =
             new BlackBoxExplanation(
                 ontology,
-                Engine.explanationFactory(created -> watchdog.guard(created::interrupt)),
+                Engine.explanationFactory(
+                    created -> {
+                      budget.spend();
+                      watchdog.guard(created::interrupt);
+                    }),
                 reasoner);
         try {
           justification = generator.getExplanation(unsatisfiable);
@@ -99,7 +105,10 @@ public final class ExplainStep implements Step {
       return answer("EXPLAINED", target, input)
           .detail("justification", array)
           .detail("justificationSize", axioms.size())
+          .detail("consistencyChecks", budget.spent())
           .report(report);
+    } catch (final ExplainBudget.Exceeded e) {
+      throw InputRejectedException.of("LIMIT_EXCEEDED", "EXPLAIN_CHECKS_EXCEEDED", e.getMessage());
     } finally {
       watchdog.guard(null);
       reasoner.dispose();

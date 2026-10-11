@@ -109,6 +109,7 @@ public final class StepRunner {
                 .detail("interruptLatencyMillis", watchdog.millisSinceExpiry());
       }
       watchdog.finish();
+      result.detail("limits", step.limits().toJson());
       result.detail("worker", watchdog.workerJson());
       if (step.report()) {
         writeReport(

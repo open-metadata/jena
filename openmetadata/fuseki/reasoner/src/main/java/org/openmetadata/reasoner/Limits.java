@@ -17,8 +17,9 @@ import org.apache.jena.atlas.json.JsonValue;
 
 /**
  * Admission limits of one step. Exceeding one rejects the input explicitly; a closure is never
- * truncated into an unsound answer. The defaults are provisional starting values until conformance
- * and scale fixtures measure the envelope that fits the worker heap; callers pass their own.
+ * truncated into an unsound answer. A step file may set any of them; the defaults of the limits
+ * that bound the worker's heap grow with it, so raising the worker heap admits larger closures
+ * without every caller changing its step files.
  *
  * @param maxInputBytes total size of the files one LOAD step reads
  * @param maxClosureTriples triples in one import closure before parsing
@@ -27,6 +28,7 @@ import org.apache.jena.atlas.json.JsonValue;
  * @param maxExpressionDepth nesting depth of any class expression
  * @param maxOutputTriples entailment triples one CLASSIFY step may write
  * @param maxChecks entailment checks in one CLASSIFY step
+ * @param maxExplainChecks consistency checks, each on a fresh reasoner, one EXPLAIN step may run
  */
 public record Limits(
     long maxInputBytes,
@@ -35,14 +37,44 @@ public record Limits(
     long maxIndividuals,
     long maxExpressionDepth,
     long maxOutputTriples,
-    long maxChecks) {
+    long maxChecks,
+    long maxExplainChecks) {
 
-  public static final Limits DEFAULTS =
-      new Limits(16L << 30, 2_000_000, 500_000, 50_000, 32, 5_000_000, 1_000);
+  private static final double GIB = 1L << 30;
+
+  /**
+   * The defaults for a worker heap. Per GiB, measured on a catalog-shaped closure (a transitive
+   * containment hierarchy, its inverse, and three assertions per asset) classified with HermiT:
+   * 50,000 individuals, 297,000 triples and 247,000 logical axioms, writing 581,000 triples, peaked
+   * at 0.67 GiB after collection in a 2 GiB heap. The axiom limit sits below that, because
+   * terminological axioms cost the engines more than assertions.
+   */
+  public static Limits forHeap(final long heapBytes) {
+    final double gib = heapBytes / GIB;
+    return new Limits(
+        16L << 30,
+        scaled(150_000, gib),
+        scaled(100_000, gib),
+        scaled(25_000, gib),
+        32,
+        scaled(500_000, gib),
+        1_000,
+        1_000);
+  }
+
+  /** The defaults for this JVM's heap. */
+  public static Limits defaults() {
+    return forHeap(Runtime.getRuntime().maxMemory());
+  }
+
+  private static long scaled(final long perGib, final double gib) {
+    return Math.max(1, Math.round(perGib * gib));
+  }
 
   static Limits fromJson(final JsonValue value) throws InvalidStepException {
+    final Limits defaults = defaults();
     if (value == null) {
-      return DEFAULTS;
+      return defaults;
     }
     if (!value.isObject()) {
       throw new InvalidStepException("limits must be an object");
@@ -56,30 +88,32 @@ public record Limits(
             "maxIndividuals",
             "maxExpressionDepth",
             "maxOutputTriples",
-            "maxChecks" -> {}
+            "maxChecks",
+            "maxExplainChecks" -> {}
         default -> throw new InvalidStepException("Unknown limit '" + key + "'");
       }
     }
     return new Limits(
-        positive(json, "maxInputBytes", DEFAULTS.maxInputBytes),
-        positive(json, "maxClosureTriples", DEFAULTS.maxClosureTriples),
-        positive(json, "maxLogicalAxioms", DEFAULTS.maxLogicalAxioms),
-        positive(json, "maxIndividuals", DEFAULTS.maxIndividuals),
-        positive(json, "maxExpressionDepth", DEFAULTS.maxExpressionDepth),
-        positive(json, "maxOutputTriples", DEFAULTS.maxOutputTriples),
-        positive(json, "maxChecks", DEFAULTS.maxChecks));
+        positive(json, "maxInputBytes", defaults.maxInputBytes),
+        positive(json, "maxClosureTriples", defaults.maxClosureTriples),
+        positive(json, "maxLogicalAxioms", defaults.maxLogicalAxioms),
+        positive(json, "maxIndividuals", defaults.maxIndividuals),
+        positive(json, "maxExpressionDepth", defaults.maxExpressionDepth),
+        positive(json, "maxOutputTriples", defaults.maxOutputTriples),
+        positive(json, "maxChecks", defaults.maxChecks),
+        positive(json, "maxExplainChecks", defaults.maxExplainChecks));
   }
 
   private static long positive(final JsonObject json, final String key, final long fallback)
       throws InvalidStepException {
-    final JsonValue value = json.get(key);
-    if (value == null) {
+    if (!json.hasKey(key)) {
       return fallback;
     }
-    if (!value.isNumber() || value.getAsNumber().value().longValue() <= 0) {
+    final long value = StepFile.requiredLong(json, key);
+    if (value <= 0) {
       throw new InvalidStepException(key + " must be a positive integer");
     }
-    return value.getAsNumber().value().longValue();
+    return value;
   }
 
   JsonObject toJson() {
@@ -91,6 +125,7 @@ public record Limits(
     json.put("maxExpressionDepth", maxExpressionDepth);
     json.put("maxOutputTriples", maxOutputTriples);
     json.put("maxChecks", maxChecks);
+    json.put("maxExplainChecks", maxExplainChecks);
     return json;
   }
 }

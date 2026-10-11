@@ -20,19 +20,25 @@ import org.semanticweb.owlapi.apibinding.OWLManager;
 import org.semanticweb.owlapi.model.OWLAxiom;
 import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.model.OWLOntologyCreationException;
+import org.semanticweb.owlapi.model.OWLOntologyManager;
 import org.semanticweb.owlapi.reasoner.OWLReasoner;
 
 /**
  * A minimal inconsistent subset of an inconsistent closure's logical axioms: inconsistent, and
  * consistent without any one of its axioms. QuickXplain (Junker, 2004) finds one with a number of
  * consistency checks logarithmic in the closure for a small conflict, each on a fresh HermiT
- * reasoner that the step's deadline can interrupt.
+ * reasoner that the step's deadline can interrupt and {@link ExplainBudget} counts.
  */
 final class MinimalInconsistentSubset {
   private final Watchdog watchdog;
+  private final ExplainBudget budget;
+  // One manager for every candidate subset; each is removed after its check, so the manager holds
+  // one subset at a time rather than one per check.
+  private final OWLOntologyManager manager = OWLManager.createOWLOntologyManager();
 
-  MinimalInconsistentSubset(final Watchdog watchdog) {
+  MinimalInconsistentSubset(final Watchdog watchdog, final ExplainBudget budget) {
     this.watchdog = watchdog;
+    this.budget = budget;
   }
 
   List<OWLAxiom> find(final OWLOntology inconsistent) throws OWLOntologyCreationException {
@@ -42,6 +48,9 @@ final class MinimalInconsistentSubset {
             .map(axiom -> (OWLAxiom) axiom)
             .sorted(Comparator.comparing(Object::toString))
             .toList();
+    if (axioms.isEmpty()) {
+      return List.of();
+    }
     return quickXplain(List.of(), false, axioms);
   }
 
@@ -67,15 +76,19 @@ final class MinimalInconsistentSubset {
 
   private boolean consistent(final List<OWLAxiom> axioms) throws OWLOntologyCreationException {
     Classifier.checkDeadline(watchdog);
-    final OWLOntology subset =
-        OWLManager.createOWLOntologyManager().createOntology(axioms.stream());
-    final OWLReasoner reasoner = Engine.hermit(subset);
+    budget.spend();
+    final OWLOntology subset = manager.createOntology(axioms.stream());
     try {
-      watchdog.guard(reasoner::interrupt);
-      return reasoner.isConsistent();
+      final OWLReasoner reasoner = Engine.hermit(subset);
+      try {
+        watchdog.guard(reasoner::interrupt);
+        return reasoner.isConsistent();
+      } finally {
+        watchdog.guard(null);
+        reasoner.dispose();
+      }
     } finally {
-      watchdog.guard(null);
-      reasoner.dispose();
+      manager.removeOntology(subset);
     }
   }
 

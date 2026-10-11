@@ -156,6 +156,28 @@ worker on it. Every path a step names must stay inside its job directory.
 A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping cannot consume, or
 over an admission limit is rejected with its problems, never classified with something dropped.
 
+A step file may set any admission limit in `limits`; each must be a positive integer. The limits
+that bound the worker's heap default to a size proportional to it, so raising
+`OPENMETADATA_REASONER_HEAP` admits larger closures without changing step files. The manifest
+records the limits a step ran with.
+
+| Limit | Default with the 2 GiB default heap | Proportional to the heap |
+|---|---|---|
+| `maxClosureTriples` | 300,000 | yes |
+| `maxLogicalAxioms` | 200,000 | yes |
+| `maxIndividuals` | 50,000 | yes |
+| `maxOutputTriples` | 1,000,000 | yes |
+| `maxInputBytes` | 16 GiB, read by `LOAD` as a stream | no |
+| `maxExpressionDepth` | 32 | no |
+| `maxChecks` | 1,000 entailment checks per `CLASSIFY` | no |
+| `maxExplainChecks` | 1,000 consistency checks per `EXPLAIN`, each on a fresh reasoner | no |
+
+They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
+transitive containment hierarchy with its inverse and three assertions each (297,000 triples,
+247,000 logical axioms) wrote 581,000 triples in 44 s and peaked at 0.67 GiB of a 2 GiB heap after
+collection. The axiom limit is lower than that, because terminological axioms cost the engines more
+than assertions.
+
 Each step writes `<step>.result.json`, and the launcher writes `<step>.status.json` and
 `<step>.log`. A step file with `"report": true` also gets `<step>.report.txt`, a sorted listing of
 the step's answer for tests and diagnosis; for `CLASSIFY` it repeats the output graph, so it is off

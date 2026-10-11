@@ -103,6 +103,39 @@ class ExplainStepTest {
   }
 
   @Test
+  void aJustificationNeedingMoreChecksThanItsLimitIsRejected() throws Exception {
+    final Path subsumption =
+        Jobs.write(
+            job,
+            "explain-capped",
+            """
+            {"protocol": 1, "stepId": "explain-capped", "kind": "EXPLAIN", "dataset": "working",
+             "timeoutMillis": 60000, "limits": {"maxExplainChecks": 2},
+             "closure": {"root": "http://example.org/el-intersection-existential",
+                         "graphs": ["urn:fixture:el-intersection-existential"]},
+             "explain": {"axiom": "SubClassOf(<%1$sRegisteredCustomer> <%1$sParty>)"}}
+            """
+                .formatted(EXISTENTIAL));
+    assertEquals(ExitCodes.INPUT_REJECTED, Jobs.run(subsumption));
+    assertEquals("LIMIT_EXCEEDED", Jobs.outcome(subsumption));
+    assertEquals("EXPLAIN_CHECKS_EXCEEDED", Jobs.firstProblem(subsumption));
+
+    final Path inconsistency =
+        Jobs.write(
+            job,
+            "explain-inconsistency-capped",
+            """
+            {"protocol": 1, "stepId": "explain-inconsistency-capped", "kind": "EXPLAIN",
+             "dataset": "working", "timeoutMillis": 60000, "limits": {"maxExplainChecks": 2},
+             "closure": {"root": "http://example.org/dl-functional-inconsistent",
+                         "graphs": ["urn:fixture:dl-functional-inconsistent"]},
+             "explain": {"inconsistency": true}}
+            """);
+    assertEquals(ExitCodes.INPUT_REJECTED, Jobs.run(inconsistency));
+    assertEquals("EXPLAIN_CHECKS_EXCEEDED", Jobs.firstProblem(inconsistency));
+  }
+
+  @Test
   void aTargetOutsideTheClosureIsRejected() throws Exception {
     final Path step =
         explain(

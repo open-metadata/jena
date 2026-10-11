@@ -14,6 +14,7 @@ package org.openmetadata.reasoner;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
@@ -314,17 +315,20 @@ public record StepFile(
     return value.getAsString().value();
   }
 
-  private static long requiredLong(final JsonObject json, final String key)
-      throws InvalidStepException {
+  /**
+   * An integer JSON number. A fraction, an exponent with a fraction left over, or a value outside
+   * the range of a long is refused rather than rounded.
+   */
+  static long requiredLong(final JsonObject json, final String key) throws InvalidStepException {
     final JsonValue value = json.get(key);
     if (value == null || !value.isNumber()) {
       throw new InvalidStepException(key + " must be a number");
     }
-    final Number number = value.getAsNumber().value();
-    if (number.doubleValue() != number.longValue()) {
-      throw new InvalidStepException(key + " must be an integer");
+    try {
+      return new BigDecimal(value.getAsNumber().value().toString()).longValueExact();
+    } catch (final NumberFormatException | ArithmeticException e) {
+      throw new InvalidStepException(key + " must be an integer within the range of a long");
     }
-    return number.longValue();
   }
 
   private static boolean booleanValue(final JsonObject json, final String key)

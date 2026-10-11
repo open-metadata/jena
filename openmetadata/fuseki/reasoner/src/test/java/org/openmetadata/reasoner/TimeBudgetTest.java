@@ -56,4 +56,26 @@ class TimeBudgetTest {
     assertEquals("OUTCOME TIME_BUDGET\nPROBLEM TIME_BUDGET\n", Jobs.report(step));
     assertFalse(Files.exists(job.resolve("classify.closure.nt")));
   }
+
+  @Test
+  void anExplanationEndsIncompleteAtItsDeadline() throws Exception {
+    Jobs.file(job, "hard.trig", Jobs.hardOntology(200));
+    assertEquals(
+        ExitCodes.COMPLETED, Jobs.run(Jobs.write(job, "load", Jobs.load("working", "hard.trig"))));
+    final Path step =
+        Jobs.write(
+            job,
+            "explain",
+            """
+{"protocol": 1, "stepId": "explain", "kind": "EXPLAIN", "dataset": "working",
+ "timeoutMillis": 2000,
+ "closure": {"root": "http://example.org/hard", "graphs": ["urn:hard"]},
+ "explain": {"axiom": "SubClassOf(<http://example.org/hard#C0> <http://example.org/hard#C1>)"}}
+""");
+    final long start = System.nanoTime();
+    assertEquals(ExitCodes.TIME_BUDGET, Jobs.run(step));
+    final long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+    assertEquals("TIME_BUDGET", Jobs.outcome(step));
+    assertTrue(elapsed < 2000 + Watchdog.UNWIND_GRACE_MILLIS + 2000, "elapsed " + elapsed + " ms");
+  }
 }

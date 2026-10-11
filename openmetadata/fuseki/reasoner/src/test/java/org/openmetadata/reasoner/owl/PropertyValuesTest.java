@@ -182,7 +182,7 @@ class PropertyValuesTest {
           analysis,
           List.of(),
           watchdog,
-          Limits.DEFAULTS,
+          Limits.defaults(),
           fact -> {
             if (fact.kind() == Classification.Kind.VALUE) {
               assertTrue(values.add(fact.line()), () -> "recorded twice: " + fact.line());
