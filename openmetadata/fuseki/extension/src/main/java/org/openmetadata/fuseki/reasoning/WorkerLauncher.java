@@ -13,11 +13,13 @@
 package org.openmetadata.fuseki.reasoning;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -36,8 +38,10 @@ import org.slf4j.LoggerFactory;
  * Launches one reasoner worker step as a separate JVM and reports how it ended. The worker gets its
  * own JVM flags, never the server's: a fixed heap, capped metaspace, code cache and direct memory,
  * -XX:+ExitOnOutOfMemoryError, a CPU count, and the lowest CPU and I/O priority with the highest
- * OOM-killer score. Before every step the memory budget is checked, and at most one worker runs per
- * container.
+ * OOM-killer score. It gets only the environment variables in {@link #ENVIRONMENT}, so nothing
+ * meant for the server, such as ADMIN_PASSWORD, reaches it. At most one worker runs per container:
+ * the launcher takes the container's worker lock before anything else, then checks the memory
+ * budget.
  *
  * <p>The worker enforces the step's time budget itself and exits with status 5. If it does not exit
  * {@link #DEFAULT_TERMINATE_AFTER_MILLIS} later, it gets SIGTERM, and SIGKILL after {@link
@@ -52,9 +56,18 @@ public final class WorkerLauncher {
   public static final List<String> PRIORITY =
       List.of("choom", "-n", "1000", "--", "nice", "-n", "10", "ionice", "-c2", "-n7");
 
-  /** Environment variables through which a JVM would pick up flags meant for another one. */
-  private static final List<String> FOREIGN_JVM_OPTIONS =
-      List.of("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "JVM_ARGS", "CLASSPATH");
+  /**
+   * The only variables a worker inherits: PATH to find the priority commands, and the locale, time
+   * zone and home directory for file names and log timestamps. The JVM finds itself by its absolute
+   * path, and the worker reads no other variable.
+   */
+  public static final List<String> ENVIRONMENT =
+      List.of("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "HOME");
+
+  /** The worker log keeps this much of the start of a step's output and as much of its end. */
+  static final int LOG_HEAD_BYTES = 512 * 1024;
+
+  static final int LOG_TAIL_BYTES = 512 * 1024;
 
   private static final Logger LOG = LoggerFactory.getLogger(WorkerLauncher.class);
 
@@ -64,10 +77,10 @@ public final class WorkerLauncher {
   private final boolean outsideFuseki;
   private final List<String> priority;
   private final String java;
+  private final Map<String, String> environment;
   private final long terminateAfterMillis;
   private final long killAfterMillis;
-  private volatile Process running;
-  private volatile boolean cancelled;
+  private volatile Run current;
 
   /**
    * @param fusekiHeap H_f as measured in the Fuseki JVM, or -1 outside it
@@ -85,6 +98,7 @@ public final class WorkerLauncher {
         outsideFuseki,
         PRIORITY,
         ProcessHandle.current().info().command().orElse("java"),
+        System.getenv(),
         DEFAULT_TERMINATE_AFTER_MILLIS,
         DEFAULT_KILL_AFTER_MILLIS);
   }
@@ -96,6 +110,7 @@ public final class WorkerLauncher {
       final boolean outsideFuseki,
       final List<String> priority,
       final String java,
+      final Map<String, String> environment,
       final long terminateAfterMillis,
       final long killAfterMillis) {
     this.settings = settings;
@@ -104,6 +119,7 @@ public final class WorkerLauncher {
     this.outsideFuseki = outsideFuseki;
     this.priority = List.copyOf(priority);
     this.java = java;
+    this.environment = Map.copyOf(environment);
     this.terminateAfterMillis = terminateAfterMillis;
     this.killAfterMillis = killAfterMillis;
   }
@@ -135,53 +151,36 @@ public final class WorkerLauncher {
     return Readiness.evaluate(settings, memory, fusekiHeap, true, outsideFuseki);
   }
 
-  /** Requests cancellation of the running step: SIGTERM, then SIGKILL after the grace period. */
+  /**
+   * Cancels the step running now, if there is one: the worker gets SIGTERM at once and SIGKILL
+   * {@link #DEFAULT_KILL_AFTER_MILLIS} later if it is still alive, and the step ends INTERRUPTED.
+   * It has no effect on a later step.
+   */
   public void cancel() {
-    cancelled = true;
-    final Process process = running;
-    if (process != null) {
-      process.destroy();
+    final Run run = current;
+    if (run != null) {
+      run.cancel();
     }
   }
 
   /**
-   * Runs one step and records its outcome in {@code <step>.status.json}; the outcome is returned
-   * even when that file cannot be written, which is logged.
+   * Runs one step and records its outcome in {@code <step>.status.json}, except when the step file
+   * is outside the reasoning root or another worker was running (BUSY), whose step may be this very
+   * file; the outcome is returned even when that file cannot be written, which is logged.
+   * Interrupting the calling thread kills the worker, and this method returns only once the worker
+   * has exited.
    */
   public StepOutcome run(final Path stepFilePath) throws IOException {
     final Path stepFile = stepFilePath.toAbsolutePath().normalize();
-    final StepOutcome outcome = launch(stepFile);
-    final Path statusFile = sibling(stepFile, ".status.json");
-    try {
-      writeAtomically(statusFile, JSON.toString(outcome.toJson()) + "\n");
-    } catch (final IOException e) {
-      LOG.error("Cannot write {}: {}", statusFile, e.toString());
-    }
-    return outcome;
-  }
-
-  private StepOutcome launch(final Path stepFile) throws IOException {
     final Path root = settings.reasoningRoot();
     if (!Files.isDirectory(root)
         || !Files.isRegularFile(stepFile)
         || !stepFile.toRealPath().startsWith(root.toRealPath())) {
+      // Nothing is written next to a file outside the reasoning root.
       return StepOutcome.notLaunched(
           StepOutcome.Status.FAILED,
           "INVALID_STEP: step files must be under " + root + " on the data volume",
           null);
-    }
-    final long timeoutMillis = timeoutMillis(stepFile);
-    if (timeoutMillis <= 0) {
-      return StepOutcome.notLaunched(
-          StepOutcome.Status.FAILED,
-          "INVALID_STEP: timeoutMillis must be a positive integer",
-          null);
-    }
-    final Readiness readiness = readiness();
-    if (!readiness.admits()) {
-      LOG.warn("Reasoner step {} not started: {}", stepFile.getFileName(), readiness.summary());
-      return StepOutcome.notLaunched(
-          StepOutcome.Status.NOT_READY, String.join("; ", readiness.reasons()), readiness);
     }
     try (FileChannel lockFile =
             FileChannel.open(
@@ -189,67 +188,121 @@ public final class WorkerLauncher {
         FileLock lock = tryLock(lockFile)) {
       if (lock == null) {
         return StepOutcome.notLaunched(
-            StepOutcome.Status.BUSY, "Another reasoner worker is running", readiness);
+            StepOutcome.Status.BUSY, "Another reasoner worker is running", null);
       }
-      return execute(stepFile, timeoutMillis, readiness);
+      Files.deleteIfExists(sibling(stepFile, ".status.json"));
+      return record(stepFile, launch(stepFile));
+    }
+  }
+
+  private StepOutcome launch(final Path stepFile) throws IOException {
+    final StepHeader header;
+    try {
+      header = StepHeader.read(stepFile);
+    } catch (final StepHeader.Invalid e) {
+      return StepOutcome.notLaunched(
+          StepOutcome.Status.FAILED, "INVALID_STEP: " + e.getMessage(), null);
+    }
+    final Readiness readiness = readiness();
+    if (!readiness.admits()) {
+      LOG.warn("Reasoner step {} not started: {}", stepFile.getFileName(), readiness.summary());
+      return StepOutcome.notLaunched(
+          StepOutcome.Status.NOT_READY, String.join("; ", readiness.reasons()), readiness);
+    }
+    final Run run = new Run();
+    current = run;
+    try {
+      final StepOutcome outcome = execute(stepFile, header, readiness, run);
+      if (outcome.status() != StepOutcome.Status.SUCCEEDED) {
+        removeLeftovers(stepFile.getParent(), header.stepId());
+      }
+      return outcome;
+    } catch (final IOException e) {
+      removeLeftovers(stepFile.getParent(), header.stepId());
+      throw e;
+    } finally {
+      current = null;
     }
   }
 
   private StepOutcome execute(
-      final Path stepFile, final long timeoutMillis, final Readiness readiness) throws IOException {
+      final Path stepFile, final StepHeader header, final Readiness readiness, final Run run)
+      throws IOException {
     final Path manifestFile = sibling(stepFile, ".result.json");
     Files.deleteIfExists(manifestFile);
     Files.deleteIfExists(sibling(stepFile, ".report.txt"));
     final ProcessBuilder builder = new ProcessBuilder(command(stepFile));
     builder.directory(stepFile.getParent().toFile());
     builder.redirectErrorStream(true);
-    builder.redirectOutput(ProcessBuilder.Redirect.to(sibling(stepFile, ".log").toFile()));
-    final Map<String, String> environment = builder.environment();
-    FOREIGN_JVM_OPTIONS.forEach(environment::remove);
+    final Map<String, String> workerEnvironment = builder.environment();
+    workerEnvironment.clear();
+    for (final String name : ENVIRONMENT) {
+      final String value = environment.get(name);
+      if (value != null) {
+        workerEnvironment.put(name, value);
+      }
+    }
 
     final long start = System.nanoTime();
     final Process process;
-    try {
-      process = builder.start();
-    } catch (final IOException e) {
-      return StepOutcome.notLaunched(
-          StepOutcome.Status.FAILED, "LAUNCH_ERROR: " + e.getMessage(), readiness);
+    synchronized (run) {
+      if (run.cancelled) {
+        return StepOutcome.notLaunched(StepOutcome.Status.INTERRUPTED, "CANCELLED", readiness);
+      }
+      try {
+        process = builder.start();
+      } catch (final IOException e) {
+        return StepOutcome.notLaunched(
+            StepOutcome.Status.FAILED, "LAUNCH_ERROR: " + e.getMessage(), readiness);
+      }
+      run.process = process;
     }
-    running = process;
-    if (cancelled) {
-      process.destroy();
-    }
+    final Thread logger = startLog(process.getInputStream(), sibling(stepFile, ".log"));
+    final long terminateAt =
+        start + TimeUnit.MILLISECONDS.toNanos(header.timeoutMillis() + terminateAfterMillis);
+    final long killAfter = TimeUnit.MILLISECONDS.toNanos(killAfterMillis);
     boolean terminatedByLauncher = false;
-    long terminationLatency = -1;
+    long signalled = 0;
     try {
-      if (!process.waitFor(timeoutMillis + terminateAfterMillis, TimeUnit.MILLISECONDS)) {
-        terminatedByLauncher = true;
-        final long signalled = System.nanoTime();
-        process.destroy();
-        if (!process.waitFor(killAfterMillis, TimeUnit.MILLISECONDS)) {
-          process.destroyForcibly();
-          process.waitFor();
+      while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
+        final long now = System.nanoTime();
+        if (signalled == 0 && run.cancelledAt != 0) {
+          signalled = run.cancelledAt;
         }
-        terminationLatency = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - signalled);
-      } else if (cancelled) {
-        terminationLatency = 0;
+        if (signalled == 0 && now - terminateAt >= 0) {
+          terminatedByLauncher = true;
+          signalled = now;
+          process.destroy();
+        }
+        if (signalled != 0 && now - signalled >= killAfter) {
+          process.destroyForcibly();
+        }
       }
     } catch (final InterruptedException e) {
       process.destroyForcibly();
+      awaitExit(process, killAfterMillis + 5_000);
+      awaitLog(logger);
       Thread.currentThread().interrupt();
       throw new IOException("Interrupted while waiting for the reasoner worker", e);
-    } finally {
-      running = null;
     }
-    final long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+    final long ended = System.nanoTime();
+    awaitLog(logger);
+    // A cancellation that arrives after the worker exited does not change how it ended.
+    final long cancelledAt = run.cancelledAt;
+    final boolean cancelled = cancelledAt != 0 && cancelledAt - ended <= 0;
+    if (signalled == 0 && cancelled) {
+      signalled = cancelledAt;
+    }
+    final long elapsed = TimeUnit.NANOSECONDS.toMillis(ended - start);
+    final long terminationLatency =
+        signalled == 0 ? -1 : TimeUnit.NANOSECONDS.toMillis(ended - signalled);
     final int exit = process.exitValue();
-    final JsonObject manifest = readManifest(manifestFile);
     final StepOutcome outcome =
         classify(
             exit,
             terminatedByLauncher,
             cancelled,
-            manifest,
+            readManifest(manifestFile),
             elapsed,
             terminationLatency,
             readiness);
@@ -281,37 +334,46 @@ public final class WorkerLauncher {
       reason = "TIME_BUDGET: the worker did not exit after its deadline and was terminated";
     } else {
       switch (exit) {
-        case 0 -> {
+        case WorkerExitCodes.COMPLETED -> {
           final boolean succeeded =
               manifest != null && "SUCCEEDED".equals(string(manifest, "status"));
           status = succeeded ? StepOutcome.Status.SUCCEEDED : StepOutcome.Status.FAILED;
           reason =
               succeeded ? string(manifest, "outcome") : "PROTOCOL_ERROR: no valid result manifest";
         }
-        case 1 -> {
+        case WorkerExitCodes.INTERNAL_ERROR -> {
           status = StepOutcome.Status.FAILED;
           reason = "INTERNAL_ERROR";
         }
-        case 2 -> {
+        case WorkerExitCodes.INVALID_STEP -> {
           status = StepOutcome.Status.FAILED;
           reason = "INVALID_STEP";
         }
-        case 3 -> {
+        case WorkerExitCodes.OUT_OF_MEMORY -> {
           status = StepOutcome.Status.INCOMPLETE;
           reason = "MEMORY_BUDGET: the worker exhausted its heap and exited";
         }
-        case 4 -> {
+        case WorkerExitCodes.INPUT_REJECTED -> {
           status = StepOutcome.Status.FAILED;
           reason = manifest == null ? "INPUT_REJECTED" : string(manifest, "outcome");
         }
-        case 5 -> {
+        case WorkerExitCodes.TIME_BUDGET -> {
           status = StepOutcome.Status.INCOMPLETE;
           reason = "TIME_BUDGET";
         }
+        case WorkerExitCodes.SIGKILL -> {
+          // The launcher sends SIGKILL only after its own deadline or a cancellation, both
+          // handled above, so this one came from elsewhere: in a container, almost always the
+          // kernel's out-of-memory killer acting on the cgroup limit.
+          status = StepOutcome.Status.INCOMPLETE;
+          reason =
+              "MEMORY_BUDGET: the worker was killed by SIGKILL, probably by the cgroup"
+                  + " out-of-memory killer";
+        }
         default -> {
-          if (exit > 128 && exit <= 128 + 64) {
+          if (exit > WorkerExitCodes.SIGNALLED && exit <= WorkerExitCodes.SIGNALLED + 64) {
             status = StepOutcome.Status.INTERRUPTED;
-            reason = "KILLED_BY_SIGNAL_" + (exit - 128);
+            reason = "KILLED_BY_SIGNAL_" + (exit - WorkerExitCodes.SIGNALLED);
           } else {
             status = StepOutcome.Status.FAILED;
             reason = "UNEXPECTED_EXIT_" + exit;
@@ -322,20 +384,95 @@ public final class WorkerLauncher {
     return new StepOutcome(status, reason, exit, elapsed, terminationLatency, manifest, readiness);
   }
 
+  private StepOutcome record(final Path stepFile, final StepOutcome outcome) {
+    final Path statusFile = sibling(stepFile, ".status.json");
+    try {
+      writeAtomically(statusFile, JSON.toString(outcome.toJson()) + "\n");
+    } catch (final IOException e) {
+      LOG.error("Cannot write {}: {}", statusFile, e.toString());
+    }
+    return outcome;
+  }
+
+  /**
+   * Removes what a step that did not succeed can leave in its job directory: the exported closure
+   * and half-written files. Only one worker runs at a time and this runs under its lock, so none of
+   * them belongs to a running step.
+   */
+  private static void removeLeftovers(final Path job, final String stepId) {
+    try {
+      Files.deleteIfExists(job.resolve(stepId + ".closure.nt"));
+      try (DirectoryStream<Path> temporary = Files.newDirectoryStream(job, "*.tmp")) {
+        for (final Path file : temporary) {
+          if (Files.isRegularFile(file)) {
+            Files.deleteIfExists(file);
+          }
+        }
+      }
+    } catch (final IOException e) {
+      LOG.warn("Cannot remove the leftovers of step {} in {}: {}", stepId, job, e.toString());
+    }
+  }
+
+  private static Thread startLog(final InputStream output, final Path file) {
+    final Thread thread =
+        new Thread(
+            () -> {
+              try (output) {
+                new BoundedLog(file, LOG_HEAD_BYTES, LOG_TAIL_BYTES).copy(output);
+              } catch (final IOException e) {
+                LOG.warn("Cannot write the worker log {}: {}", file, e.toString());
+              }
+            },
+            "reasoner-worker-log");
+    thread.setDaemon(true);
+    thread.start();
+    return thread;
+  }
+
+  /** The log ends when the worker's output closes, which its exit does. */
+  private static void awaitLog(final Thread logger) {
+    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    boolean interrupted = false;
+    while (logger.isAlive() && System.nanoTime() - deadline < 0) {
+      try {
+        logger.join(TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()) + 1);
+      } catch (final InterruptedException e) {
+        interrupted = true;
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  /**
+   * Waits for a killed worker to exit, ignoring interrupts, so the worker lock is never released
+   * while it is still alive.
+   */
+  private static void awaitExit(final Process process, final long timeoutMillis) {
+    final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+    boolean interrupted = false;
+    while (process.isAlive() && System.nanoTime() - deadline < 0) {
+      try {
+        process.waitFor(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+      } catch (final InterruptedException e) {
+        interrupted = true;
+      }
+    }
+    if (process.isAlive()) {
+      LOG.error("Reasoner worker {} did not exit after SIGKILL", process.pid());
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
   private static FileLock tryLock(final FileChannel channel) throws IOException {
     try {
       return channel.tryLock();
     } catch (final OverlappingFileLockException e) {
       return null;
-    }
-  }
-
-  private static long timeoutMillis(final Path stepFile) {
-    try {
-      final JsonValue value = JSON.read(stepFile.toString()).get("timeoutMillis");
-      return value != null && value.isNumber() ? value.getAsNumber().value().longValue() : -1;
-    } catch (final RuntimeException e) {
-      return -1;
     }
   }
 
@@ -355,6 +492,7 @@ public final class WorkerLauncher {
     return value != null && value.isString() ? value.getAsString().value() : null;
   }
 
+  /** The file the worker or launcher writes next to a step file, named as the worker names it. */
   static Path sibling(final Path stepFile, final String suffix) {
     final String name = stepFile.getFileName().toString();
     final String base = name.endsWith(".json") ? name.substring(0, name.length() - 5) : name;
@@ -377,5 +515,23 @@ public final class WorkerLauncher {
     }
     Files.move(
         temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+  }
+
+  /** One step's worker, and whether it was cancelled; a cancellation never outlives its step. */
+  private static final class Run {
+    private Process process;
+    private boolean cancelled;
+    private volatile long cancelledAt;
+
+    synchronized void cancel() {
+      if (cancelled) {
+        return;
+      }
+      cancelled = true;
+      cancelledAt = System.nanoTime();
+      if (process != null) {
+        process.destroy();
+      }
+    }
   }
 }

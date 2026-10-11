@@ -190,13 +190,23 @@ one of:
 |---|---|
 | `SUCCEEDED` | The step completed; `reason` is its outcome, which may be `INCONSISTENT` |
 | `FAILED` | The step or its input was rejected (`INVALID_STEP`, `INVALID_INPUT`, `NOT_OWL2_DL`, `LIMIT_EXCEEDED`), or the worker failed |
-| `INCOMPLETE` | A budget ran out: `MEMORY_BUDGET` (the worker exhausted its heap, exit status 3) or `TIME_BUDGET` (it passed its deadline); nothing it produced is complete |
-| `INTERRUPTED` | The worker was killed by something other than its own budgets, or cancelled |
+| `INCOMPLETE` | A budget ran out: `MEMORY_BUDGET` (the worker exhausted its heap, exit status 3, or was killed by a `SIGKILL` the launcher did not send, exit status 137, almost always the cgroup out-of-memory killer) or `TIME_BUDGET` (it passed its deadline); nothing it produced is complete |
+| `INTERRUPTED` | The step was cancelled, or the worker was killed by another signal |
 | `NOT_READY` | The memory budget does not fit; no worker was started |
-| `BUSY` | Another worker is running; at most one runs per container |
+| `BUSY` | Another worker is running; at most one runs per container. No status file is written, since the running step may be the same file |
 
 A worker enforces its own deadline by interrupting the engine. If it has not exited 15 seconds
-after its deadline it gets `SIGTERM`, and `SIGKILL` 10 seconds later.
+after its deadline it gets `SIGTERM`, and `SIGKILL` 10 seconds later. Cancelling a step sends
+`SIGTERM` at once and `SIGKILL` 10 seconds later; a cancellation applies only to the step running
+when it is made. If the thread waiting for a worker is interrupted, the worker is killed and the
+launcher waits for it to exit before releasing the worker lock.
+
+The launcher takes the container's worker lock before it checks the memory budget, so a step
+requested while a worker runs ends `BUSY`, never `NOT_READY` because of the running worker's memory.
+After a step that did not succeed, it removes the step's exported closure and any half-written
+`*.tmp` files from the job directory. A step's log keeps the first and the last 512 KiB of the
+worker's output. The worker inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `HOME` from
+the server's environment, so `ADMIN_PASSWORD` and JVM options meant for Fuseki never reach it.
 
 ### Memory budget
 
