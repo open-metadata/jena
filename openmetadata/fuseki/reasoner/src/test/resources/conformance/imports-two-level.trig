@@ -1,0 +1,19 @@
+# A closure of three ontologies, each in its own graph: root imports mid, mid imports base.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/imports-two-level#>
+
+GRAPH <urn:fixture:imports-two-level:root> {
+  <http://example.org/imports-two-level> a owl:Ontology ; owl:imports <http://example.org/imports-two-level/mid> .
+  :RetailCustomer a owl:Class ; rdfs:subClassOf :Customer .
+}
+GRAPH <urn:fixture:imports-two-level:mid> {
+  <http://example.org/imports-two-level/mid> a owl:Ontology ; owl:imports <http://example.org/imports-two-level/base> ; rdfs:label "mid" .
+  :Customer a owl:Class ; rdfs:subClassOf :Party .
+}
+GRAPH <urn:fixture:imports-two-level:base> {
+  <http://example.org/imports-two-level/base> a owl:Ontology .
+  :Party a owl:Class .
+}

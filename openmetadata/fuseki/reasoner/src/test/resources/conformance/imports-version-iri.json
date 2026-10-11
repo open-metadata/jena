@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "imports-version-iri",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/imports-version-iri",
+    "graphs": [
+      "urn:fixture:imports-version-iri:root",
+      "urn:fixture:imports-version-iri:base"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:imports-version-iri:entailments"
+}

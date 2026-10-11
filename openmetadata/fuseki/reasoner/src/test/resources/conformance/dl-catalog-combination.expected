@@ -1,0 +1,21 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/dl-catalog-combination#HighlySensitiveTable> <http://example.org/dl-catalog-combination#customers>) NOT_ENTAILED
+CHECK ClassAssertion(<http://example.org/dl-catalog-combination#SensitiveTable> <http://example.org/dl-catalog-combination#orders>) NOT_ENTAILED
+CHECK ClassAssertion(ObjectComplementOf(<http://example.org/dl-catalog-combination#SensitiveTable>) <http://example.org/dl-catalog-combination#orders>) NOT_ENTAILED
+SUBCLASS <http://example.org/dl-catalog-combination#ContactColumn> <http://example.org/dl-catalog-combination#PiiColumn>
+SUBCLASS <http://example.org/dl-catalog-combination#EmailColumn> <http://example.org/dl-catalog-combination#ContactColumn>
+SUBCLASS <http://example.org/dl-catalog-combination#HighlySensitiveTable> <http://example.org/dl-catalog-combination#SensitiveTable>
+SUBCLASS <http://example.org/dl-catalog-combination#PhoneColumn> <http://example.org/dl-catalog-combination#ContactColumn>
+SUBCLASS <http://example.org/dl-catalog-combination#PiiColumn> <http://example.org/dl-catalog-combination#Column>
+SUBCLASS <http://example.org/dl-catalog-combination#SensitiveTable> <http://example.org/dl-catalog-combination#Table>
+TYPE <http://example.org/dl-catalog-combination#customers> <http://example.org/dl-catalog-combination#SensitiveTable>
+TYPE <http://example.org/dl-catalog-combination#email> <http://example.org/dl-catalog-combination#EmailColumn>
+TYPE <http://example.org/dl-catalog-combination#orderId> <http://example.org/dl-catalog-combination#Column>
+TYPE <http://example.org/dl-catalog-combination#orders> <http://example.org/dl-catalog-combination#Table>
+TYPE <http://example.org/dl-catalog-combination#phone> <http://example.org/dl-catalog-combination#PhoneColumn>
+VALUE <http://example.org/dl-catalog-combination#customers> <http://example.org/dl-catalog-combination#hasColumn> <http://example.org/dl-catalog-combination#email>
+VALUE <http://example.org/dl-catalog-combination#customers> <http://example.org/dl-catalog-combination#hasColumn> <http://example.org/dl-catalog-combination#phone>
+VALUE <http://example.org/dl-catalog-combination#email> <http://example.org/dl-catalog-combination#columnOf> <http://example.org/dl-catalog-combination#customers>
+VALUE <http://example.org/dl-catalog-combination#orderId> <http://example.org/dl-catalog-combination#columnOf> <http://example.org/dl-catalog-combination#orders>
+VALUE <http://example.org/dl-catalog-combination#orders> <http://example.org/dl-catalog-combination#hasColumn> <http://example.org/dl-catalog-combination#orderId>
+VALUE <http://example.org/dl-catalog-combination#phone> <http://example.org/dl-catalog-combination#columnOf> <http://example.org/dl-catalog-combination#customers>

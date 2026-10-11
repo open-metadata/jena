@@ -1,0 +1,17 @@
+# owl:Thing and owl:Nothing in axioms: a class equivalent to owl:Thing is a superclass of every
+# class, and a subclass of owl:Nothing is unsatisfiable.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-top-bottom#>
+
+GRAPH <urn:fixture:el-top-bottom> {
+  <http://example.org/el-top-bottom> a owl:Ontology .
+  :Entity a owl:Class .
+  owl:Thing rdfs:subClassOf :Entity .
+  :Dataset a owl:Class ; rdfs:subClassOf :Asset .
+  :Asset a owl:Class .
+  :Retired a owl:Class ; rdfs:subClassOf owl:Nothing .
+  :Untyped a owl:Class .
+}

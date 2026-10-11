@@ -1,0 +1,4 @@
+Ontology(
+  ClassAssertion(<http://example.org/dl-one-of#EuRegion> <http://example.org/dl-one-of#japan>)
+  SubClassOf(<http://example.org/dl-one-of#EuRegion> <http://example.org/dl-one-of#Gdpr>)
+)

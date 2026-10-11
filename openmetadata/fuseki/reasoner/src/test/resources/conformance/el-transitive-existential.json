@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-transitive-existential",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-transitive-existential",
+    "graphs": [
+      "urn:fixture:el-transitive-existential"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-transitive-existential:entailments"
+}

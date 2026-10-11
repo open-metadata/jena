@@ -1,0 +1,16 @@
+# ONE_OF: a class enumerating named individuals is contained in every class all of them are in.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-one-of#>
+
+GRAPH <urn:fixture:dl-one-of> {
+  <http://example.org/dl-one-of> a owl:Ontology .
+  :Region a owl:Class .
+  :Gdpr a owl:Class .
+  :EuRegion a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:oneOf ( :france :germany ) ] .
+  :france a owl:NamedIndividual , :Region , :Gdpr .
+  :germany a owl:NamedIndividual , :Region , :Gdpr .
+  :japan a owl:NamedIndividual , :Region .
+}

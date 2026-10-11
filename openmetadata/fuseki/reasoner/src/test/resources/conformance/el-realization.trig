@@ -1,0 +1,20 @@
+# Realization: an individual asserted into a complex class gets its most specific named types.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-realization#>
+
+GRAPH <urn:fixture:el-realization> {
+  <http://example.org/el-realization> a owl:Ontology .
+  :manages a owl:ObjectProperty .
+  :Person a owl:Class .
+  :Team a owl:Class .
+  :Employee a owl:Class ; rdfs:subClassOf :Person .
+  :Manager a owl:Class ; owl:equivalentClass [ a owl:Class ;
+      owl:intersectionOf ( :Employee [ a owl:Restriction ; owl:onProperty :manages ; owl:someValuesFrom :Team ] ) ] .
+  :bob a owl:NamedIndividual , [ a owl:Class ;
+      owl:intersectionOf ( :Employee [ a owl:Restriction ; owl:onProperty :manages ; owl:someValuesFrom :Team ] ) ] .
+  :alice a owl:NamedIndividual , :Employee .
+  :carol a owl:NamedIndividual , :Person .
+}

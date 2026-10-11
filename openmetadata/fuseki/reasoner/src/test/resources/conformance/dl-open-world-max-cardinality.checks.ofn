@@ -1,0 +1,4 @@
+Ontology(
+  SameIndividual(<http://example.org/dl-open-world-max-cardinality#mail1> <http://example.org/dl-open-world-max-cardinality#mail2>)
+  DifferentIndividuals(<http://example.org/dl-open-world-max-cardinality#mail1> <http://example.org/dl-open-world-max-cardinality#mail2>)
+)

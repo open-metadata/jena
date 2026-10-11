@@ -1,0 +1,14 @@
+# Disjoint properties: the same pair cannot be related by both.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-disjoint-properties-inconsistent#>
+
+GRAPH <urn:fixture:dl-disjoint-properties-inconsistent> {
+  <http://example.org/dl-disjoint-properties-inconsistent> a owl:Ontology .
+  :approves a owl:ObjectProperty ; owl:propertyDisjointWith :authors .
+  :authors a owl:ObjectProperty .
+  :reviewer a owl:NamedIndividual ; :approves :change1 ; :authors :change1 .
+  :change1 a owl:NamedIndividual .
+}

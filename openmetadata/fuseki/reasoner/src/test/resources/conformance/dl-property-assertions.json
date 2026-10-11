@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-property-assertions",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-property-assertions",
+    "graphs": [
+      "urn:fixture:dl-property-assertions"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-property-assertions:entailments"
+}

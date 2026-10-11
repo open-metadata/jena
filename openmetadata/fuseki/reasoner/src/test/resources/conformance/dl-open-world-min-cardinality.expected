@@ -1,0 +1,6 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(ObjectSomeValuesFrom(<http://example.org/dl-open-world-min-cardinality#hasAccount> <http://example.org/dl-open-world-min-cardinality#Account>) <http://example.org/dl-open-world-min-cardinality#bob>) ENTAILED
+CHECK NegativeObjectPropertyAssertion(<http://example.org/dl-open-world-min-cardinality#hasAccount> <http://example.org/dl-open-world-min-cardinality#bob> <http://example.org/dl-open-world-min-cardinality#acct1>) NOT_ENTAILED
+CHECK ObjectPropertyAssertion(<http://example.org/dl-open-world-min-cardinality#hasAccount> <http://example.org/dl-open-world-min-cardinality#bob> <http://example.org/dl-open-world-min-cardinality#acct1>) NOT_ENTAILED
+TYPE <http://example.org/dl-open-world-min-cardinality#acct1> <http://example.org/dl-open-world-min-cardinality#Account>
+TYPE <http://example.org/dl-open-world-min-cardinality#bob> <http://example.org/dl-open-world-min-cardinality#Customer>

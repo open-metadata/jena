@@ -1,0 +1,13 @@
+# An asymmetric property asserted in both directions.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-asymmetric-inconsistent#>
+
+GRAPH <urn:fixture:dl-asymmetric-inconsistent> {
+  <http://example.org/dl-asymmetric-inconsistent> a owl:Ontology .
+  :parentOf a owl:ObjectProperty , owl:AsymmetricProperty .
+  :termA a owl:NamedIndividual ; :parentOf :termB .
+  :termB a owl:NamedIndividual ; :parentOf :termA .
+}

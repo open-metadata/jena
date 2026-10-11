@@ -1,0 +1,15 @@
+# A sub-property gives its values to its super-property. ELK does not compute property values, so
+# this closure, although in OWL 2 EL, is classified with HermiT.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-sub-property-values#>
+
+GRAPH <urn:fixture:el-sub-property-values> {
+  <http://example.org/el-sub-property-values> a owl:Ontology .
+  :owns a owl:ObjectProperty .
+  :primaryOwnerOf a owl:ObjectProperty ; rdfs:subPropertyOf :owns .
+  :alice a owl:NamedIndividual ; :primaryOwnerOf :dataset1 .
+  :dataset1 a owl:NamedIndividual .
+}

@@ -1,0 +1,4 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/el-transitive-existential#Car> <http://example.org/el-transitive-existential#FleetPart>
+SUBCLASS <http://example.org/el-transitive-existential#CarPart> <http://example.org/el-transitive-existential#FleetPart>
+SUBCLASS <http://example.org/el-transitive-existential#Wheel> <http://example.org/el-transitive-existential#CarPart>

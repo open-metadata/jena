@@ -1,0 +1,17 @@
+# A concept mapping expressed as owl:sameAs between two individuals of the closure: they are one
+# individual, so each has the other's types and values.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-same-as-individuals#>
+PREFIX ext:  <http://example.com/crm#>
+
+GRAPH <urn:fixture:dl-same-as-individuals> {
+  <http://example.org/dl-same-as-individuals> a owl:Ontology .
+  :servedBy a owl:ObjectProperty .
+  :Customer a owl:Class .
+  :acme a owl:NamedIndividual , :Customer ; owl:sameAs ext:acmeCorp .
+  ext:acmeCorp a owl:NamedIndividual ; :servedBy :team1 .
+  :team1 a owl:NamedIndividual .
+}

@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-xsd-date",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-xsd-date",
+    "graphs": [
+      "urn:fixture:invalid-xsd-date"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-xsd-date:entailments"
+}

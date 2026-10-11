@@ -1,0 +1,7 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/dl-has-value#Partner> <http://example.org/dl-has-value#EuResident>
+TYPE <http://example.org/dl-has-value#c1> <http://example.org/dl-has-value#EuResident>
+TYPE <http://example.org/dl-has-value#c2> <http://example.org/dl-has-value#Verified>
+TYPE <http://example.org/dl-has-value#c4> <http://example.org/dl-has-value#Partner>
+VALUE <http://example.org/dl-has-value#c1> <http://example.org/dl-has-value#residentOf> <http://example.org/dl-has-value#eu>
+VALUE <http://example.org/dl-has-value#c4> <http://example.org/dl-has-value#residentOf> <http://example.org/dl-has-value#eu>

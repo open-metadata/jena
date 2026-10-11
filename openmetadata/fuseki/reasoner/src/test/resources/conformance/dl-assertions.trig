@@ -1,0 +1,24 @@
+# Explicitly modeled individuals: class assertions with named and complex classes, object
+# property assertions and data property assertions with typed values.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-assertions#>
+
+GRAPH <urn:fixture:dl-assertions> {
+  <http://example.org/dl-assertions> a owl:Ontology .
+  :ownedBy a owl:ObjectProperty ; rdfs:range :Team .
+  :tier a owl:DatatypeProperty .
+  :Dataset a owl:Class .
+  :Team a owl:Class .
+  :OwnedDataset a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:intersectionOf ( :Dataset
+      [ a owl:Restriction ; owl:onProperty :ownedBy ; owl:someValuesFrom :Team ] ) ] .
+  :GoldDataset a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:intersectionOf ( :Dataset
+      [ a owl:Restriction ; owl:onProperty :tier ; owl:hasValue "gold" ] ) ] .
+  :ds1 a owl:NamedIndividual , :Dataset ; :ownedBy :platform ; :tier "gold" .
+  :ds2 a owl:NamedIndividual , [ a owl:Class ; owl:intersectionOf ( :Dataset
+      [ a owl:Restriction ; owl:onProperty :ownedBy ; owl:someValuesFrom :Team ] ) ] .
+  :ds3 a owl:NamedIndividual , :Dataset ; :tier "silver" .
+  :platform a owl:NamedIndividual .
+}

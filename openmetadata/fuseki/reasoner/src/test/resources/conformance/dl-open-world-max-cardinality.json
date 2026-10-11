@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-open-world-max-cardinality",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-open-world-max-cardinality",
+    "graphs": [
+      "urn:fixture:dl-open-world-max-cardinality"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-open-world-max-cardinality:entailments",
+  "checks": "dl-open-world-max-cardinality.checks.ofn"
+}

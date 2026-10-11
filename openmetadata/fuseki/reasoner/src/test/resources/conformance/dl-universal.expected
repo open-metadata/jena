@@ -1,0 +1,9 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/dl-universal#Customer> <http://example.org/dl-universal#p1>) ENTAILED
+CHECK ClassAssertion(<http://example.org/dl-universal#Customer> <http://example.org/dl-universal#p2>) NOT_ENTAILED
+CHECK ClassAssertion(ObjectComplementOf(<http://example.org/dl-universal#Customer>) <http://example.org/dl-universal#p2>) NOT_ENTAILED
+CHECK ClassAssertion(ObjectSomeValuesFrom(<http://example.org/dl-universal#ownedBy> owl:Thing) <http://example.org/dl-universal#acct2>) NOT_ENTAILED
+TYPE <http://example.org/dl-universal#acct1> <http://example.org/dl-universal#Account>
+TYPE <http://example.org/dl-universal#acct2> <http://example.org/dl-universal#Account>
+TYPE <http://example.org/dl-universal#p1> <http://example.org/dl-universal#Customer>
+VALUE <http://example.org/dl-universal#acct1> <http://example.org/dl-universal#ownedBy> <http://example.org/dl-universal#p1>

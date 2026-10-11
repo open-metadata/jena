@@ -1,0 +1,20 @@
+# Data cardinalities: qualified with owl:onDataRange and unqualified; the property's declaration,
+# not the restriction, says it is a data property.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-cardinality-data#>
+
+GRAPH <urn:fixture:dl-cardinality-data> {
+  <http://example.org/dl-cardinality-data> a owl:Ontology .
+  :code a owl:DatatypeProperty .
+  :TwoCodes a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :code ;
+      owl:minQualifiedCardinality "2"^^xsd:nonNegativeInteger ; owl:onDataRange xsd:string ] .
+  :OneCode a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :code ;
+      owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .
+  :ExactlyTwoCodes a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :code ;
+      owl:qualifiedCardinality "2"^^xsd:nonNegativeInteger ; owl:onDataRange xsd:string ] .
+  :Clash a owl:Class ; rdfs:subClassOf :TwoCodes , :OneCode .
+  :item a owl:NamedIndividual ; :code "A1"^^xsd:string , "B2"^^xsd:string .
+}

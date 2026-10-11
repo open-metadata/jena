@@ -1,0 +1,13 @@
+# xsd:date is not in the OWL 2 datatype map: a DATE attribute must be mapped to a datatype that is,
+# such as xsd:dateTime, or the closure is rejected.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/invalid-xsd-date#>
+
+GRAPH <urn:fixture:invalid-xsd-date> {
+  <http://example.org/invalid-xsd-date> a owl:Ontology .
+  :effectiveDate a owl:DatatypeProperty ; rdfs:range xsd:date .
+  :term1 a owl:NamedIndividual ; :effectiveDate "2026-10-08"^^xsd:date .
+}

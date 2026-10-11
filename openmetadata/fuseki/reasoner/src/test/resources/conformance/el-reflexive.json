@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-reflexive",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-reflexive",
+    "graphs": [
+      "urn:fixture:el-reflexive"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-reflexive:entailments"
+}

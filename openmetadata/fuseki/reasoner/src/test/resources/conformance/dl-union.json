@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-union",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-union",
+    "graphs": [
+      "urn:fixture:dl-union"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-union:entailments",
+  "checks": "dl-union.checks.ofn"
+}

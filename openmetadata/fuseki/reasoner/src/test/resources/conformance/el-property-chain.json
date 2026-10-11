@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-property-chain",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-property-chain",
+    "graphs": [
+      "urn:fixture:el-property-chain"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-property-chain:entailments"
+}

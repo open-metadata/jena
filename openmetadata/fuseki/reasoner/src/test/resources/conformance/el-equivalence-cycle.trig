@@ -1,0 +1,14 @@
+# A subclass cycle makes its classes equivalent; a subclass of one is a subclass of all.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-equivalence-cycle#>
+
+GRAPH <urn:fixture:el-equivalence-cycle> {
+  <http://example.org/el-equivalence-cycle> a owl:Ontology .
+  :Client a owl:Class ; rdfs:subClassOf :Customer .
+  :Customer a owl:Class ; rdfs:subClassOf :Buyer .
+  :Buyer a owl:Class ; rdfs:subClassOf :Client .
+  :VipClient a owl:Class ; rdfs:subClassOf :Client .
+}

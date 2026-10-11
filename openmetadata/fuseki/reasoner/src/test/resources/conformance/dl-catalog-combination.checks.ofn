@@ -1,0 +1,5 @@
+Ontology(
+  ClassAssertion(<http://example.org/dl-catalog-combination#HighlySensitiveTable> <http://example.org/dl-catalog-combination#customers>)
+  ClassAssertion(<http://example.org/dl-catalog-combination#SensitiveTable> <http://example.org/dl-catalog-combination#orders>)
+  ClassAssertion(ObjectComplementOf(<http://example.org/dl-catalog-combination#SensitiveTable>) <http://example.org/dl-catalog-combination#orders>)
+)

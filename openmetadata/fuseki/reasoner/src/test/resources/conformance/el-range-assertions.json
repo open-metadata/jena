@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-range-assertions",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-range-assertions",
+    "graphs": [
+      "urn:fixture:el-range-assertions"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-range-assertions:entailments"
+}

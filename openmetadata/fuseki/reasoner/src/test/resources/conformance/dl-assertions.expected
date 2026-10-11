@@ -1,0 +1,9 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/dl-assertions#GoldDataset> <http://example.org/dl-assertions#Dataset>
+SUBCLASS <http://example.org/dl-assertions#OwnedDataset> <http://example.org/dl-assertions#Dataset>
+TYPE <http://example.org/dl-assertions#ds1> <http://example.org/dl-assertions#GoldDataset>
+TYPE <http://example.org/dl-assertions#ds1> <http://example.org/dl-assertions#OwnedDataset>
+TYPE <http://example.org/dl-assertions#ds2> <http://example.org/dl-assertions#OwnedDataset>
+TYPE <http://example.org/dl-assertions#ds3> <http://example.org/dl-assertions#Dataset>
+TYPE <http://example.org/dl-assertions#platform> <http://example.org/dl-assertions#Team>
+VALUE <http://example.org/dl-assertions#ds1> <http://example.org/dl-assertions#ownedBy> <http://example.org/dl-assertions#platform>

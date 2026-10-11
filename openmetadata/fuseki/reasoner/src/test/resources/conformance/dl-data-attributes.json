@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-data-attributes",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-data-attributes",
+    "graphs": [
+      "urn:fixture:dl-data-attributes"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-data-attributes:entailments"
+}

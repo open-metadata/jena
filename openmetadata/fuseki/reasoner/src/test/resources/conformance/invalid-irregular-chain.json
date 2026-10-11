@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-irregular-chain",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-irregular-chain",
+    "graphs": [
+      "urn:fixture:invalid-irregular-chain"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-irregular-chain:entailments"
+}

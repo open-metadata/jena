@@ -1,0 +1,8 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/dl-one-of#EuRegion> <http://example.org/dl-one-of#japan>) NOT_ENTAILED
+CHECK SubClassOf(<http://example.org/dl-one-of#EuRegion> <http://example.org/dl-one-of#Gdpr>) ENTAILED
+SUBCLASS <http://example.org/dl-one-of#EuRegion> <http://example.org/dl-one-of#Gdpr>
+SUBCLASS <http://example.org/dl-one-of#EuRegion> <http://example.org/dl-one-of#Region>
+TYPE <http://example.org/dl-one-of#france> <http://example.org/dl-one-of#EuRegion>
+TYPE <http://example.org/dl-one-of#germany> <http://example.org/dl-one-of#EuRegion>
+TYPE <http://example.org/dl-one-of#japan> <http://example.org/dl-one-of#Region>

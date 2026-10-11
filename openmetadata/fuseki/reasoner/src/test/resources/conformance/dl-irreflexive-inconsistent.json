@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-irreflexive-inconsistent",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-irreflexive-inconsistent",
+    "graphs": [
+      "urn:fixture:dl-irreflexive-inconsistent"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-irreflexive-inconsistent:entailments"
+}

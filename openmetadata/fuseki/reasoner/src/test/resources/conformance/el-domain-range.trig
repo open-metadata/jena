@@ -1,0 +1,18 @@
+# Property domain and range: an existential on the property entails the domain, and the range
+# refines the filler.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-domain-range#>
+
+GRAPH <urn:fixture:el-domain-range> {
+  <http://example.org/el-domain-range> a owl:Ontology .
+  :manages a owl:ObjectProperty ; rdfs:domain :Manager ; rdfs:range :Team .
+  :Manager a owl:Class .
+  :Team a owl:Class .
+  :Group a owl:Class .
+  :Lead a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :manages ; owl:someValuesFrom :Group ] .
+  :TeamGroupManager a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :manages ;
+      owl:someValuesFrom [ a owl:Class ; owl:intersectionOf ( :Group :Team ) ] ] .
+}

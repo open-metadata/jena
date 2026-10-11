@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-same-as-individuals",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-same-as-individuals",
+    "graphs": [
+      "urn:fixture:dl-same-as-individuals"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-same-as-individuals:entailments"
+}

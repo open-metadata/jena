@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-asymmetric-inconsistent",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-asymmetric-inconsistent",
+    "graphs": [
+      "urn:fixture:dl-asymmetric-inconsistent"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-asymmetric-inconsistent:entailments"
+}

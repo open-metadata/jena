@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-transitive-functional",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-transitive-functional",
+    "graphs": [
+      "urn:fixture:invalid-transitive-functional"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-transitive-functional:entailments"
+}

@@ -1,0 +1,20 @@
+# Functional and inverse-functional properties identify individuals: two different IRIs can be
+# the same individual, so this is an equality, not an inconsistency.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-functional#>
+
+GRAPH <urn:fixture:dl-functional> {
+  <http://example.org/dl-functional> a owl:Ontology .
+  :primaryOwner a owl:ObjectProperty , owl:FunctionalProperty .
+  :hasEmail a owl:ObjectProperty , owl:InverseFunctionalProperty .
+  :Team a owl:Class .
+  :dataset1 a owl:NamedIndividual ; :primaryOwner :ownerA , :ownerB .
+  :ownerA a owl:NamedIndividual , :Team .
+  :ownerB a owl:NamedIndividual .
+  :userX a owl:NamedIndividual ; :hasEmail :mailbox1 .
+  :userY a owl:NamedIndividual ; :hasEmail :mailbox1 .
+  :mailbox1 a owl:NamedIndividual .
+}

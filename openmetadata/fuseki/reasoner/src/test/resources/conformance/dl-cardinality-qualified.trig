@@ -1,0 +1,22 @@
+# Qualified object cardinalities (owl:onClass): MIN, MAX and EXACT, and their interaction.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-cardinality-qualified#>
+
+GRAPH <urn:fixture:dl-cardinality-qualified> {
+  <http://example.org/dl-cardinality-qualified> a owl:Ontology .
+  :hasSteward a owl:ObjectProperty .
+  :Person a owl:Class .
+  :Engineer a owl:Class ; rdfs:subClassOf :Person .
+  :WellStewarded a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :hasSteward ;
+      owl:minQualifiedCardinality "2"^^xsd:nonNegativeInteger ; owl:onClass :Person ] .
+  :SingleStewarded a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :hasSteward ;
+      owl:maxQualifiedCardinality "1"^^xsd:nonNegativeInteger ; owl:onClass :Person ] .
+  :CriticalDataset a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :hasSteward ;
+      owl:minQualifiedCardinality "2"^^xsd:nonNegativeInteger ; owl:onClass :Engineer ] .
+  :PairStewarded a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :hasSteward ;
+      owl:qualifiedCardinality "2"^^xsd:nonNegativeInteger ; owl:onClass :Person ] .
+  :Conflicted a owl:Class ; rdfs:subClassOf :CriticalDataset , :SingleStewarded .
+}

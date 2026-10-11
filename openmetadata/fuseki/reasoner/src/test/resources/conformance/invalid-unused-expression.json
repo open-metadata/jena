@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-unused-expression",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-unused-expression",
+    "graphs": [
+      "urn:fixture:invalid-unused-expression"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-unused-expression:entailments"
+}

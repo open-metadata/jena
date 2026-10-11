@@ -1,0 +1,9 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/el-asserted-values#SensitiveTable> <http://example.org/el-asserted-values#Table>
+TYPE <http://example.org/el-asserted-values#customers> <http://example.org/el-asserted-values#SensitiveTable>
+TYPE <http://example.org/el-asserted-values#email> <http://example.org/el-asserted-values#PiiColumn>
+TYPE <http://example.org/el-asserted-values#orders> <http://example.org/el-asserted-values#Table>
+TYPE <http://example.org/el-asserted-values#sales> <http://example.org/el-asserted-values#Team>
+VALUE <http://example.org/el-asserted-values#customers> <http://example.org/el-asserted-values#hasColumn> <http://example.org/el-asserted-values#email>
+VALUE <http://example.org/el-asserted-values#customers> <http://example.org/el-asserted-values#ownedBy> <http://example.org/el-asserted-values#sales>
+VALUE <http://example.org/el-asserted-values#orders> <http://example.org/el-asserted-values#hasColumn> <http://example.org/el-asserted-values#orderId>

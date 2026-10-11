@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "imports-missing",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/imports-missing",
+    "graphs": [
+      "urn:fixture:imports-missing"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:imports-missing:entailments"
+}

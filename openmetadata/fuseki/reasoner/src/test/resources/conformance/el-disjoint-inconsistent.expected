@@ -1,0 +1,2 @@
+OUTCOME INCONSISTENT
+CHECK SubClassOf(<http://example.org/el-disjoint-inconsistent#Report> <http://example.org/el-disjoint-inconsistent#Dashboard>) INCONSISTENT

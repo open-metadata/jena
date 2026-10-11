@@ -1,0 +1,15 @@
+# Union: a class contained in a union of classes is contained in their common superclass.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-union#>
+
+GRAPH <urn:fixture:dl-union> {
+  <http://example.org/dl-union> a owl:Ontology .
+  :Party a owl:Class .
+  :Person a owl:Class ; rdfs:subClassOf :Party .
+  :Organization a owl:Class ; rdfs:subClassOf :Party .
+  :Stakeholder a owl:Class ; rdfs:subClassOf [ a owl:Class ; owl:unionOf ( :Person :Organization ) ] .
+  :Contact a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:unionOf ( :Person :Organization ) ] .
+}

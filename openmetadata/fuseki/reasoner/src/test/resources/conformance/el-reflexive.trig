@@ -1,0 +1,14 @@
+# A reflexive property relates everything to itself, so every Topic is Linked to a Topic.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-reflexive#>
+
+GRAPH <urn:fixture:el-reflexive> {
+  <http://example.org/el-reflexive> a owl:Ontology .
+  :relatedTo a owl:ObjectProperty , owl:ReflexiveProperty .
+  :Item a owl:Class .
+  :Topic a owl:Class ; rdfs:subClassOf :Item .
+  :Linked a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :relatedTo ; owl:someValuesFrom :Topic ] .
+}

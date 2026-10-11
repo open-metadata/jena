@@ -1,0 +1,13 @@
+OUTCOME CLASSIFIED
+CHECK ClassAssertion(<http://example.org/dl-functional#Team> <http://example.org/dl-functional#ownerB>) ENTAILED
+CHECK DifferentIndividuals(<http://example.org/dl-functional#userX> <http://example.org/dl-functional#userY>) NOT_ENTAILED
+CHECK SameIndividual(<http://example.org/dl-functional#ownerA> <http://example.org/dl-functional#ownerB>) ENTAILED
+CHECK SameIndividual(<http://example.org/dl-functional#userX> <http://example.org/dl-functional#userY>) ENTAILED
+SAME <http://example.org/dl-functional#ownerA> <http://example.org/dl-functional#ownerB>
+SAME <http://example.org/dl-functional#userX> <http://example.org/dl-functional#userY>
+TYPE <http://example.org/dl-functional#ownerA> <http://example.org/dl-functional#Team>
+TYPE <http://example.org/dl-functional#ownerB> <http://example.org/dl-functional#Team>
+VALUE <http://example.org/dl-functional#dataset1> <http://example.org/dl-functional#primaryOwner> <http://example.org/dl-functional#ownerA>
+VALUE <http://example.org/dl-functional#dataset1> <http://example.org/dl-functional#primaryOwner> <http://example.org/dl-functional#ownerB>
+VALUE <http://example.org/dl-functional#userX> <http://example.org/dl-functional#hasEmail> <http://example.org/dl-functional#mailbox1>
+VALUE <http://example.org/dl-functional#userY> <http://example.org/dl-functional#hasEmail> <http://example.org/dl-functional#mailbox1>

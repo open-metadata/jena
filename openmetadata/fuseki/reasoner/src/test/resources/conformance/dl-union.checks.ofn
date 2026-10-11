@@ -1,0 +1,4 @@
+Ontology(
+  SubClassOf(<http://example.org/dl-union#Stakeholder> <http://example.org/dl-union#Party>)
+  SubClassOf(<http://example.org/dl-union#Stakeholder> <http://example.org/dl-union#Person>)
+)

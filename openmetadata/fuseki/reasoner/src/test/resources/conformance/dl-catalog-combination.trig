@@ -1,0 +1,28 @@
+# Several constructs together, shaped like catalog metadata: an inverse property, an existential
+# definition over it, a qualified cardinality, a union and explicit assertions.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-catalog-combination#>
+
+GRAPH <urn:fixture:dl-catalog-combination> {
+  <http://example.org/dl-catalog-combination> a owl:Ontology .
+  :hasColumn a owl:ObjectProperty ; owl:inverseOf :columnOf .
+  :columnOf a owl:ObjectProperty .
+  :Table a owl:Class .
+  :Column a owl:Class .
+  :PiiColumn a owl:Class ; rdfs:subClassOf :Column .
+  :EmailColumn a owl:Class ; rdfs:subClassOf :PiiColumn .
+  :PhoneColumn a owl:Class ; rdfs:subClassOf :PiiColumn .
+  :ContactColumn a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:unionOf ( :EmailColumn :PhoneColumn ) ] .
+  :SensitiveTable a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:intersectionOf ( :Table
+      [ a owl:Restriction ; owl:onProperty :hasColumn ; owl:someValuesFrom :PiiColumn ] ) ] .
+  :HighlySensitiveTable a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:intersectionOf ( :Table
+      [ a owl:Restriction ; owl:onProperty :hasColumn ; owl:minQualifiedCardinality "2"^^xsd:nonNegativeInteger ; owl:onClass :PiiColumn ] ) ] .
+  :customers a owl:NamedIndividual , :Table .
+  :email a owl:NamedIndividual , :EmailColumn ; :columnOf :customers .
+  :phone a owl:NamedIndividual , :PhoneColumn ; :columnOf :customers .
+  :orders a owl:NamedIndividual , :Table ; :hasColumn :orderId .
+  :orderId a owl:NamedIndividual , :Column .
+}

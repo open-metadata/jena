@@ -1,0 +1,3 @@
+OUTCOME NOT_OWL2_DL
+PROBLEM UseOfDefinedDatatypeInLiteral
+PROBLEM UseOfUndeclaredDatatype

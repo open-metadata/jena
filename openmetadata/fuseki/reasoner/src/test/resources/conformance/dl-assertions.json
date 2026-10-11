@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-assertions",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-assertions",
+    "graphs": [
+      "urn:fixture:dl-assertions"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-assertions:entailments"
+}

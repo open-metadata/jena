@@ -1,0 +1,26 @@
+# The design's discovery example: RegisteredCustomer is classified under CustomerWithEmail through
+# an intersection with an existential restriction, so assets mapped to it become discoverable.
+# The mapping itself is an annotation and takes no part in reasoning.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX om:   <https://open-metadata.org/ontology/>
+PREFIX :     <http://example.org/el-intersection-existential#>
+
+GRAPH <urn:fixture:el-intersection-existential> {
+  <http://example.org/el-intersection-existential> a owl:Ontology .
+  om:mappedTo a owl:AnnotationProperty .
+  :hasContact a owl:ObjectProperty .
+  :Party a owl:Class .
+  :Customer a owl:Class ; rdfs:subClassOf :Party .
+  :EmailAddress a owl:Class .
+  :CustomerWithEmail a owl:Class ;
+    owl:equivalentClass [ a owl:Class ;
+      owl:intersectionOf ( :Customer [ a owl:Restriction ; owl:onProperty :hasContact ; owl:someValuesFrom :EmailAddress ] ) ] .
+  :RegisteredCustomer a owl:Class ;
+    rdfs:subClassOf [ a owl:Class ;
+      owl:intersectionOf ( :Customer [ a owl:Restriction ; owl:onProperty :hasContact ; owl:someValuesFrom :EmailAddress ] ) ] ;
+    om:mappedTo <https://example.org/tables/registered_customers> .
+  :alice a owl:NamedIndividual , :RegisteredCustomer .
+}

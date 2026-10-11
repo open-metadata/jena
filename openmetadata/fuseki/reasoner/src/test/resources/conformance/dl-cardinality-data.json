@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-cardinality-data",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-cardinality-data",
+    "graphs": [
+      "urn:fixture:dl-cardinality-data"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-cardinality-data:entailments"
+}

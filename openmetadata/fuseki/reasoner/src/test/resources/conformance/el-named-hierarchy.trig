@@ -1,0 +1,13 @@
+# Named classes: subclass and equivalence, including a class equivalent to another one.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX :     <http://example.org/el-named-hierarchy#>
+
+GRAPH <urn:fixture:el-named-hierarchy> {
+  <http://example.org/el-named-hierarchy> a owl:Ontology .
+  :A a owl:Class ; rdfs:subClassOf :B .
+  :B a owl:Class ; rdfs:subClassOf :C .
+  :C a owl:Class .
+  :D a owl:Class ; owl:equivalentClass :B .
+  :E a owl:Class ; rdfs:subClassOf :D .
+}

@@ -1,0 +1,6 @@
+Ontology(
+  ClassAssertion(<http://example.org/dl-universal#Customer> <http://example.org/dl-universal#p1>)
+  ClassAssertion(<http://example.org/dl-universal#Customer> <http://example.org/dl-universal#p2>)
+  ClassAssertion(ObjectComplementOf(<http://example.org/dl-universal#Customer>) <http://example.org/dl-universal#p2>)
+  ClassAssertion(ObjectSomeValuesFrom(<http://example.org/dl-universal#ownedBy> owl:Thing) <http://example.org/dl-universal#acct2>)
+)

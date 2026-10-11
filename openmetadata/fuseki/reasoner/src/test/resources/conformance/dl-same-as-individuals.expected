@@ -1,0 +1,6 @@
+OUTCOME CLASSIFIED
+SAME <http://example.com/crm#acmeCorp> <http://example.org/dl-same-as-individuals#acme>
+TYPE <http://example.com/crm#acmeCorp> <http://example.org/dl-same-as-individuals#Customer>
+TYPE <http://example.org/dl-same-as-individuals#acme> <http://example.org/dl-same-as-individuals#Customer>
+VALUE <http://example.com/crm#acmeCorp> <http://example.org/dl-same-as-individuals#servedBy> <http://example.org/dl-same-as-individuals#team1>
+VALUE <http://example.org/dl-same-as-individuals#acme> <http://example.org/dl-same-as-individuals#servedBy> <http://example.org/dl-same-as-individuals#team1>

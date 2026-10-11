@@ -1,0 +1,11 @@
+# An import outside the closure rejects it; imports are never fetched over the network.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/imports-missing#>
+
+GRAPH <urn:fixture:imports-missing> {
+  <http://example.org/imports-missing> a owl:Ontology ; owl:imports <http://example.invalid/never-fetched> .
+  :Customer a owl:Class .
+}

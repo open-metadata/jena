@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "imports-isolation-a",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/imports-isolation/a",
+    "graphs": [
+      "urn:fixture:imports-isolation:context-a",
+      "urn:fixture:imports-isolation:shared"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:imports-isolation-a:entailments"
+}

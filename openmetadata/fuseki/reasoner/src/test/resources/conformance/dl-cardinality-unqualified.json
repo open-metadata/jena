@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-cardinality-unqualified",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-cardinality-unqualified",
+    "graphs": [
+      "urn:fixture:dl-cardinality-unqualified"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-cardinality-unqualified:entailments"
+}

@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-one-of",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-one-of",
+    "graphs": [
+      "urn:fixture:dl-one-of"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-one-of:entailments",
+  "checks": "dl-one-of.checks.ofn"
+}

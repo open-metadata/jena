@@ -1,0 +1,15 @@
+# rdf:XMLLiteral values are compared after exclusive XML canonicalization, done by Apache Axiom on
+# the JDK's StAX parser: two spellings of one XML fragment are one value, so a functional
+# property holding both is consistent.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/dl-xmlliteral#>
+
+GRAPH <urn:fixture:dl-xmlliteral> {
+  <http://example.org/dl-xmlliteral> a owl:Ontology .
+  :markup a owl:DatatypeProperty , owl:FunctionalProperty ; rdfs:range rdf:XMLLiteral .
+  :Documented a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :markup ; owl:someValuesFrom rdf:XMLLiteral ] .
+  :term1 a owl:NamedIndividual ; :markup "<b>Customer</b>"^^rdf:XMLLiteral , "<b >Customer</b>"^^rdf:XMLLiteral .
+}

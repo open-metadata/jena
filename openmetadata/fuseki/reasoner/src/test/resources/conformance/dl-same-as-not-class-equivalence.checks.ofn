@@ -1,0 +1,6 @@
+Ontology(
+  EquivalentClasses(<http://example.org/dl-same-as-not-class-equivalence#Customer> <http://example.com/crm#Client>)
+  SubClassOf(<http://example.org/dl-same-as-not-class-equivalence#Customer> <http://example.com/crm#Client>)
+  ClassAssertion(<http://example.com/crm#Client> <http://example.org/dl-same-as-not-class-equivalence#alice>)
+  SameIndividual(<http://example.org/dl-same-as-not-class-equivalence#Customer> <http://example.com/crm#Client>)
+)

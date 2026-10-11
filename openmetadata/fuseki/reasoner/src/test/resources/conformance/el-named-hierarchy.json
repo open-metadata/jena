@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "el-named-hierarchy",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-named-hierarchy",
+    "graphs": [
+      "urn:fixture:el-named-hierarchy"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-named-hierarchy:entailments",
+  "checks": "el-named-hierarchy.checks.ofn"
+}

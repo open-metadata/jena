@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-undeclared",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-undeclared",
+    "graphs": [
+      "urn:fixture:invalid-undeclared"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-undeclared:entailments"
+}

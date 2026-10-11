@@ -1,0 +1,3 @@
+OUTCOME CLASSIFIED
+SUBCLASS <http://example.org/imports-version-iri#Customer> <http://example.org/imports-version-iri#Party>
+SUBCLASS <http://example.org/imports-version-iri#Party> <http://example.org/imports-version-iri#Agent>

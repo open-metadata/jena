@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "el-disjoint-unsatisfiable",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-disjoint-unsatisfiable",
+    "graphs": [
+      "urn:fixture:el-disjoint-unsatisfiable"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-disjoint-unsatisfiable:entailments",
+  "checks": "el-disjoint-unsatisfiable.checks.ofn"
+}

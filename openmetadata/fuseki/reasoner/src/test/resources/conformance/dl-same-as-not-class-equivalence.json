@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-same-as-not-class-equivalence",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-same-as-not-class-equivalence",
+    "graphs": [
+      "urn:fixture:dl-same-as-not-class-equivalence"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-same-as-not-class-equivalence:entailments",
+  "checks": "dl-same-as-not-class-equivalence.checks.ofn"
+}

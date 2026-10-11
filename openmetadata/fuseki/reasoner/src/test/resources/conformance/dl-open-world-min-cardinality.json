@@ -1,0 +1,17 @@
+{
+  "protocol": 1,
+  "stepId": "dl-open-world-min-cardinality",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-open-world-min-cardinality",
+    "graphs": [
+      "urn:fixture:dl-open-world-min-cardinality"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-open-world-min-cardinality:entailments",
+  "checks": "dl-open-world-min-cardinality.checks.ofn"
+}

@@ -1,0 +1,18 @@
+{
+  "protocol": 1,
+  "stepId": "imports-two-level",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/imports-two-level",
+    "graphs": [
+      "urn:fixture:imports-two-level:root",
+      "urn:fixture:imports-two-level:mid",
+      "urn:fixture:imports-two-level:base"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:imports-two-level:entailments"
+}

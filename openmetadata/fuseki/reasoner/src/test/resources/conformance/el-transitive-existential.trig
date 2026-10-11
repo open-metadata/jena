@@ -1,0 +1,16 @@
+# A transitive property propagates existential restrictions through the hierarchy.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-transitive-existential#>
+
+GRAPH <urn:fixture:el-transitive-existential> {
+  <http://example.org/el-transitive-existential> a owl:Ontology .
+  :partOf a owl:ObjectProperty , owl:TransitiveProperty .
+  :Fleet a owl:Class .
+  :Car a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :partOf ; owl:someValuesFrom :Fleet ] .
+  :Wheel a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :partOf ; owl:someValuesFrom :Car ] .
+  :CarPart a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :partOf ; owl:someValuesFrom :Car ] .
+  :FleetPart a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty :partOf ; owl:someValuesFrom :Fleet ] .
+}

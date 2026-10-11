@@ -1,0 +1,5 @@
+Ontology(
+  SubClassOf(<http://example.org/el-intersection-existential#RegisteredCustomer> <http://example.org/el-intersection-existential#Party>)
+  SubClassOf(<http://example.org/el-intersection-existential#CustomerWithEmail> <http://example.org/el-intersection-existential#RegisteredCustomer>)
+  ClassAssertion(<http://example.org/el-intersection-existential#CustomerWithEmail> <http://example.org/el-intersection-existential#alice>)
+)

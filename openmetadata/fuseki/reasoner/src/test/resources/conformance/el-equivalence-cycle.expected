@@ -1,0 +1,7 @@
+OUTCOME CLASSIFIED
+EQUIVALENT <http://example.org/el-equivalence-cycle#Buyer> <http://example.org/el-equivalence-cycle#Client>
+EQUIVALENT <http://example.org/el-equivalence-cycle#Buyer> <http://example.org/el-equivalence-cycle#Customer>
+EQUIVALENT <http://example.org/el-equivalence-cycle#Client> <http://example.org/el-equivalence-cycle#Customer>
+SUBCLASS <http://example.org/el-equivalence-cycle#VipClient> <http://example.org/el-equivalence-cycle#Buyer>
+SUBCLASS <http://example.org/el-equivalence-cycle#VipClient> <http://example.org/el-equivalence-cycle#Client>
+SUBCLASS <http://example.org/el-equivalence-cycle#VipClient> <http://example.org/el-equivalence-cycle#Customer>

@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-xmlliteral",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-xmlliteral",
+    "graphs": [
+      "urn:fixture:dl-xmlliteral"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-xmlliteral:entailments"
+}

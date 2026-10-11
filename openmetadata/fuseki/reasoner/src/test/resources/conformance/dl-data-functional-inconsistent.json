@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-data-functional-inconsistent",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-data-functional-inconsistent",
+    "graphs": [
+      "urn:fixture:dl-data-functional-inconsistent"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-data-functional-inconsistent:entailments"
+}

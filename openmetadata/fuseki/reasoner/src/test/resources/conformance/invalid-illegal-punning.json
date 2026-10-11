@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "invalid-illegal-punning",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/invalid-illegal-punning",
+    "graphs": [
+      "urn:fixture:invalid-illegal-punning"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:invalid-illegal-punning:entailments"
+}

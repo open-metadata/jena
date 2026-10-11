@@ -1,0 +1,14 @@
+# OWL vocabulary used where the OWL 2 RDF mapping has no construct for it: the triple is
+# reported and rejects the closure, never dropped silently.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/invalid-misplaced-vocabulary#>
+
+GRAPH <urn:fixture:invalid-misplaced-vocabulary> {
+  <http://example.org/invalid-misplaced-vocabulary> a owl:Ontology .
+  :hasAccount a owl:ObjectProperty .
+  :Account a owl:Class .
+  :Customer a owl:Class ; owl:onProperty :hasAccount .
+}

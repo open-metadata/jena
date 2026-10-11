@@ -1,0 +1,11 @@
+OUTCOME CLASSIFIED
+VALUE <http://example.org/dl-property-assertions#ann> <http://example.org/dl-property-assertions#hasParent> <http://example.org/dl-property-assertions#ben>
+VALUE <http://example.org/dl-property-assertions#ann> <http://example.org/dl-property-assertions#hasUncle> <http://example.org/dl-property-assertions#carl>
+VALUE <http://example.org/dl-property-assertions#ben> <http://example.org/dl-property-assertions#hasBrother> <http://example.org/dl-property-assertions#carl>
+VALUE <http://example.org/dl-property-assertions#glossaryA> <http://example.org/dl-property-assertions#relatedTo> <http://example.org/dl-property-assertions#glossaryB>
+VALUE <http://example.org/dl-property-assertions#glossaryB> <http://example.org/dl-property-assertions#relatedTo> <http://example.org/dl-property-assertions#glossaryA>
+VALUE <http://example.org/dl-property-assertions#rack1> <http://example.org/dl-property-assertions#locatedIn> <http://example.org/dl-property-assertions#room1>
+VALUE <http://example.org/dl-property-assertions#rack1> <http://example.org/dl-property-assertions#locatedIn> <http://example.org/dl-property-assertions#site1>
+VALUE <http://example.org/dl-property-assertions#room1> <http://example.org/dl-property-assertions#locatedIn> <http://example.org/dl-property-assertions#site1>
+VALUE <http://example.org/dl-property-assertions#schema1> <http://example.org/dl-property-assertions#hasPart> <http://example.org/dl-property-assertions#table1>
+VALUE <http://example.org/dl-property-assertions#table1> <http://example.org/dl-property-assertions#partOf> <http://example.org/dl-property-assertions#schema1>

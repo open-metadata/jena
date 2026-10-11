@@ -103,10 +103,30 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-          cache-dependency-path: openmetadata/fuseki/extension/pom.xml
+          cache-dependency-path: |
+            openmetadata/fuseki/extension/pom.xml
+            openmetadata/fuseki/reasoner/pom.xml
 
       - name: Test the extension
         working-directory: openmetadata/fuseki/extension
+        run: mvn -B -ntp verify
+
+      # OpenMetadata's HermiT build has no release yet: install it from the commit the Dockerfile
+      # pins, so the reasoner tests use exactly what the image ships.
+      - name: Build HermiT at the commit the image pins
+        run: |
+          repository=$(sed -n 's/^ARG HERMIT_REPOSITORY=//p' "$CONTEXT/Dockerfile")
+          commit=$(sed -n 's/^ARG HERMIT_COMMIT=//p' "$CONTEXT/Dockerfile")
+          hermit="$RUNNER_TEMP/hermit"
+          git init --quiet "$hermit"
+          git -C "$hermit" fetch --quiet --depth 1 "$repository" "$commit"
+          git -C "$hermit" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$hermit" rev-parse HEAD)" = "$commit"
+          cd "$hermit"
+          mvn -B -ntp -Dmaven.test.skip=true -Dmaven.javadoc.skip=true install
+
+      - name: Test the reasoner
+        working-directory: openmetadata/fuseki/reasoner
         run: mvn -B -ntp verify
 
       - uses: docker/setup-buildx-action@v4

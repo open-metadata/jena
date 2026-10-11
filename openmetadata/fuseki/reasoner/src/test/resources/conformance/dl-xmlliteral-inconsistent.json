@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "dl-xmlliteral-inconsistent",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/dl-xmlliteral-inconsistent",
+    "graphs": [
+      "urn:fixture:dl-xmlliteral-inconsistent"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:dl-xmlliteral-inconsistent:entailments"
+}
