@@ -25,11 +25,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
+import org.openmetadata.fuseki.reasoning.jobs.JobSettings;
 
 /**
- * The entrypoint and ReasoningSettings validate the reasoner settings with the same rules: every
- * value in test/reasoning-settings.cases must be accepted or refused by both as the file says. The
- * entrypoint's half needs bash 4 or later, as in the image.
+ * The entrypoint, ReasoningSettings and JobSettings validate the reasoning settings with the same
+ * rules: every value in test/reasoning-settings.cases must be accepted or refused by the entrypoint
+ * and by the extension as the file says. The entrypoint's half needs bash 4 or later, as in the
+ * image.
  */
 class ReasoningSettingsParityTest {
   private static final Path IMAGE = Path.of("..").toAbsolutePath().normalize();
@@ -43,7 +45,7 @@ class ReasoningSettingsParityTest {
   }
 
   @TestFactory
-  Stream<DynamicTest> reasoningSettingsJudgesEveryValueAsTheTableDoes() throws IOException {
+  Stream<DynamicTest> theExtensionJudgesEveryValueAsTheTableDoes() throws IOException {
     return cases()
         .map(
             entry ->
@@ -52,7 +54,10 @@ class ReasoningSettingsParityTest {
                     () -> {
                       boolean accepted;
                       try {
-                        ReasoningSettings.fromEnvironment(Map.of(entry.variable(), entry.value()));
+                        final Map<String, String> environment =
+                            Map.of(entry.variable(), entry.value());
+                        ReasoningSettings.fromEnvironment(environment);
+                        JobSettings.fromEnvironment(environment);
                         accepted = true;
                       } catch (final IllegalArgumentException e) {
                         assertTrue(e.getMessage().startsWith(entry.variable()), e.getMessage());
