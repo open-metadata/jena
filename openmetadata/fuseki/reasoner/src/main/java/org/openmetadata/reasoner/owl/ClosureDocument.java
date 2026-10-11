@@ -97,28 +97,15 @@ final class ClosureDocument {
           RDF.first.asNode(),
           RDF.rest.asNode());
 
-  private final Path file;
   private final long triples;
   private final String root;
   private final TreeMap<String, TreeSet<String>> imports;
 
   private ClosureDocument(
-      final Path file,
-      final long triples,
-      final String root,
-      final TreeMap<String, TreeSet<String>> imports) {
-    this.file = file;
+      final long triples, final String root, final TreeMap<String, TreeSet<String>> imports) {
     this.triples = triples;
     this.root = root;
     this.imports = imports;
-  }
-
-  Path file() {
-    return file;
-  }
-
-  long triples() {
-    return triples;
   }
 
   JsonObject toJson(final int graphs) {
@@ -288,7 +275,7 @@ final class ClosureDocument {
       }
       writer.finish();
     }
-    return new ClosureDocument(file, triples, closure.root(), imports);
+    return new ClosureDocument(triples, closure.root(), imports);
   }
 
   private static boolean isImportStructure(

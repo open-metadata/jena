@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.apache.jena.atlas.json.JsonObject;
+import org.openmetadata.reasoner.owl.Engine;
 
 /**
  * The step's own deadline. When it passes, the watchdog interrupts the engine that is running, if
@@ -85,6 +86,7 @@ public final class Watchdog implements AutoCloseable {
 
   public JsonObject workerJson() {
     final JsonObject json = new JsonObject();
+    json.put("version", Engine.workerVersion());
     json.put("javaVersion", Runtime.version().toString());
     json.put("availableProcessors", Runtime.getRuntime().availableProcessors());
     json.put("heapMaxBytes", Runtime.getRuntime().maxMemory());
