@@ -41,6 +41,10 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONER_OFF_HEAP` | `512m` | Worker off-heap budget `O_w`. At least `512m`, what the worker's flags cap. |
 | `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR` | `50%` | Page cache kept for serving, `C_min`: a size, or a percentage of the serving datasets' size on disk. |
 | `OPENMETADATA_REASONER_CPUS` | half the container's CPUs, at least 1 | Worker `-XX:ActiveProcessorCount`. |
+| `OPENMETADATA_REASONING_MAX_QUEUED_JOBS` | `16` | Reasoning jobs that may wait behind the running one; more get HTTP 429. At most 4 digits. |
+| `OPENMETADATA_REASONING_JOB_HISTORY` | `1000` | Finished jobs kept, with their request IDs and directories. At most 4 digits. |
+| `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` | `168` | How long a finished job is kept. |
+| `OPENMETADATA_REASONING_DISK_QUOTA` | `25%` | Disk all of `/fuseki/reasoning` may use before jobs are refused: a size, or a percentage of the volume's capacity. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
 must be positive integers; sizes use the JVM's notation (`512m`, `2g`) with at most 13 digits;
@@ -94,7 +98,7 @@ work and releases the writer before the client gives up.
 | Path | Contents |
 |---|---|
 | `/jena-fuseki` | The Fuseki distribution (`FUSEKI_HOME`), plus `extensions/` |
-| `/fuseki` | Volume (`FUSEKI_BASE`): `configuration/`, `databases/`, `shiro.ini`, `extra/`, and `reasoning/` when reasoning is enabled |
+| `/fuseki` | Volume (`FUSEKI_BASE`): `configuration/`, `databases/`, `shiro.ini`, `extra/`, and `reasoning/` when reasoning is enabled, with a directory per job in `reasoning/jobs/` |
 | `/jena-fuseki/reasoner` | The reasoner worker: its jar and dependencies, `bin/reasoner`, `NOTICE`, `THIRD-PARTY.md`, `licenses/` and the HermiT source in `source/` |
 
 The extension is enabled by a symlink `/fuseki/extra/openmetadata-fuseki-extensions.jar` pointing at the
@@ -108,9 +112,11 @@ Fuseki JVM: a worker that runs out of heap or time ends with a Java error in its
 Fuseki, its heap and its serving datasets are untouched. The worker opens only its job's private
 TDB2 dataset under `/fuseki/reasoning`, has no network listener and never fetches anything.
 
-This release adds the worker, its launcher and the memory-budget check. The extension's HTTP job
-operations that OpenMetadata will call come in a later release; until then reasoning runs only
-through `bin/reasoner` (below).
+This release adds the worker, its launcher, the memory-budget check and the HTTP job operations
+OpenMetadata will call ([Job operations](#job-operations)). Jobs are admitted, queued, run,
+cancelled and recovered for real, but capturing their input from a serving dataset arrives with
+reasoning snapshots in a later release, so every job ends `FAILED` at its `capture` step for now.
+Until then reasoning over your own data runs only through `bin/reasoner` (below).
 
 ### Engines
 
@@ -210,6 +216,88 @@ After a step that did not succeed, it removes the step's exported closure and an
 `*.tmp` files from the job directory. A step's log keeps the first and the last 512 KiB of the
 worker's output. The worker inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `HOME` from
 the server's environment, so `ADMIN_PASSWORD` and JVM options meant for Fuseki never reach it.
+
+### Job operations
+
+The extension serves the reasoning protocol that OpenMetadata defines in its JSON Schemas
+(`openmetadata-spec/.../api/rdf/rdfReasoningJobRequest.json`, `rdfReasoningJob.json` and
+`rdfReasoningCapabilities.json`); `extension/src/test/resources/openmetadata-contract/` holds the copy
+the tests check against. The operations are served whenever the extension is enabled; with
+`OPENMETADATA_REASONING_ENABLED` not `true` they report `DISABLED` and refuse jobs.
+
+| Request | Answer |
+|---|---|
+| `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the memory budget (container limit, required bytes and each term), and the limits (`maxQueuedJobs`, `maxDiskBytes`) |
+| `POST /reasoning/jobs?dataset=<name>` | `202` with the new job and a `Location`; `200` with the existing job when its `requestId` is known; `400` for a request the schema refuses; `404` for a dataset that is not served; `409` for a known `requestId` sent with a different request or dataset; `413` over 4 MiB; `415` unless `application/json`; `429` when the queue is full; `503` when reasoning is disabled or not ready, or the disk quota is reached |
+| `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
+| `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
+| `GET /reasoning/results/<id>`, `POST /reasoning/query` | `501` until snapshots arrive |
+
+Every refusal answers with the protocol's problem object, `{"code": ..., "message": ...}`, with
+`subject` naming the limit for `LIMIT_EXCEEDED`. A request is validated against the schema and the
+schemas it references, including the per-operation requirements (a `REFRESH` needs
+`ruleBundleDigest` and only accepts `APPROVED` ontologies; `CHECK` and `EXPLAIN` need `ontologyIri`
+and their question), before anything is stored. It may nest at most 64 levels deep.
+
+**Routing.** Fuseki dispatches a dataset's operations by endpoint name, so `/reasoning/jobs/<id>`
+cannot be one of them. The module registers one servlet at `/reasoning/*`, which routes the path
+itself; the serving dataset a job reads is the `dataset` parameter, checked against the datasets the
+server serves. A dataset named `reasoning` would hide the operations, and the server logs a warning.
+
+**Execution.** One job runs at a time, in submission order, on a thread of its own, never on a
+request thread. Its worker steps go through the launcher above, so they also take the container's
+worker lock: a step run by hand with `bin/reasoner` makes the job's step wait, for up to 10 minutes.
+Each job has a directory `/fuseki/reasoning/jobs/<id>/` with the request as received
+(`request.json`), its manifest (`job.json`, replaced atomically on every change) and its steps'
+files. A job's unpublished work, its working datasets and captured input, is removed when it
+ends; the request, manifest, step files and logs stay until the job leaves the history.
+
+**Cancellation.** A queued job is `CANCELLED` at once. A running job stays `RUNNING` with
+`cancelRequested` until its current step has stopped: the worker gets `SIGTERM`, and `SIGKILL` 10
+seconds later. A step that starts after the request cancels itself, and no later step starts.
+
+**Restart.** When the server starts, every job that had not finished becomes `INTERRUPTED`, its
+unpublished work is removed, and any worker its directory records is killed, but only while that
+process is still the worker of a step in that directory. Stopping the server kills the running
+worker and interrupts its job. A request ID keeps returning its job as long as the job is kept.
+
+**Disk.** Before admitting a job the extension measures all of `/fuseki/reasoning`, including steps
+run by hand, and refuses work at or over `OPENMETADATA_REASONING_DISK_QUOTA`. Finished jobs beyond
+`OPENMETADATA_REASONING_JOB_HISTORY` or older than `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` are
+removed, oldest first. Directories without a `job.json` are never removed.
+
+**What a job does in this release.** Every operation's plan starts with `capture`, which is not
+implemented yet: the job ends `FAILED` with the problem `NOT_READY`, step `capture`, and a message
+starting `NOT_IMPLEMENTED:`. The protocol has no code of its own for that. Capabilities list no
+engines and no coverage, since no operation reaches one, and omit the limits of steps that do not
+run yet. The protocol's capabilities cannot say which operations exist; the `501` answers do.
+
+**Access.** The image's `shiro.ini` requires the admin account for every path except `/$/ping`, so
+the operations are admin-only. To give a service account reasoning and nothing else, run with
+`FUSEKI_MANAGE_SHIRO=false` and your own `shiro.ini`; Shiro's `roles` filter needs every listed
+role, so the admin account carries the reasoning role too:
+
+```ini
+[main]
+plainMatcher = org.apache.shiro.authc.credential.SimpleCredentialsMatcher
+iniRealm.credentialsMatcher = $plainMatcher
+
+[users]
+admin = admin-pw, admin, reasoning
+openmetadata = service-pw, reasoning
+reader = reader-pw, reader
+
+[roles]
+admin = *
+
+[urls]
+/$/ping = anon
+/reasoning/** = authcBasic, roles[reasoning]
+/** = authcBasic, roles[admin]
+```
+
+The extension's integration tests run against this file (`extension/src/test/resources/shiro/`)
+and against the image's own `shiro.ini`.
 
 ### Memory budget
 
@@ -355,6 +443,12 @@ packaged worker with the launcher's real command, on the image's classpath, and 
 catalog-shaped closure of 20,000 individuals classified in the default 2 GiB heap; unit tests check
 that the exit statuses and step file rules the launcher repeats match the worker's. The smoke test
 runs the same suite through the built image.
+
+`mvn verify` in `extension/` runs the job operations against stand-in worker processes: queueing,
+cancellation, restart recovery and retention on real job directories, and the HTTP operations on a
+real Fuseki server with Shiro. It checks every request example, job and capabilities document
+against OpenMetadata's schemas. The smoke test submits, reads and cancels a job in the image, and
+restarts the container to check that the job and its request ID survive.
 
 ## Publishing
 

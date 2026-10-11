@@ -263,6 +263,46 @@ routing_matches() {
   [ "$failed" -eq 0 ]
 }
 
+# The reasoning operations, as the admin account unless curl options say otherwise.
+reasoning_status() {
+  local path="$1"
+  shift
+  curl -s -o /dev/null -w '%{http_code}' "$@" "$BASE/reasoning/$path"
+}
+
+reasoning_get() {
+  curl -fs -u "admin:$PASSWORD" "$BASE/reasoning/$1"
+}
+
+# Prints the body, then the HTTP status on a line of its own, of a job submitted to a dataset
+# (ds by default).
+submit_job() {
+  curl -s -w '\n%{http_code}' -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/json' \
+    --data "$1" "$BASE/reasoning/jobs?dataset=${2:-ds}"
+}
+
+# The body of submit_job's output; head -n -1 is not portable.
+body_of() {
+  sed '$d' <<< "$1"
+}
+
+new_uuid() {
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n' \
+    | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/'
+}
+
+refresh_request() {
+  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologySelection": "APPROVED", "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
+}
+
+job_state_becomes() {
+  for _ in $(seq 1 100); do
+    [ "$(reasoning_get "jobs/$1" | jq -r .state)" = "$2" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 echo "== Defaults: stock Fuseki, extension off =="
 start -e FUSEKI_DATASETS=ds
 check "dataset seeded from FUSEKI_DATASETS" dataset_exists ds
@@ -290,6 +330,10 @@ check "upload limit reflects OPENMETADATA_MAX_UPLOAD_BYTES" header_equals openme
 check "union is in effect for queries" union_is openmetadata_a true
 check "an upload under the limit is accepted" [ "$(upload_status openmetadata 1024)" = "201" ]
 check "an upload over the limit is rejected with 413" [ "$(upload_status openmetadata 2097152)" = "413" ]
+check "reasoning operations report DISABLED without reasoning" \
+  [ "$(reasoning_get capabilities | jq -r .readiness)" = "DISABLED" ]
+check "and refuse jobs with 503" [ "$(submit_job "$(refresh_request "$(new_uuid)")" openmetadata | tail -1)" = "503" ]
+check "and write nothing to disk" docker exec "$CONTAINER" test ! -e /fuseki/reasoning
 
 echo "== Turning the extension off again on the same volume =="
 start -e FUSEKI_DATASETS=openmetadata
@@ -334,6 +378,8 @@ check "OPENMETADATA_REASONER_HEAP under 16m" exits_with_error -e ADMIN_PASSWORD=
 check "OPENMETADATA_REASONER_OFF_HEAP under its caps" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_OFF_HEAP=256m
 check "invalid OPENMETADATA_REASONER_PAGE_CACHE_FLOOR" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_PAGE_CACHE_FLOOR=150%
 check "non-numeric OPENMETADATA_REASONER_CPUS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_CPUS=two
+check "a zero OPENMETADATA_REASONING_MAX_QUEUED_JOBS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_MAX_QUEUED_JOBS=0
+check "invalid OPENMETADATA_REASONING_DISK_QUOTA" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_DISK_QUOTA=0%
 
 echo "== Reasoner: readiness refuses an undersized container =="
 fresh_volume
@@ -351,6 +397,8 @@ run_step refused load
 check "a step is refused NOT_READY" step_ended refused load NOT_READY "The container memory limit"
 check "and no worker was started" docker exec "$CONTAINER" test ! -e "$JOBS/refused/load.log"
 check "Fuseki serves as usual" status_is 200 -u "admin:$PASSWORD" -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
+check "capabilities report NOT_READY over HTTP" [ "$(reasoning_get capabilities | jq -r .readiness)" = "NOT_READY" ]
+check "and jobs are refused with 503" [ "$(submit_job "$(refresh_request "$(new_uuid)")" | tail -1)" = "503" ]
 
 echo "== Reasoner: the conformance suite through the image =="
 fresh_volume
@@ -378,6 +426,40 @@ check "the ${#elk[@]} ELK-routed fixtures give identical reports through HermiT"
   conformance_reports_match "${elk[@]/%/.hermit}"
 docker exec "$CONTAINER" sh -c "cat $JOBS/conformance/*.status.json" \
   | jq -s -r 'map(select(.manifest.worker != null)) | "      worker heap, largest peak used: \(map(.manifest.worker.heapPeakUsedBytes) | max / 1048576 | floor) MiB, largest after GC: \(map(.manifest.worker.heapPeakAfterGcBytes) | max / 1048576 | floor) MiB, slowest step: \(map(.elapsedMillis) | max) ms"'
+
+echo "== Reasoner: job operations over HTTP =="
+check "capabilities answer the admin account" [ "$(reasoning_status capabilities -u "admin:$PASSWORD")" = "200" ]
+check "and refuse anonymous requests" [ "$(reasoning_status capabilities)" = "401" ]
+check "and a wrong password" [ "$(reasoning_status capabilities -u admin:wrong)" = "401" ]
+capabilities=$(reasoning_get capabilities)
+echo "      $(jq -c '{protocolVersion, readiness, limits}' <<< "$capabilities")"
+check "capabilities report READY for protocol 1" \
+  [ "$(jq -r '"\(.protocolVersion) \(.readiness)"' <<< "$capabilities")" = "1 READY" ]
+check "with the memory budget the readiness check computed" \
+  [ "$(jq '.memoryBudget.requiredBytes <= .memoryBudget.containerLimitBytes' <<< "$capabilities")" = "true" ]
+request_id=$(new_uuid)
+response=$(submit_job "$(refresh_request "$request_id")")
+job_id=$(body_of "$response" | jq -r .id)
+check "a job is accepted with 202" [ "$(tail -1 <<< "$response")" = "202" ]
+check "anonymous submissions are refused" [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' --data "$(refresh_request "$request_id")" "$BASE/reasoning/jobs?dataset=ds")" = "401" ]
+response=$(submit_job "$(refresh_request "$request_id")")
+check "its request ID returns the same job with 200" \
+  [ "$(tail -1 <<< "$response") $(body_of "$response" | jq -r .id)" = "200 $job_id" ]
+check "an invalid request is refused with 400" [ "$(submit_job '{"operation": "REFRESH"}' | tail -1)" = "400" ]
+check "the job fails at capture, which this build lacks" job_state_becomes "$job_id" FAILED
+check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_READY capture" ]
+check "its manifest is on the data volume" docker exec "$CONTAINER" test -f "$JOBS/$job_id/job.json"
+check "cancelling a finished job leaves it unchanged" [ "$(curl -s -u "admin:$PASSWORD" -X DELETE \
+  "$BASE/reasoning/jobs/$job_id" | jq -r .state)" = "FAILED" ]
+check "cancelling an unknown job answers 404" [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" \
+  -X DELETE "$BASE/reasoning/jobs/$(new_uuid)")" = "404" ]
+check "results are not implemented yet" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "501" ]
+docker restart "$CONTAINER" > /dev/null
+for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
+check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]
+response=$(submit_job "$(refresh_request "$request_id")")
+check "and so does its request ID" [ "$(body_of "$response" | jq -r .id)" = "$job_id" ]
 
 echo "== Reasoner: a worker never disturbs Fuseki =="
 awk 'BEGIN { for (i = 0; i < 1000; i++) printf "<urn:smoke:s%d> <urn:smoke:p> \"%d\" .\n", i, i }' > "/tmp/$CONTAINER.serving.nt"
