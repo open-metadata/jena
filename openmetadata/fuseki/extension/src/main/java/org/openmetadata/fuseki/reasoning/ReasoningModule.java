@@ -12,18 +12,28 @@
  */
 package org.openmetadata.fuseki.reasoning;
 
+import java.io.IOException;
+import java.util.Set;
 import org.apache.jena.fuseki.main.FusekiServer;
 import org.apache.jena.fuseki.main.sys.FusekiAutoModule;
+import org.apache.jena.rdf.model.Model;
+import org.openmetadata.fuseki.reasoning.jobs.JobService;
+import org.openmetadata.fuseki.reasoning.jobs.JobSettings;
+import org.openmetadata.fuseki.reasoning.jobs.ReasoningServlet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Reports at startup whether the container's memory can hold a reasoner worker. It does nothing
- * when OPENMETADATA_REASONING_ENABLED is not true, and never affects serving: a failure to evaluate
- * the budget is logged, not thrown. Job operations arrive in a later phase.
+ * Serves the reasoning operations at /reasoning/* and runs their jobs. With
+ * OPENMETADATA_REASONING_ENABLED not true the operations still answer, capabilities with DISABLED
+ * and submissions with 503, and nothing is written to disk. At startup it reports whether the
+ * container's memory can hold a worker. It never affects serving: a failure to set up reasoning is
+ * logged, not thrown.
  */
 public final class ReasoningModule implements FusekiAutoModule {
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
+
+  private JobService jobs;
 
   @Override
   public String name() {
@@ -31,7 +41,30 @@ public final class ReasoningModule implements FusekiAutoModule {
   }
 
   @Override
+  public void prepare(
+      final FusekiServer.Builder builder, final Set<String> datasetNames, final Model config) {
+    final ReasoningSettings settings;
+    final JobService service;
+    try {
+      settings = ReasoningSettings.fromEnvironment(System.getenv());
+      service = JobService.create(settings, JobSettings.fromEnvironment(System.getenv()));
+      service.open();
+    } catch (final RuntimeException | IOException e) {
+      LOG.error("Reasoning operations are not served: {}", e.getMessage());
+      return;
+    }
+    if (datasetNames.contains("/reasoning")) {
+      LOG.warn("A dataset named 'reasoning' hides the reasoning operations at /reasoning");
+    }
+    jobs = service;
+    builder.addServlet(ReasoningServlet.PATH_SPEC, new ReasoningServlet(service));
+  }
+
+  @Override
   public void serverAfterStarting(final FusekiServer server) {
+    if (jobs != null) {
+      jobs.start();
+    }
     try {
       final ReasoningSettings settings = ReasoningSettings.fromEnvironment(System.getenv());
       if (!settings.enabled()) {
@@ -47,6 +80,14 @@ public final class ReasoningModule implements FusekiAutoModule {
       }
     } catch (final RuntimeException e) {
       LOG.warn("Reasoning readiness could not be evaluated: {}", e.getMessage());
+    }
+  }
+
+  @Override
+  public void serverStopped(final FusekiServer server) {
+    if (jobs != null) {
+      jobs.close();
+      jobs = null;
     }
   }
 }

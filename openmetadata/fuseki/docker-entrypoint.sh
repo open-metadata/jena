@@ -180,6 +180,22 @@ validate_reasoning_settings() {
   if [ -n "$cpus" ] && [[ ! "$cpus" =~ ^[1-9][0-9]{0,5}$ ]]; then
     fail "OPENMETADATA_REASONER_CPUS must be a positive integer of at most 6 digits, got '$cpus'"
   fi
+  require_bounded_integer OPENMETADATA_REASONING_MAX_QUEUED_JOBS 4
+  require_bounded_integer OPENMETADATA_REASONING_JOB_HISTORY 4
+  require_bounded_integer OPENMETADATA_REASONING_JOB_RETENTION_HOURS 6
+  local quota="${OPENMETADATA_REASONING_DISK_QUOTA:-}"
+  if [ -n "$quota" ] && [[ ! "$quota" =~ ^([1-9][0-9]?|100)%$ ]] \
+    && ! size_bytes "$quota" > /dev/null; then
+    fail "OPENMETADATA_REASONING_DISK_QUOTA must be a size such as 50g or a percentage of the data volume such as 25%, got '$quota'"
+  fi
+}
+
+# A positive integer of at most the given number of digits, when the variable is set.
+require_bounded_integer() {
+  local value="${!1:-}"
+  if [ -n "$value" ] && [[ ! "$value" =~ ^[1-9][0-9]{0,$(($2 - 1))}$ ]]; then
+    fail "$1 must be a positive integer of at most $2 digits, got '$value'"
+  fi
 }
 
 # The reasoner worker is a separate JVM that the extension launches one step at a time, with its

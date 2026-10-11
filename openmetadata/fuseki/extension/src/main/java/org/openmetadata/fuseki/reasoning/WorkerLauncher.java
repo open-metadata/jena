@@ -14,20 +14,18 @@ package org.openmetadata.fuseki.reasoning;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
@@ -171,6 +169,17 @@ public final class WorkerLauncher {
    * has exited.
    */
   public StepOutcome run(final Path stepFilePath) throws IOException {
+    return run(stepFilePath, () -> false);
+  }
+
+  /**
+   * Runs one step as {@link #run(Path)} does, cancelled as by {@link #cancel()} if {@code
+   * cancelled} is true when the step starts. A caller that sets its flag and then calls {@link
+   * #cancel()} therefore cancels its step whether the step had already started or not, and never a
+   * later step.
+   */
+  public StepOutcome run(final Path stepFilePath, final BooleanSupplier cancelled)
+      throws IOException {
     final Path stepFile = stepFilePath.toAbsolutePath().normalize();
     final Path root = settings.reasoningRoot();
     if (!Files.isDirectory(root)
@@ -191,11 +200,12 @@ public final class WorkerLauncher {
             StepOutcome.Status.BUSY, "Another reasoner worker is running", null);
       }
       Files.deleteIfExists(sibling(stepFile, ".status.json"));
-      return record(stepFile, launch(stepFile));
+      return record(stepFile, launch(stepFile, cancelled));
     }
   }
 
-  private StepOutcome launch(final Path stepFile) throws IOException {
+  private StepOutcome launch(final Path stepFile, final BooleanSupplier cancelled)
+      throws IOException {
     final StepHeader header;
     try {
       header = StepHeader.read(stepFile);
@@ -211,6 +221,9 @@ public final class WorkerLauncher {
     }
     final Run run = new Run();
     current = run;
+    if (cancelled.getAsBoolean()) {
+      run.cancel();
+    }
     try {
       final StepOutcome outcome = execute(stepFile, header, readiness, run);
       if (outcome.status() != StepOutcome.Status.SUCCEEDED) {
@@ -257,6 +270,30 @@ public final class WorkerLauncher {
       }
       run.process = process;
     }
+    // Read after a restart of the server, to kill a worker that outlived it. Best effort: the
+    // worker is already running and must be awaited either way.
+    final Path pidFile = sibling(stepFile, ".pid");
+    try {
+      AtomicFiles.write(pidFile, process.pid() + "\n");
+    } catch (final IOException e) {
+      LOG.warn("Cannot record the worker's pid in {}: {}", pidFile, e.toString());
+    }
+    try {
+      return await(stepFile, header, readiness, run, process, start);
+    } finally {
+      Files.deleteIfExists(pidFile);
+    }
+  }
+
+  private StepOutcome await(
+      final Path stepFile,
+      final StepHeader header,
+      final Readiness readiness,
+      final Run run,
+      final Process process,
+      final long start)
+      throws IOException {
+    final Path manifestFile = sibling(stepFile, ".result.json");
     final Thread logger = startLog(process.getInputStream(), sibling(stepFile, ".log"));
     final long terminateAt =
         start + TimeUnit.MILLISECONDS.toNanos(header.timeoutMillis() + terminateAfterMillis);
@@ -387,7 +424,7 @@ public final class WorkerLauncher {
   private StepOutcome record(final Path stepFile, final StepOutcome outcome) {
     final Path statusFile = sibling(stepFile, ".status.json");
     try {
-      writeAtomically(statusFile, JSON.toString(outcome.toJson()) + "\n");
+      AtomicFiles.write(statusFile, JSON.toString(outcome.toJson()) + "\n");
     } catch (final IOException e) {
       LOG.error("Cannot write {}: {}", statusFile, e.toString());
     }
@@ -497,24 +534,6 @@ public final class WorkerLauncher {
     final String name = stepFile.getFileName().toString();
     final String base = name.endsWith(".json") ? name.substring(0, name.length() - 5) : name;
     return stepFile.resolveSibling(base + suffix);
-  }
-
-  private static void writeAtomically(final Path path, final String content) throws IOException {
-    final Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
-    try (FileChannel channel =
-        FileChannel.open(
-            temporary,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-            StandardOpenOption.WRITE)) {
-      final ByteBuffer buffer = ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8));
-      while (buffer.hasRemaining()) {
-        channel.write(buffer);
-      }
-      channel.force(true);
-    }
-    Files.move(
-        temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
   }
 
   /** One step's worker, and whether it was cancelled; a cancellation never outlives its step. */

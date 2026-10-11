@@ -1,0 +1,10 @@
+Copied unchanged from open-metadata/OpenMetadata at commit 12f9e16ed2693af671179c81ce847438d44d3ceb (main, 2026-10-10):
+
+  schema/*.json    openmetadata-spec/src/main/resources/json/schema/api/rdf/
+  examples/*.json  openmetadata-service/src/test/resources/rdf/reasoning/
+
+They define the reasoning protocol this extension implements without OpenMetadata's classes; the
+tests load them to pin the wire format. The per-operation and per-check requirements of the request
+schema come from OpenMetadata pull request 35199 (open at the time of copying), which adds them as
+allOf/if/then rules; JobRequestTest checks them by hand. Refresh these files when the protocol
+changes, and keep the commit above current.

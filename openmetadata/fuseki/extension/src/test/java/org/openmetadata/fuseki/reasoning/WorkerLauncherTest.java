@@ -204,6 +204,28 @@ class WorkerLauncherTest {
   }
 
   @Test
+  void aStepWhoseCallerHasAlreadyCancelledNeverStartsAWorker() throws Exception {
+    final StepOutcome outcome =
+        launcher(settings(Map.of())).run(step("touch started; " + SUCCEED, 60_000), () -> true);
+    assertEquals(StepOutcome.Status.INTERRUPTED, outcome.status());
+    assertEquals("CANCELLED", outcome.reason());
+    assertFalse(Files.exists(job.resolve("started")));
+  }
+
+  @Test
+  void theWorkersPidIsRecordedWhileItRuns() throws Exception {
+    final Path step =
+        step("touch started; while [ ! -e release ]; do sleep 0.05; done; exit 0", 60_000);
+    final CompletableFuture<StepOutcome> running = runAsync(launcher(settings(Map.of())), step);
+    awaitFile(job.resolve("started"));
+    final long pid = Long.parseLong(Files.readString(job.resolve("step.pid")).trim());
+    assertTrue(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+    Files.writeString(job.resolve("release"), "");
+    running.get(30, TimeUnit.SECONDS);
+    assertFalse(Files.exists(job.resolve("step.pid")), "removed once the worker has exited");
+  }
+
+  @Test
   void interruptingTheCallerKillsTheWorkerBeforeTheLockIsReleased() throws Exception {
     final WorkerLauncher launcher = launcher(settings(Map.of()));
     final Path step = step("echo $$ > pid; trap '' TERM; exec sleep 600", 600_000);
