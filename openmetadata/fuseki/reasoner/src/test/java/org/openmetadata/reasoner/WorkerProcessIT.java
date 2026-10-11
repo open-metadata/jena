@@ -21,26 +21,39 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
+import org.apache.jena.atlas.json.JsonObject;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.openmetadata.fuseki.reasoning.ImageLayout;
+import org.openmetadata.fuseki.reasoning.StepOutcome;
 
 /**
- * The packaged worker in its own JVM, on the classpath the image uses (fuseki-server.jar first,
- * then target/reasoner/*) and with the launcher's JVM flags, so a dependency left out of the
- * package, a classpath conflict or a broken exit status fails here and not in the image.
+ * The packaged worker in its own JVM, started by the extension's launcher with its real command:
+ * the image's classpath (fuseki-server.jar first, then target/reasoner/*), the launcher's JVM flags
+ * and environment, and the priority commands where the platform has them. A dependency left out of
+ * the package, a classpath conflict, a launch flag the worker cannot start with or a broken exit
+ * status fails here and not in the image.
  */
 class WorkerProcessIT {
   private static final Path REASONER = Path.of(System.getProperty("reasoner.directory"));
   private static final Path FUSEKI_SERVER = Path.of(System.getProperty("reasoner.fusekiServerJar"));
 
-  @TempDir Path job;
+  @TempDir Path root;
+  private ImageLayout image;
+  private Path job;
+
+  @BeforeEach
+  void layOutTheImage() throws IOException {
+    image = ImageLayout.create(root, FUSEKI_SERVER, REASONER);
+    job = image.job("job");
+  }
 
   @Test
   void thePackagedWorkerAnswersAsTheSuiteExpects() throws Exception {
@@ -49,7 +62,7 @@ class WorkerProcessIT {
         Files.copy(file, job.resolve(file.getFileName().toString()));
       }
     }
-    assertEquals(ExitCodes.COMPLETED, worker("512m", job.resolve("load.json")));
+    assertEquals(ExitCodes.COMPLETED, worker("512m", job.resolve("load.json")).exitCode());
     for (final String fixture :
         List.of(
             "el-intersection-existential",
@@ -57,30 +70,104 @@ class WorkerProcessIT {
             "dl-xmlliteral-inconsistent",
             "imports-two-level",
             "invalid-irregular-chain")) {
-      final int exit = worker("512m", job.resolve(fixture + ".json"));
+      final StepOutcome outcome = worker("512m", job.resolve(fixture + ".json"));
       assertEquals(
           Conformance.expected(fixture),
           Files.readString(job.resolve(fixture + ".report.txt")),
-          () -> fixture + " exit " + exit + ": " + log(fixture));
+          () -> fixture + " " + outcome.toJson() + ": " + log(fixture));
     }
+    final JsonObject manifest = Jobs.manifest(job.resolve("el-intersection-existential.json"));
+    final String version = manifest.getObj("worker").getString("version");
+    assertTrue(
+        System.getProperty("reasoner.workerJar").endsWith("-" + version + ".jar"),
+        "worker version " + version);
   }
 
   @Test
   void aWorkerOutOfHeapExitsWithStatusThreeAndNothingElse() throws Exception {
     final Path classify = hardClassification(600_000);
-    assertEquals(ExitCodes.OUT_OF_MEMORY, worker("48m", classify), log("classify"));
+    final StepOutcome outcome = worker("48m", classify);
+    assertEquals(ExitCodes.OUT_OF_MEMORY, outcome.exitCode(), log("classify"));
+    assertEquals(StepOutcome.Status.INCOMPLETE, outcome.status());
+    assertTrue(outcome.reason().startsWith("MEMORY_BUDGET"), outcome.reason());
     assertTrue(log("classify").contains("java.lang.OutOfMemoryError"), log("classify"));
     assertTrue(Files.notExists(StepFile.resultPath(classify)));
+    assertTrue(Files.notExists(job.resolve("classify.closure.nt")));
   }
 
   @Test
   void aWorkerPastItsDeadlineEndsItselfWithStatusFive() throws Exception {
     final Path classify = hardClassification(2_000);
     final long start = System.nanoTime();
-    assertEquals(ExitCodes.TIME_BUDGET, worker("1g", classify), log("classify"));
+    final StepOutcome outcome = worker("1g", classify);
+    assertEquals(ExitCodes.TIME_BUDGET, outcome.exitCode(), log("classify"));
+    assertEquals(StepOutcome.Status.INCOMPLETE, outcome.status());
     final long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
     assertTrue(elapsed < 2_000 + Watchdog.UNWIND_GRACE_MILLIS + 10_000, elapsed + " ms");
     assertEquals("INCOMPLETE", Jobs.manifest(classify).getString("status"));
+    assertTrue(Files.notExists(job.resolve("classify.closure.nt")));
+  }
+
+  /**
+   * A closure shaped like an exported catalog, with an inverse property that sends it to HermiT,
+   * classified in the default 2 GiB worker heap under the default limits. It takes about 16 s and
+   * peaks near 0.3 GiB after collection; the bounds leave room for slower machines.
+   */
+  @Test
+  void aCatalogShapedClosureClassifiesWithinTheDefaultHeap() throws Exception {
+    Jobs.file(job, "catalog.trig", Jobs.catalogOntology(20_000, 30));
+    assertEquals(
+        ExitCodes.COMPLETED,
+        worker("1g", Jobs.write(job, "load", Jobs.load("working", "catalog.trig"))).exitCode(),
+        log("load"));
+    final Path classify =
+        Jobs.write(
+            job,
+            "classify",
+            """
+{"protocol": 1, "stepId": "classify", "kind": "CLASSIFY", "dataset": "working",
+ "timeoutMillis": 300000, "output": "urn:catalog:entailments",
+ "closure": {"root": "http://example.org/catalog", "graphs": ["urn:catalog"]}}
+""");
+    final StepOutcome outcome = worker("2g", classify);
+    assertEquals(StepOutcome.Status.SUCCEEDED, outcome.status(), log("classify"));
+    final JsonObject manifest = Jobs.manifest(classify);
+    assertEquals("HermiT", manifest.getObj("routing").getString("engineUsed"));
+    final JsonObject entailments = manifest.getObj("entailments");
+    assertEquals(20_000, entailments.getNumber("type").longValue());
+    assertTrue(entailments.getNumber("value").longValue() > 100_000, entailments.toString());
+    final JsonObject worker = manifest.getObj("worker");
+    final long peakAfterGc = worker.getNumber("heapPeakAfterGcBytes").longValue();
+    assertTrue(outcome.elapsedMillis() < 120_000, outcome.elapsedMillis() + " ms");
+    assertTrue(peakAfterGc < (1L << 30), peakAfterGc + " bytes after collection");
+  }
+
+  private Path hardClassification(final long timeoutMillis) throws Exception {
+    Jobs.file(job, "hard.trig", Jobs.hardOntology(200));
+    assertEquals(
+        ExitCodes.COMPLETED,
+        worker("256m", Jobs.write(job, "load", Jobs.load("working", "hard.trig"))).exitCode());
+    return Jobs.write(
+        job,
+        "classify",
+        """
+{"protocol": 1, "stepId": "classify", "kind": "CLASSIFY", "dataset": "working",
+ "timeoutMillis": %d, "closure": {"root": "http://example.org/hard", "graphs": ["urn:hard"]}}
+"""
+            .formatted(timeoutMillis));
+  }
+
+  /** Runs one step as the extension would, with the launcher's command for this worker heap. */
+  private StepOutcome worker(final String heap, final Path step) throws IOException {
+    return image.launcher(heap).run(step);
+  }
+
+  private String log(final String name) {
+    try {
+      return Files.readString(job.resolve(name + ".log"), StandardCharsets.UTF_8);
+    } catch (final IOException e) {
+      return "(no log)";
+    }
   }
 
   @Test
@@ -104,62 +191,6 @@ class WorkerProcessIT {
     shipped.remove(System.getProperty("reasoner.workerJar"));
     shipped.remove(System.getProperty("reasoner.hermitJar"));
     assertEquals(pinned, shipped);
-  }
-
-  private Path hardClassification(final long timeoutMillis) throws Exception {
-    Jobs.file(job, "hard.trig", Jobs.hardOntology(200));
-    assertEquals(
-        ExitCodes.COMPLETED,
-        worker("256m", Jobs.write(job, "load", Jobs.load("working", "hard.trig"))));
-    return Jobs.write(
-        job,
-        "classify",
-        """
-{"protocol": 1, "stepId": "classify", "kind": "CLASSIFY", "dataset": "working",
- "timeoutMillis": %d, "closure": {"root": "http://example.org/hard", "graphs": ["urn:hard"]}}
-"""
-            .formatted(timeoutMillis));
-  }
-
-  /** Runs one step with the launcher's flags, minus the Linux-only priority commands. */
-  private int worker(final String heap, final Path step) throws Exception {
-    final List<String> command = new ArrayList<>();
-    command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
-    command.addAll(
-        List.of(
-            "-Xms" + heap,
-            "-Xmx" + heap,
-            "-Xss1m",
-            "-XX:MaxMetaspaceSize=256m",
-            "-XX:ReservedCodeCacheSize=128m",
-            "-XX:MaxDirectMemorySize=64m",
-            "-XX:ActiveProcessorCount=2",
-            "-XX:+UseParallelGC",
-            "-XX:+ExitOnOutOfMemoryError",
-            "-Djava.io.tmpdir=" + job,
-            "-cp",
-            FUSEKI_SERVER + ":" + REASONER + "/*",
-            "org.openmetadata.reasoner.Main",
-            step.toString()));
-    final String name = step.getFileName().toString().replace(".json", "");
-    final Process process =
-        new ProcessBuilder(command)
-            .redirectErrorStream(true)
-            .redirectOutput(job.resolve(name + ".log").toFile())
-            .start();
-    if (!process.waitFor(5, TimeUnit.MINUTES)) {
-      process.destroyForcibly();
-      throw new AssertionError(name + " did not exit");
-    }
-    return process.exitValue();
-  }
-
-  private String log(final String name) {
-    try {
-      return Files.readString(job.resolve(name + ".log"), StandardCharsets.UTF_8);
-    } catch (final IOException e) {
-      return "(no log)";
-    }
   }
 
   private static String sha256(final Path file) throws Exception {

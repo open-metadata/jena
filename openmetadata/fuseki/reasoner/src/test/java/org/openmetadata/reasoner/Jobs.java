@@ -91,6 +91,87 @@ final class Jobs {
   }
 
   /**
+   * A closure shaped like an exported catalog, in graph {@code urn:catalog}: services, databases,
+   * schemas, tables and columns linked by a transitive {@code partOf} and its inverse {@code
+   * hasPart}, plus users, tags and {@code properties - 2} plain object properties that each entity
+   * uses a few of. The inverse puts it outside OWL 2 EL, so it is classified with HermiT. About
+   * {@code individuals} named individuals; deterministic (Park-Miller).
+   */
+  static String catalogOntology(final int individuals, final int properties) {
+    final StringBuilder trig = new StringBuilder(individuals * 320);
+    trig.append("PREFIX owl: <http://www.w3.org/2002/07/owl#>\n")
+        .append("PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n")
+        .append("PREFIX : <http://example.org/catalog#>\n")
+        .append("GRAPH <urn:catalog> {\n")
+        .append("<http://example.org/catalog> a owl:Ontology .\n")
+        .append(":partOf a owl:ObjectProperty , owl:TransitiveProperty .\n")
+        .append(":hasPart a owl:ObjectProperty ; owl:inverseOf :partOf .\n");
+    final int plain = properties - 2;
+    for (int p = 0; p < plain; p++) {
+      trig.append(":p").append(p).append(" a owl:ObjectProperty .\n");
+    }
+    trig.append(":Asset a owl:Class .\n");
+    final String[] levels = {"Service", "Database", "Schema", "Table", "Column"};
+    for (final String level : levels) {
+      trig.append(':').append(level).append(" a owl:Class ; rdfs:subClassOf :Asset .\n");
+    }
+    trig.append(":User a owl:Class .\n:Tag a owl:Class .\n");
+    trig.append(":PiiColumn a owl:Class ; rdfs:subClassOf :Column .\n");
+    trig.append(
+        ":SensitiveTable a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:intersectionOf ("
+            + " :Table [ a owl:Restriction ; owl:onProperty :hasPart ; owl:someValuesFrom"
+            + " :PiiColumn ] ) ] .\n");
+    final int users = Math.max(1, individuals / 200);
+    final int tags = Math.max(1, individuals / 100);
+    for (int u = 0; u < users; u++) {
+      trig.append(":user").append(u).append(" a owl:NamedIndividual , :User .\n");
+    }
+    for (int t = 0; t < tags; t++) {
+      trig.append(":tag").append(t).append(" a owl:NamedIndividual , :Tag .\n");
+    }
+    // Each level has four times as many members as the one above, every member part of one parent.
+    final int assets = individuals - users - tags;
+    final int[] counts = new int[levels.length];
+    int remaining = assets;
+    for (int level = 0; level < levels.length - 1; level++) {
+      counts[level] = Math.max(1, (int) Math.round(assets / Math.pow(4, levels.length - level)));
+      remaining -= counts[level];
+    }
+    counts[levels.length - 1] = Math.max(1, remaining);
+    final long[] seed = {11};
+    final java.util.function.IntUnaryOperator next =
+        bound -> {
+          seed[0] = (seed[0] * 16807) % 2147483647;
+          return (int) (seed[0] % bound);
+        };
+    for (int level = 0; level < levels.length; level++) {
+      for (int i = 0; i < counts[level]; i++) {
+        final String name = ":" + levels[level].toLowerCase(java.util.Locale.ROOT) + i;
+        final boolean pii = level == levels.length - 1 && next.applyAsInt(10) == 0;
+        trig.append(name)
+            .append(" a owl:NamedIndividual , :")
+            .append(pii ? "PiiColumn" : levels[level]);
+        if (level > 0) {
+          trig.append(" ; :partOf :")
+              .append(levels[level - 1].toLowerCase(java.util.Locale.ROOT))
+              .append(next.applyAsInt(counts[level - 1]));
+        }
+        for (int k = 0; k < 3 && plain > 0; k++) {
+          final int property = next.applyAsInt(plain);
+          trig.append(" ; :p").append(property);
+          if (property % 2 == 0) {
+            trig.append(" :user").append(next.applyAsInt(users));
+          } else {
+            trig.append(" :tag").append(next.applyAsInt(tags));
+          }
+        }
+        trig.append(" .\n");
+      }
+    }
+    return trig.append("}\n").toString();
+  }
+
+  /**
    * A small closure HermiT cannot classify in minutes: n classes, each defined as an intersection
    * with an existential over a union, plus a universal restriction. Deterministic (Park-Miller),
    * the same generator as test/hard-ontology.awk in the image smoke test.

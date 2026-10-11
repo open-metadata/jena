@@ -349,8 +349,12 @@ git -C /tmp/hermit-reasoner checkout "$commit"
 `mvn verify` in `reasoner/` runs the conformance suite, which has fifty-two fixtures covering every
 authorable OWL construct, imports, inconsistency and open-world cases, each with a hand-derived
 expected report. It runs every fixture that routes to ELK through HermiT as well and requires
-identical results. Its integration tests run the packaged worker on the image's classpath. The smoke
-test runs the same suite through the built image.
+identical results, and compares the property values it reads from closures with HermiT's for every
+property. The reasoner's tests compile the extension's launcher too: its integration tests start the
+packaged worker with the launcher's real command, on the image's classpath, and include a
+catalog-shaped closure of 20,000 individuals classified in the default 2 GiB heap; unit tests check
+that the exit statuses and step file rules the launcher repeats match the worker's. The smoke test
+runs the same suite through the built image.
 
 ## Publishing
 
