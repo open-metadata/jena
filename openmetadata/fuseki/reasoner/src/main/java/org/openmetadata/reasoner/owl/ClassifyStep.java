@@ -45,10 +45,11 @@ public final class ClassifyStep implements Step {
           step.checks() == null
               ? List.of()
               : input.checks(step.checks(), step.limits().maxChecks());
-      final EngineRouter.Route route = EngineRouter.route(input.ontology(), step.engine());
+      final PropertyValues values = PropertyValues.analyse(input.ontology());
+      final EngineRouter.Route route = EngineRouter.route(input.ontology(), step.engine(), values);
       final Classifier.Outcome outcome;
       try {
-        outcome = Classifier.run(input.ontology(), route, checks, watchdog, step.limits());
+        outcome = Classifier.run(input.ontology(), route, values, checks, watchdog, step.limits());
       } catch (final Classifier.OutputTooLarge e) {
         throw InputRejectedException.of("LIMIT_EXCEEDED", "OUTPUT_TOO_LARGE", e.getMessage());
       }

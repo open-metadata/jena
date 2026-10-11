@@ -27,10 +27,11 @@ import org.semanticweb.owlapi.profiles.OWLProfileViolation;
 /**
  * Chooses the engine for one closure. A closure goes to ELK only when it is in the OWL 2 EL profile
  * and uses nothing for which ELK 0.6.0 reports possibly incomplete results (its
- * TopIncompletenessMonitor), and when the outputs do not need entailments ELK does not compute
- * (property assertions and individual equality). Everything else goes to HermiT. Nothing is ever
- * dropped to make a closure fit ELK; and if ELK still reports incompleteness at run time, the
- * classifier falls back to HermiT.
+ * TopIncompletenessMonitor), and when the outputs do not need entailments ELK does not compute:
+ * individual equality, and object property values beyond the asserted ones (see {@link
+ * PropertyValues}). Asserted values alone keep a closure on ELK, since the classifier reads them
+ * from the closure. Everything else goes to HermiT. Nothing is ever dropped to make a closure fit
+ * ELK; and if ELK still reports incompleteness at run time, the classifier falls back to HermiT.
  */
 final class EngineRouter {
   /** The routing decision, kept in the manifest. */
@@ -46,10 +47,11 @@ final class EngineRouter {
 
   private EngineRouter() {}
 
-  static Route route(final OWLOntology ontology, final EngineChoice choice)
+  static Route route(
+      final OWLOntology ontology, final EngineChoice choice, final PropertyValues values)
       throws InputRejectedException {
     final OWLProfileReport el = new OWL2ELProfile().checkOntology(ontology);
-    final List<String> gaps = elkGaps(ontology);
+    final List<String> gaps = elkGaps(ontology, values);
     return switch (choice) {
       case HERMIT -> new Route(Engine.HERMIT, el.isInProfile(), "HermiT requested");
       case ELK -> {
@@ -81,7 +83,7 @@ final class EngineRouter {
   }
 
   /** What an OWL 2 EL closure uses that ELK would answer incompletely, or not at all. */
-  static List<String> elkGaps(final OWLOntology ontology) {
+  static List<String> elkGaps(final OWLOntology ontology, final PropertyValues values) {
     final TreeSet<String> gaps = new TreeSet<>();
     // Only logical axioms count: ELK ignores annotations, whose literals also carry datatypes.
     if (ontology
@@ -122,8 +124,8 @@ final class EngineRouter {
         gaps.add(type.getName());
       }
     }
-    if (ontology.axioms(AxiomType.OBJECT_PROPERTY_ASSERTION).findAny().isPresent()) {
-      gaps.add("object property assertions, whose entailments ELK does not compute");
+    if (values.needsEngine()) {
+      gaps.add("object property values ELK does not compute: " + values.reason());
     }
     if (ontology.axioms(AxiomType.SAME_INDIVIDUAL).findAny().isPresent()
         || ontology.axioms(AxiomType.DIFFERENT_INDIVIDUALS).findAny().isPresent()) {

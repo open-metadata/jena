@@ -25,6 +25,7 @@ dl-union HermiT
 dl-universal HermiT
 dl-xmlliteral HermiT
 dl-xmlliteral-inconsistent HermiT
+el-asserted-values ELK
 el-disjoint-inconsistent ELK
 el-disjoint-unsatisfiable ELK
 el-domain-range ELK
@@ -34,6 +35,7 @@ el-named-hierarchy ELK
 el-property-chain ELK
 el-realization ELK
 el-reflexive ELK
+el-sub-property-values HermiT
 el-top-bottom ELK
 el-transitive-existential ELK
 imports-isolation-a ELK

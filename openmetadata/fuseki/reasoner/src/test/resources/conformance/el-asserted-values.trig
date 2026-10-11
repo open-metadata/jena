@@ -1,0 +1,24 @@
+# Object property assertions over properties without sub-properties, chains or transitivity entail
+# no further values, so the closure stays with ELK: its values are the asserted ones, and the
+# assertions still take part in realization.
+PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX :     <http://example.org/el-asserted-values#>
+
+GRAPH <urn:fixture:el-asserted-values> {
+  <http://example.org/el-asserted-values> a owl:Ontology .
+  :hasColumn a owl:ObjectProperty .
+  :ownedBy a owl:ObjectProperty .
+  :Table a owl:Class .
+  :PiiColumn a owl:Class .
+  :Team a owl:Class .
+  :SensitiveTable a owl:Class ; owl:equivalentClass [ a owl:Class ; owl:intersectionOf ( :Table
+      [ a owl:Restriction ; owl:onProperty :hasColumn ; owl:someValuesFrom :PiiColumn ] ) ] .
+  :customers a owl:NamedIndividual , :Table ; :hasColumn :email ; :ownedBy :sales .
+  :orders a owl:NamedIndividual , :Table ; :hasColumn :orderId .
+  :email a owl:NamedIndividual , :PiiColumn .
+  :orderId a owl:NamedIndividual .
+  :sales a owl:NamedIndividual , :Team .
+}

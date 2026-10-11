@@ -113,14 +113,23 @@ through `bin/reasoner` (below).
 
 | Engine | Used for | Licence |
 |---|---|---|
-| [HermiT](https://github.com/open-metadata/hermit-reasoner), OpenMetadata's build of upstream `master` | Every closure outside the OWL 2 EL profile, and every one that needs property-value or equality entailments | LGPL-3.0-or-later |
+| [HermiT](https://github.com/open-metadata/hermit-reasoner), OpenMetadata's build of upstream `master` | Every closure outside the OWL 2 EL profile, and every one that needs equality or property values beyond the asserted ones | LGPL-3.0-or-later |
 | [ELK](https://github.com/liveontologies/elk-reasoner) 0.6.0 | Closures in OWL 2 EL that use nothing ELK reports as possibly incomplete | Apache-2.0 |
 
-Both are used only through the OWL API 5.5.1 interfaces. A closure goes to ELK only when it is in the
-OWL 2 EL profile and uses none of the constructs ELK 0.6.0 answers incompletely (data properties,
-nominals, keys, anonymous individuals, property ranges together with assertions); if ELK still
-reports possible incompleteness, the closure is classified again with HermiT. Nothing is ever
-dropped to make a closure fit an engine.
+Both are used through the OWL API 5.5.1 interfaces, plus HermiT's per-property instance query. A
+closure goes to ELK only when it is in the OWL 2 EL profile and uses none of the constructs ELK 0.6.0
+answers incompletely (data properties, nominals, keys, anonymous individuals, property ranges
+together with assertions); if ELK still reports possible incompleteness, the closure is classified
+again with HermiT. Nothing is ever dropped to make a closure fit an engine.
+
+ELK computes no property values. Most object properties of a catalog have only asserted values,
+which the worker reads from the closure itself; an engine is asked only for properties that can
+gain values: those with a sub-property, an equivalent or inverse property, a property chain, or
+symmetry or transitivity over a property with values, reflexive properties, and properties in
+has-value or has-self restrictions. Nominals, anonymous individuals, the universal or empty
+property, and has-value or has-self restrictions together with functional or maximum-cardinality
+constraints can connect individuals in ways no per-property rule sees; with any of them, HermiT is
+asked about every property. A closure in OWL 2 EL whose values are all asserted stays with ELK.
 
 HermiT runs with an explicit configuration: unsupported datatypes are errors, never ignored;
 queries about unknown entities are refused; deadlines interrupt it. **Disjunction learning is off.**
@@ -140,7 +149,7 @@ worker on it. Every path a step names must stay inside its job directory.
 | Step | Does |
 |---|---|
 | `LOAD` | Bulk-loads exported N-Quads or TriG (optionally gzip-compressed) into a fresh private TDB2 dataset |
-| `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences and direct types (and, with HermiT, property values and equalities between named individuals) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
+| `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
 | `EXPLAIN` | Computes one justification for an entailment or an inconsistency |
 | `COMPACT` | Compacts the dataset before it is published |
 
@@ -297,7 +306,7 @@ git -C /tmp/hermit-reasoner checkout "$commit"
 (cd /tmp/hermit-reasoner && mvn -B -Dmaven.test.skip=true -Dmaven.javadoc.skip=true install)
 ```
 
-`mvn verify` in `reasoner/` runs the conformance suite, which has fifty fixtures covering every
+`mvn verify` in `reasoner/` runs the conformance suite, which has fifty-two fixtures covering every
 authorable OWL construct, imports, inconsistency and open-world cases, each with a hand-derived
 expected report. It runs every fixture that routes to ELK through HermiT as well and requires
 identical results. Its integration tests run the packaged worker on the image's classpath. The smoke

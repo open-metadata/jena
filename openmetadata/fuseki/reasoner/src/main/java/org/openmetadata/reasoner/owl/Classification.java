@@ -81,11 +81,12 @@ final class Classification {
     return consistent;
   }
 
-  void add(final Kind kind, final String first, final String second, final String third) {
+  /** Records a fact; false when it was already recorded. */
+  boolean add(final Kind kind, final String first, final String second, final String third) {
     if (!consistent) {
       throw new IllegalStateException("An inconsistent closure has no entailments to record");
     }
-    facts.add(new Fact(kind, first, second, third));
+    return facts.add(new Fact(kind, first, second, third));
   }
 
   /** Records an unordered pair once, so the result never depends on iteration order. */

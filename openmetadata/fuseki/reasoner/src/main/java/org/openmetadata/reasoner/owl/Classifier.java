@@ -14,13 +14,16 @@ package org.openmetadata.reasoner.owl;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.openmetadata.reasoner.InputRejectedException;
 import org.openmetadata.reasoner.Limits;
 import org.openmetadata.reasoner.Watchdog;
 import org.openmetadata.reasoner.owl.Classification.Kind;
+import org.semanticweb.HermiT.Reasoner;
 import org.semanticweb.elk.owlapi.ElkReasoner;
 import org.semanticweb.elk.reasoner.completeness.IncompleteResult;
 import org.semanticweb.elk.reasoner.completeness.Incompleteness;
@@ -65,6 +68,7 @@ final class Classifier {
   static Outcome run(
       final OWLOntology ontology,
       final EngineRouter.Route route,
+      final PropertyValues values,
       final List<Check> checks,
       final Watchdog watchdog,
       final Limits limits)
@@ -79,7 +83,14 @@ final class Classifier {
           fallback = "ELK reported possibly incomplete results; classified with HermiT";
         } else {
           final Classification classification =
-              collect(elk, ontology, Incompleteness.getValue(consistent), false, watchdog, limits);
+              collect(
+                  elk,
+                  ontology,
+                  Incompleteness.getValue(consistent),
+                  null,
+                  values,
+                  watchdog,
+                  limits);
           return new Outcome(
               classification,
               Engine.ELK,
@@ -91,11 +102,11 @@ final class Classifier {
         elk.dispose();
       }
     }
-    final OWLReasoner hermit = Engine.hermit(ontology);
+    final Reasoner hermit = Engine.hermit(ontology);
     try {
       watchdog.guard(hermit::interrupt);
       final Classification classification =
-          collect(hermit, ontology, hermit.isConsistent(), true, watchdog, limits);
+          collect(hermit, ontology, hermit.isConsistent(), hermit, values, watchdog, limits);
       final List<CheckResult> results = new ArrayList<>();
       for (final Check check : checks) {
         results.add(checkWithHermit(hermit, classification, check, watchdog));
@@ -107,11 +118,18 @@ final class Classifier {
     }
   }
 
+  /**
+   * @param hermit the same reasoner when it is HermiT, which then also answers equality and the
+   *     property values {@code values} says only an engine can compute; null for ELK, which the
+   *     router gives only closures whose property values are all asserted and that entail no
+   *     equality
+   */
   private static Classification collect(
       final OWLReasoner reasoner,
       final OWLOntology ontology,
       final boolean consistent,
-      final boolean propertyAssertions,
+      final Reasoner hermit,
+      final PropertyValues values,
       final Watchdog watchdog,
       final Limits limits)
       throws InputRejectedException {
@@ -120,9 +138,11 @@ final class Classifier {
     }
     final List<InferenceType> inferences =
         new ArrayList<>(List.of(InferenceType.CLASS_HIERARCHY, InferenceType.CLASS_ASSERTIONS));
-    if (propertyAssertions) {
-      inferences.add(InferenceType.OBJECT_PROPERTY_ASSERTIONS);
+    if (hermit != null) {
       inferences.add(InferenceType.SAME_INDIVIDUAL);
+      if (values.needsEngine()) {
+        inferences.add(InferenceType.OBJECT_PROPERTY_ASSERTIONS);
+      }
     }
     reasoner.precomputeInferences(inferences.toArray(InferenceType[]::new));
     final Classification classification = Classification.consistent();
@@ -153,12 +173,42 @@ final class Classifier {
                 budget.spend(1);
               });
     }
-    final List<OWLObjectProperty> properties =
-        sorted(
-            ontology
-                .objectPropertiesInSignature()
-                .filter(p -> !p.isOWLTopObjectProperty() && !p.isOWLBottomObjectProperty()));
-    for (final OWLNamedIndividual individual : sorted(ontology.individualsInSignature())) {
+    final List<OWLNamedIndividual> individuals = sorted(ontology.individualsInSignature());
+    final Map<OWLNamedIndividual, Set<OWLNamedIndividual>> equal = new HashMap<>();
+    if (hermit != null) {
+      for (final OWLNamedIndividual individual : individuals) {
+        checkDeadline(watchdog);
+        final Set<OWLNamedIndividual> same =
+            reasoner.getSameIndividuals(individual).entities().collect(Collectors.toSet());
+        if (same.size() > 1) {
+          equal.put(individual, same);
+          for (final OWLNamedIndividual other : same) {
+            if (!other.equals(individual)) {
+              classification.addPair(Kind.SAME, iri(individual), iri(other));
+              budget.spend(1);
+            }
+          }
+        }
+      }
+      for (final OWLObjectProperty property :
+          sorted(
+              ontology
+                  .objectPropertiesInSignature()
+                  .filter(p -> !p.isOWLTopObjectProperty() && !p.isOWLBottomObjectProperty())
+                  .filter(values::entailsValues))) {
+        checkDeadline(watchdog);
+        hermit
+            .getObjectPropertyInstances(property)
+            .forEach(
+                (subject, objects) -> {
+                  for (final OWLNamedIndividual object : objects) {
+                    classification.add(Kind.VALUE, iri(subject), iri(property), iri(object));
+                    budget.spend(1);
+                  }
+                });
+      }
+    }
+    for (final OWLNamedIndividual individual : individuals) {
       checkDeadline(watchdog);
       final String iri = iri(individual);
       reasoner
@@ -170,26 +220,23 @@ final class Classifier {
                 classification.add(Kind.TYPE, iri, iri(type), null);
                 budget.spend(1);
               });
-      if (!propertyAssertions) {
-        continue;
+      for (final OWLNamedIndividual same : equal.getOrDefault(individual, Set.of(individual))) {
+        ontology
+            .objectPropertyAssertionAxioms(same)
+            .filter(assertion -> !values.entailsValues(assertion.getProperty().getNamedProperty()))
+            .filter(assertion -> assertion.getObject().isNamed())
+            .forEach(
+                assertion -> {
+                  final String property = iri(assertion.getProperty().getNamedProperty());
+                  final OWLNamedIndividual object = assertion.getObject().asOWLNamedIndividual();
+                  for (final OWLNamedIndividual value :
+                      equal.getOrDefault(object, Set.of(object))) {
+                    if (classification.add(Kind.VALUE, iri, property, iri(value))) {
+                      budget.spend(1);
+                    }
+                  }
+                });
       }
-      for (final OWLObjectProperty property : properties) {
-        checkDeadline(watchdog);
-        for (final OWLNamedIndividual value :
-            sorted(reasoner.getObjectPropertyValues(individual, property).entities())) {
-          classification.add(Kind.VALUE, iri, iri(property), iri(value));
-          budget.spend(1);
-        }
-      }
-      reasoner
-          .getSameIndividuals(individual)
-          .entities()
-          .filter(same -> !same.equals(individual))
-          .forEach(
-              same -> {
-                classification.addPair(Kind.SAME, iri, iri(same));
-                budget.spend(1);
-              });
     }
     budget.verify();
     return classification;

@@ -31,8 +31,9 @@ import org.semanticweb.owlapi.reasoner.OWLReasonerConfiguration;
 import org.semanticweb.owlapi.reasoner.OWLReasonerFactory;
 
 /**
- * The two engines, with the configuration the worker always uses. Code outside this class only sees
- * OWL API {@link OWLReasoner}s. HermiT is never created through its no-argument factory methods,
+ * The two engines, with the configuration the worker always uses. Code outside this class uses them
+ * through the OWL API {@link OWLReasoner} interface, except for HermiT's per-property instance
+ * query, which the OWL API lacks. HermiT is never created through its no-argument factory methods,
  * which silently ignore unsupported datatypes for Protégé.
  */
 public enum Engine {
@@ -149,7 +150,7 @@ public enum Engine {
    * rejected before they reach it; the engine refusing them as well keeps a typo from ever reading
    * as NOT_ENTAILED.
    */
-  static OWLReasoner hermit(final OWLOntology ontology) {
+  static Reasoner hermit(final OWLOntology ontology) {
     return new Reasoner(hermitConfiguration(FreshEntityPolicy.DISALLOW), ontology);
   }
 

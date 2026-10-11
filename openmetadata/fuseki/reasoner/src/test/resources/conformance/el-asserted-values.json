@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-asserted-values",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-asserted-values",
+    "graphs": [
+      "urn:fixture:el-asserted-values"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-asserted-values:entailments"
+}

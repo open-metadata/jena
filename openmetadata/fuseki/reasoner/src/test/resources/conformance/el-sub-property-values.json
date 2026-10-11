@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "stepId": "el-sub-property-values",
+  "kind": "CLASSIFY",
+  "dataset": "working",
+  "timeoutMillis": 120000,
+  "report": true,
+  "closure": {
+    "root": "http://example.org/el-sub-property-values",
+    "graphs": [
+      "urn:fixture:el-sub-property-values"
+    ]
+  },
+  "engine": "AUTO",
+  "output": "urn:fixture:el-sub-property-values:entailments"
+}
