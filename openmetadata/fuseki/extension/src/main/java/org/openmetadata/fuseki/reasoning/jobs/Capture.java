@@ -69,7 +69,7 @@ import org.apache.jena.vocabulary.RDF;
  * reaching one stops the copy and removes the partial spool.
  */
 public final class Capture {
-  public static final String CLOSURE_ALGORITHM = "om-closure-v1";
+  public static final String CLOSURE_ALGORITHM = "om-closure-v2";
   static final String OMR = "https://open-metadata.org/reasoning/";
 
   /** Bound checks run once per this many quads, which keeps them off the copy's hot path. */
@@ -482,7 +482,11 @@ public final class Capture {
       return header;
     }
 
-    /** The closure digest, om-closure-v1, of these members and import lines. */
+    /**
+     * The closure digest, {@value Capture#CLOSURE_ALGORITHM}, of these members and import lines.
+     * Every line comes from a manifest: OpenMetadata publishes no closure with a missing import or
+     * an import cycle, which no manifest could record.
+     */
     String closureDigest(final TreeMap<String, String> members, final List<String> importLines) {
       final MessageDigest sha256 = GraphDigest.sha256();
       final List<String> lines = new ArrayList<>();

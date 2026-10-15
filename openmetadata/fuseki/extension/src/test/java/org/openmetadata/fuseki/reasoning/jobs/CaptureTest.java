@@ -108,10 +108,10 @@ class CaptureTest {
   @Test
   void theClosureDigestIsTheDocumentedOne() {
     assertEquals(
-        "sha256:b6c75f3e470d0bb393eed65dd1cd4a2ecadd257f35cb68de4787167b2af3f746",
+        "sha256:14a01107832a95295a2b152ff2d607b774c892caad6b3d0ff642a3b772263eb3",
         Manifests.closureDigest(
             List.of(
-                "om-closure-v1",
+                "om-closure-v2",
                 "ontology <https://ex.org/o>",
                 "glossary <https://ex.org/g>",
                 "selection APPROVED",
@@ -220,6 +220,40 @@ class CaptureTest {
         dataset,
         () -> RDFParser.fromString(triangles.append("}\n").toString(), Lang.TRIG).parse(dataset));
     assertRefused(selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, term);
+  }
+
+  /**
+   * OpenMetadata publishes no closure whose imports are missing or form a cycle, and its digest has
+   * no line for either. A manifest that names a missing manifest is not a manifest the store can
+   * check; one that imports itself cannot match its own digest.
+   */
+  @Test
+  void anImportCycleCannotMatchItsDigest() {
+    Txn.executeWrite(
+        dataset,
+        () ->
+            dataset.add(
+                NodeFactory.createURI(finance.graph()),
+                NodeFactory.createURI(finance.versionIri()),
+                NodeFactory.createURI(Manifests.OMR + "importsManifest"),
+                NodeFactory.createURI(finance.graph())));
+    assertRefused(
+        selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, finance.versionIri());
+  }
+
+  @Test
+  void aManifestOfAnEarlierDigestAlgorithmIsNotChecked() {
+    Txn.executeWrite(
+        dataset,
+        () -> {
+          final Node graph = NodeFactory.createURI(finance.graph());
+          final Node version = NodeFactory.createURI(finance.versionIri());
+          final Node algorithm = NodeFactory.createURI(Manifests.OMR + "digestAlgorithm");
+          dataset.delete(
+              graph, version, algorithm, NodeFactory.createLiteralString("om-closure-v2"));
+          dataset.add(graph, version, algorithm, NodeFactory.createLiteralString("om-closure-v1"));
+        });
+    assertRefused(selection(finance), bounds(), Problem.Code.NOT_IMPLEMENTED, finance.graph());
   }
 
   @Test

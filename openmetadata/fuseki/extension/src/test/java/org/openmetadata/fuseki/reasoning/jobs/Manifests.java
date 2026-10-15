@@ -56,7 +56,7 @@ public final class Manifests {
           }
         });
     final List<String> lines = new ArrayList<>();
-    lines.add("om-closure-v1");
+    lines.add("om-closure-v2");
     lines.add("ontology <" + ontologyIri + ">");
     lines.add("glossary <" + glossaryIri + ">");
     lines.add("selection " + selection);
@@ -101,7 +101,7 @@ public final class Manifests {
         .append(selection)
         .append("\" ; omr:closureDigest \"")
         .append(digest)
-        .append("\" ; omr:digestAlgorithm \"om-closure-v1\" ; omr:memberCount ")
+        .append("\" ; omr:digestAlgorithm \"om-closure-v2\" ; omr:memberCount ")
         .append(pinned.size())
         .append(" ; omr:createdAt \"2026-10-15T08:00:00Z\"^^")
         .append("<http://www.w3.org/2001/XMLSchema#dateTime> .\n");

@@ -328,9 +328,14 @@ base IRI.
 Inside one read transaction of the serving dataset, the capture then, for the manifest and each
 manifest it imports (`omr:importsManifest`):
 
-1. recomputes the closure digest (`om-closure-v1`) from the manifest's header and its
-   `omr:pinnedDigest` members and compares it with the manifest's `omr:closureDigest`, and the
-   root's with the request's `ontologyDigest`;
+1. recomputes the closure digest (`om-closure-v2`) from the manifest's header, its
+   `omr:pinnedDigest` members and one `import <ontology> <closure digest>` line per
+   `omr:importsManifest`, and compares it with the manifest's `omr:closureDigest`, and the root's
+   with the request's `ontologyDigest`. A manifest of another algorithm, such as `om-closure-v1`,
+   is refused `NOT_IMPLEMENTED`. OpenMetadata publishes no closure with a missing import or an
+   import cycle, and the digest has no line for either: a manifest naming a manifest the store
+   does not hold is refused `MISSING_IMPORT`, and one that imports itself, directly or not, cannot
+   match its own digest and is refused `GENERATION_MISMATCH` (`CaptureTest`);
 2. copies the manifest's `owl:Ontology` header (type, version IRI, imports), never its `omr:`
    control triples;
 3. reads each pinned graph not copied yet, recomputes its digest and compares it with the pinned
