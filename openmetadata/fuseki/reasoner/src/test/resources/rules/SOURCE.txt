@@ -1,0 +1,4 @@
+The four rule files here are OpenMetadata's starter inference rules, copied unchanged from
+openmetadata-service/src/main/resources/rdf/inference-rules/ on OpenMetadata main at
+cf575934286 (2026-10-14). The worker's tests run them as a bundle, so a change to OpenMetadata's
+rules is copied here and the tests show what it does to their conclusions.
