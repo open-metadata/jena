@@ -29,7 +29,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `FUSEKI_MANAGE_SHIRO` | `true` | `false` keeps an operator-provided `$FUSEKI_BASE/shiro.ini`; `ADMIN_PASSWORD` is then not required. |
 | `FUSEKI_DATASETS` | unset | Comma-separated dataset names. Each gets a TDB2 dataset config in `$FUSEKI_BASE/configuration/<name>.ttl` if that file does not exist. Existing files are never modified. |
 | `FUSEKI_HEAP` | `4g` | Sets both `-Xms` and `-Xmx`, so the page-cache budget is predictable. Ignored when `JVM_ARGS` is set. |
-| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended. |
+| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended, and so is `-XX:MaxDirectMemorySize=256m` unless `JVM_ARGS` sets that flag. |
 | `FUSEKI_QUERY_TIMEOUT_MS` | unset | Server-wide `arq:queryTimeout`, applied to every dataset including existing ones. |
 | `FUSEKI_UPDATE_TIMEOUT_MS` | unset | Server-wide `arq:updateTimeout`, applied to every dataset. |
 | `FUSEKI_UNION_DEFAULT_GRAPH` | `false` | `true` makes the default graph the union of named graphs for every TDB2 dataset. |
@@ -187,6 +187,19 @@ transitive containment hierarchy with its inverse and three assertions each (297
 collection. The axiom limit is lower than that, because terminological axioms cost the engines more
 than assertions.
 
+Measured again on the published `6.2.0-600514c` image (Apple M4 Max, `linux/arm64`, two worker
+processors), the same shape needs:
+
+| Individuals | Closure triples | Logical axioms | Peak after collection | Classifies in |
+|---:|---:|---:|---:|---|
+| 10,000 | 59,434 | 49,384 | 0.16–0.23 GiB | 512 MiB, in 9–10 s |
+| 20,000 | 118,823 | 98,773 | 0.27–0.36 GiB | 512 MiB, in 16–26 s |
+| 50,000 | 296,997 | 246,947 | 0.57–0.65 GiB | 1 GiB, in 46–88 s; a 512 MiB heap runs out |
+
+The 200,000-axiom limit of the default heap therefore admits about 40,000 individuals of this shape;
+the 50,000-individual closure needs `OPENMETADATA_REASONER_HEAP=2560m` or a `maxLogicalAxioms` in
+its step file.
+
 Each step writes `<step>.result.json`, and the launcher writes `<step>.status.json` and
 `<step>.log`. A step file with `"report": true` also gets `<step>.report.txt`, a sorted listing of
 the step's answer for tests and diagnosis; for `CLASSIFY` it repeats the output graph, so it is off
@@ -312,13 +325,25 @@ container memory limit >= (H_f + O_f + H_w + O_w + C_min) / 0.9
 | Term | Meaning | Value |
 |---|---|---|
 | `H_f` | Fuseki heap | `FUSEKI_HEAP`, or the last `-Xmx` in `JVM_ARGS` |
-| `O_f` | Fuseki off-heap | 1 GiB, 1.5 GiB from an 8 GiB heap |
+| `O_f` | Fuseki off-heap | Its direct-buffer limit (`-XX:MaxDirectMemorySize`, 256 MiB unless `JVM_ARGS` sets it; 0 means the heap) plus 768 MiB, or 1.25 GiB from an 8 GiB heap: 1 GiB and 1.5 GiB by default |
 | `H_w` | Worker heap | `OPENMETADATA_REASONER_HEAP` |
 | `O_w` | Worker off-heap: metaspace, code cache and direct memory are capped at 256, 128 and 64 MiB | `OPENMETADATA_REASONER_OFF_HEAP` |
 | `C_min` | Page cache kept for serving | `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR`; 50% of `/fuseki/databases` by default |
 
 The limit is read from cgroup v2 `memory.max`, else cgroup v1, else physical memory when the
-container has no limit. The values of `O_f` and `O_w` are starting values until they are measured.
+container has no limit.
+
+`O_f` and `O_w` were measured with Native Memory Tracking (committed memory outside the heap) on
+Apple M4 Max hardware, in a `linux/arm64` container limited to 4 CPUs and 16 GiB:
+
+- **Fuseki**, 4 GiB heap, while OpenMetadata rebuilt a 20,000-table, 200,000-edge catalog (2.8
+  million triples) twice and queried it: direct buffers reached 1.5 GiB without a limit, because
+  Fuseki allocates about 5 MiB of them per HTTP request and frees them only when a collection finds
+  their owners; everything else outside the heap stayed under 300 MiB. The entrypoint therefore caps
+  direct buffers, and the JVM collects when it reaches the cap.
+- **Worker**, 2 GiB heap: at most 200 MiB outside the heap, on every conformance fixture and on
+  catalog-shaped closures of 10,000 to 50,000 individuals. The 512 MiB default leaves room for the
+  capped regions it was sized from.
 
 For example, `FUSEKI_HEAP=512m`, `OPENMETADATA_REASONER_HEAP=1g` and
 `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR=64m` need `(512 + 1024 + 1024 + 512 + 64) MiB / 0.9`, so

@@ -112,6 +112,11 @@ status_is() {
 }
 
 # Fuseki 6.2 labels the sample with application="fuseki" and prints it in scientific notation.
+server_flag_set() {
+  docker exec "$CONTAINER" sh -c 'tr "\0" " " < /proc/$(pgrep -f fuseki-server.jar | head -1)/cmdline' \
+    | grep -q -- "$1"
+}
+
 heap_max_bytes_is() {
   local actual
   actual=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics" \
@@ -312,6 +317,7 @@ check "union default graph is off by default" union_is ds false
 check "health ping is anonymous" status_is 200 "$BASE/\$/ping"
 check "queries require the admin account" status_is 401 -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
 check "heap follows FUSEKI_HEAP" heap_max_bytes_is 536870912
+check "direct buffers are capped" server_flag_set "-XX:MaxDirectMemorySize=256m"
 check "reasoning is off by default" [ "$(reasoner readiness 2> /dev/null | jq -r .status)" = "DISABLED" ]
 check "no reasoning directory without reasoning" docker exec "$CONTAINER" test ! -e /fuseki/reasoning
 

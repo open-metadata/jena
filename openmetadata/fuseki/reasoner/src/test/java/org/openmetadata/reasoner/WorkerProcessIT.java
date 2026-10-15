@@ -133,6 +133,10 @@ class WorkerProcessIT {
     assertEquals(StepOutcome.Status.SUCCEEDED, outcome.status(), log("classify"));
     final JsonObject manifest = Jobs.manifest(classify);
     assertEquals("HermiT", manifest.getObj("routing").getString("engineUsed"));
+    assertEquals(
+        Limits.forHeap(2L << 30).maxIndividuals(),
+        manifest.getObj("limits").getNumber("maxIndividuals").longValue(),
+        "the default limits follow the configured 2 GiB heap");
     final JsonObject entailments = manifest.getObj("entailments");
     assertEquals(20_000, entailments.getNumber("type").longValue());
     assertTrue(entailments.getNumber("value").longValue() > 100_000, entailments.toString());

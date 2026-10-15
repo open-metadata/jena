@@ -215,6 +215,13 @@ compose_jvm_args() {
   if [ -z "${JVM_ARGS:-}" ]; then
     JVM_ARGS="-Xms$FUSEKI_HEAP -Xmx$FUSEKI_HEAP"
   fi
+  # Fuseki allocates direct buffers per request and frees them only when a collection finds their
+  # owners; under the JVM default limit, the whole heap, they pile up outside the heap between
+  # collections. At this limit the JVM collects instead. The extension's memory budget assumes the
+  # same value (ReasoningSettings.DEFAULT_FUSEKI_DIRECT_MEMORY); JVM_ARGS can set another.
+  if [[ "$JVM_ARGS" != *-XX:MaxDirectMemorySize=* ]]; then
+    JVM_ARGS="$JVM_ARGS -XX:MaxDirectMemorySize=256m"
+  fi
   require_boolean FUSEKI_UNION_DEFAULT_GRAPH "$FUSEKI_UNION_DEFAULT_GRAPH"
   if [ "$FUSEKI_UNION_DEFAULT_GRAPH" = "true" ]; then
     JVM_ARGS="$JVM_ARGS -Dtdb2:unionDefaultGraph=true"

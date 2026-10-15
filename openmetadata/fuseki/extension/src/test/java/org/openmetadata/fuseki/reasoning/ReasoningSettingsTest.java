@@ -30,6 +30,7 @@ class ReasoningSettingsTest {
     assertEquals(-1, settings.pageCacheFloorBytes());
     assertEquals(50, settings.pageCacheFloorPercent());
     assertEquals(4 * Sizes.GIB, settings.fusekiHeap());
+    assertEquals(256 * Sizes.MIB, settings.fusekiDirectMemory());
     assertEquals(Math.max(1, Runtime.getRuntime().availableProcessors() / 2), settings.cpus());
     assertEquals("/fuseki/reasoning", settings.reasoningRoot().toString());
     assertEquals(
@@ -53,8 +54,33 @@ class ReasoningSettingsTest {
     assertEquals(3 * Sizes.GIB, settings.pageCacheFloorBytes());
     assertEquals(3, settings.cpus());
     assertEquals(8 * Sizes.GIB, settings.fusekiHeap());
-    assertEquals(3 * Sizes.GIB / 2, ReasoningSettings.fusekiOffHeap(settings.fusekiHeap()));
-    assertEquals(Sizes.GIB, ReasoningSettings.fusekiOffHeap(4 * Sizes.GIB));
+  }
+
+  @Test
+  void fusekiOffHeapIsItsDirectLimitPlusTheRestOfItsNativeMemory() {
+    final long direct = ReasoningSettings.DEFAULT_FUSEKI_DIRECT_MEMORY;
+    assertEquals(Sizes.GIB, ReasoningSettings.fusekiOffHeap(4 * Sizes.GIB, direct));
+    assertEquals(3 * Sizes.GIB / 2, ReasoningSettings.fusekiOffHeap(8 * Sizes.GIB, direct));
+    assertEquals(
+        3 * Sizes.GIB / 4 + 4 * Sizes.GIB,
+        ReasoningSettings.fusekiOffHeap(4 * Sizes.GIB, 0),
+        "the JVM's default direct limit is the heap");
+  }
+
+  @Test
+  void jvmArgsSetFusekiDirectMemoryAsTheEntrypointLeavesIt() {
+    assertEquals(
+        Sizes.GIB,
+        ReasoningSettings.fromEnvironment(
+                Map.of("JVM_ARGS", "-Xmx4g -XX:MaxDirectMemorySize=64m -XX:MaxDirectMemorySize=1g"))
+            .fusekiDirectMemory());
+    assertEquals(
+        0,
+        ReasoningSettings.fromEnvironment(Map.of("JVM_ARGS", "-XX:MaxDirectMemorySize=0"))
+            .fusekiDirectMemory());
+    assertEquals(
+        ReasoningSettings.DEFAULT_FUSEKI_DIRECT_MEMORY,
+        ReasoningSettings.fromEnvironment(Map.of("JVM_ARGS", "-Xmx4g")).fusekiDirectMemory());
   }
 
   @Test
