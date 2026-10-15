@@ -63,6 +63,16 @@ class WorkerStageTest {
         null);
     assertProblem(
         Status.FAILED, "INVALID_STEP: stepId must match", null, Problem.Code.INTERNAL, null);
+    final JsonObject passes = rejected("PASS_BUDGET", "64 passes");
+    passes.put("limit", "maxPasses");
+    assertProblem(
+        Status.INCOMPLETE, "PASS_BUDGET", passes, Problem.Code.LIMIT_EXCEEDED, "maxPasses");
+    assertProblem(
+        Status.FAILED,
+        "INVALID_RULES",
+        rejected("RULE_NOT_MONOTONIC", "rule 'r': OPTIONAL is not allowed"),
+        Problem.Code.RULE_FAILED,
+        null);
   }
 
   @Test
