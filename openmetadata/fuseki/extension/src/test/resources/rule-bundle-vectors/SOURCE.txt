@@ -1,5 +1,7 @@
-Copied from open-metadata/OpenMetadata's working tree on branch feat/rdf-rule-bundle (2026-10-15),
-openmetadata-service/src/test/resources/rdf/rule-bundle-vectors/, which was not yet committed when
-copied; the digest it pins is specified in docs/rdf-rule-bundle-contract.md at commit fe0ce329ca8.
-RuleBundleTest computes every digest in expected.txt with the store's RuleBundle. Replace these
-files with the committed copy, and name its commit here, once OpenMetadata commits them.
+Copied unchanged from open-metadata/OpenMetadata at commit 0240e1e307c (branch feat/rdf-rule-bundle,
+2026-10-15, not yet on main when copied):
+openmetadata-service/src/test/resources/rdf/rule-bundle-vectors/. The digest they pin, om-rules-v1, is
+specified in docs/rdf-rule-bundle-contract.md (OpenMetadata's
+ADR:2026-10-15-governance-rules-are-published-as-a-content-addressed-bundle). RuleBundleTest computes
+every digest in expected.txt with the store's RuleBundle. Refresh these files when the digest
+changes, and keep the commit above current.
