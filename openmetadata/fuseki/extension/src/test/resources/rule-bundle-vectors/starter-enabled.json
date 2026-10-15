@@ -1,0 +1,17 @@
+[
+  {
+    "name": "schema-tag-inheritance",
+    "ruleType": "CONSTRUCT",
+    "ruleBody": "PREFIX om: <https://open-metadata.org/ontology/>\nCONSTRUCT {\n  ?descendant om:hasTag ?tag .\n  ?descendant om:inferredTagSource ?ancestor\n}\nWHERE {\n  {\n    ?ancestor a om:DatabaseSchema ;\n              om:hasTag ?tag .\n    ?descendant om:belongsToSchema ?ancestor .\n  } UNION {\n    ?ancestor a om:Table ;\n              om:hasTag ?tag .\n    ?ancestor om:hasColumn ?descendant .\n  }\n}"
+  },
+  {
+    "name": "pii-propagation-via-lineage",
+    "ruleType": "CONSTRUCT",
+    "ruleBody": "PREFIX om: <https://open-metadata.org/ontology/>\nCONSTRUCT {\n  ?downstream om:hasTag ?piiTag .\n  ?downstream om:inferredTagSource ?upstream\n}\nWHERE {\n  ?upstream om:hasTag ?piiTag .\n  ?piiTag om:tagFQN ?fqn .\n  FILTER(STRSTARTS(?fqn, \"PII.\"))\n  ?colLineage om:fromColumn ?upstream ;\n              om:toColumn ?downstream .\n}"
+  },
+  {
+    "name": "domain-membership-inheritance",
+    "ruleType": "CONSTRUCT",
+    "ruleBody": "PREFIX om: <https://open-metadata.org/ontology/>\nCONSTRUCT { ?column om:belongsToDomain ?domain }\nWHERE {\n  ?table a om:Table ;\n         om:belongsToDomain ?domain ;\n         om:hasColumn ?column .\n}"
+  }
+]

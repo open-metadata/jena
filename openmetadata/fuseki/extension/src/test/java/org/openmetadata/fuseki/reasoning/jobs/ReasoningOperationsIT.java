@@ -169,9 +169,15 @@ class ReasoningOperationsIT {
     assertEquals("GET", wrongMethod.headers().firstValue("Allow").orElseThrow());
     assertProblem(
         get("/reasoning/results/" + UUID.randomUUID(), "admin", "admin-pw"),
-        501,
-        "NOT_IMPLEMENTED");
-    assertProblem(post("/reasoning/query", "{}"), 501, "NOT_IMPLEMENTED");
+        404,
+        "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query", "{}"), 400, "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query?dataset=nope", "{}"), 404, "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query?dataset=ds", "{\"query\": \"ASK {}\"}"), 503, "NOT_READY");
+    assertProblem(
+        post("/reasoning/query?dataset=ds", "{\"query\": \"DESCRIBE <urn:x>\"}"),
+        400,
+        "INVALID_REQUEST");
   }
 
   private void start(final Path shiro, final Stage.Planner planner) throws IOException {
@@ -179,8 +185,7 @@ class ReasoningOperationsIT {
     final ReasoningSettings settings = workers.settings(Map.of());
     service =
         new JobService(
-            settings,
-            JobSettings.fromEnvironment(Map.of()),
+            new Operations(settings, JobSettings.fromEnvironment(Map.of())),
             workers.launcher(settings),
             () -> workers.readiness(settings),
             planner,

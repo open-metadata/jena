@@ -96,13 +96,13 @@ class OntologyJobsIT {
     approved = publish("APPROVED", MEMBERS);
     settings = image.settings("512m");
     final JobSettings jobs = JobSettings.fromEnvironment(Map.of());
+    final Operations operations = new Operations(settings, jobs);
     service =
         new JobService(
-            settings,
-            jobs,
+            operations,
             image.launcher(settings),
             image.launcher(settings)::readiness,
-            Plans.current(new Operations(settings, jobs), name -> serving),
+            Plans.current(operations, name -> serving),
             System::currentTimeMillis);
     service.open();
     service.start();

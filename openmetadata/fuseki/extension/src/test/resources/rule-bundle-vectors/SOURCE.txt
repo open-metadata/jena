@@ -1,0 +1,5 @@
+Copied from open-metadata/OpenMetadata's working tree on branch feat/rdf-rule-bundle (2026-10-15),
+openmetadata-service/src/test/resources/rdf/rule-bundle-vectors/, which was not yet committed when
+copied; the digest it pins is specified in docs/rdf-rule-bundle-contract.md at commit fe0ce329ca8.
+RuleBundleTest computes every digest in expected.txt with the store's RuleBundle. Replace these
+files with the committed copy, and name its commit here, once OpenMetadata commits them.
