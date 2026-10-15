@@ -73,6 +73,7 @@ public record StepFile(
           "checks",
           "explain",
           "read",
+          "readFile",
           "rules",
           "provenance",
           "limits");
@@ -96,9 +97,18 @@ public record StepFile(
    * The import closure to reason over: named graphs of the working dataset and its root. With
    * {@code allGraphs} the graphs are every named graph of the working dataset, as when it holds
    * exactly one captured closure, and {@code graphs} is empty; a closure of many small graphs then
-   * does not have to be listed in the step file.
+   * does not have to be listed in the step file. With {@code graphsFile} they are read from a file
+   * in the job directory, one IRI per line, as when a working dataset holds several closures.
    */
   public record Closure(String root, List<String> graphs, boolean allGraphs) {}
+
+  /**
+   * Graphs one closure may list, in the step file or its graphs file: the store's maxImports, which
+   * the extension's capture enforces before a closure gets here.
+   */
+  public static final int MAX_CLOSURE_GRAPHS = 10_000;
+
+  private static final long MAX_GRAPHS_FILE_BYTES = 64L << 20;
 
   /**
    * What to justify: one entailed axiom, in OWL 2 functional syntax, or the inconsistency; and how
@@ -174,7 +184,7 @@ public record StepFile(
     Explain explain = null;
     Governance governance = null;
     if (kind != StepKind.RULES) {
-      rejectKeys(json, kind, "read", "rules", "provenance");
+      rejectKeys(json, kind, "read", "readFile", "rules", "provenance");
     }
     switch (kind) {
       case LOAD -> {
@@ -192,7 +202,7 @@ public record StepFile(
       }
       case CLASSIFY, EXPLAIN -> {
         rejectKeys(json, kind, "inputs");
-        closure = closure(json.get("closure"));
+        closure = closure(json.get("closure"), jobDirectory);
         if (json.hasKey("engine")) {
           engine = enumValue(EngineChoice.class, requiredString(json, "engine"), "engine");
         }
@@ -219,7 +229,7 @@ public record StepFile(
           rejectKeys(json, kind, "inputs", "closure", "engine", "output", "checks", "explain");
       case RULES -> {
         rejectKeys(json, kind, "inputs", "closure", "engine", "output", "checks", "explain");
-        governance = governance(json);
+        governance = governance(json, jobDirectory);
       }
     }
     return new StepFile(
@@ -240,17 +250,40 @@ public record StepFile(
         limits);
   }
 
-  private static Governance governance(final JsonObject json) throws InvalidStepException {
-    final JsonValue graphs = json.get("read");
-    if (graphs == null || !graphs.isArray() || graphs.getAsArray().isEmpty()) {
+  /** Graphs a RULES step's read file may list: a refresh's catalog graphs and closure graphs. */
+  public static final int MAX_READ_GRAPHS = 100_000;
+
+  private static Governance governance(final JsonObject json, final Path jobDirectory)
+      throws InvalidStepException {
+    if (json.hasKey("read") == json.hasKey("readFile")) {
+      throw new InvalidStepException("RULES needs exactly one of read and readFile");
+    }
+    final List<String> listed = new ArrayList<>();
+    if (json.hasKey("readFile")) {
+      listed.addAll(
+          graphsFile(insideJob(jobDirectory, requiredString(json, "readFile"), "readFile")));
+      if (listed.size() > MAX_READ_GRAPHS) {
+        throw new InvalidStepException(
+            "readFile lists " + listed.size() + " graphs, more than " + MAX_READ_GRAPHS);
+      }
+    } else {
+      final JsonValue graphs = json.get("read");
+      if (!graphs.isArray()) {
+        throw new InvalidStepException("RULES needs a non-empty read array of graph IRIs");
+      }
+      for (final JsonValue graph : graphs.getAsArray()) {
+        if (!graph.isString()) {
+          throw new InvalidStepException("read must contain strings");
+        }
+        listed.add(graph.getAsString().value());
+      }
+    }
+    if (listed.isEmpty()) {
       throw new InvalidStepException("RULES needs a non-empty read array of graph IRIs");
     }
     final Set<String> read = new LinkedHashSet<>();
-    for (final JsonValue graph : graphs.getAsArray()) {
-      if (!graph.isString()) {
-        throw new InvalidStepException("read must contain strings");
-      }
-      if (!read.add(graphIri(graph.getAsString().value(), "read"))) {
+    for (final String graph : listed) {
+      if (!read.add(graphIri(graph, "read"))) {
         throw new InvalidStepException("read lists " + graph + " twice");
       }
     }
@@ -387,38 +420,88 @@ public record StepFile(
     return resolved;
   }
 
-  private static Closure closure(final JsonValue value) throws InvalidStepException {
+  private static Closure closure(final JsonValue value, final Path jobDirectory)
+      throws InvalidStepException {
     if (value == null || !value.isObject()) {
       throw new InvalidStepException("closure must be an object with root and graphs");
     }
     final JsonObject json = value.getAsObject();
     for (final String key : json.keys()) {
-      if (!key.equals("root") && !key.equals("graphs") && !key.equals("allGraphs")) {
+      if (!key.equals("root")
+          && !key.equals("graphs")
+          && !key.equals("allGraphs")
+          && !key.equals("graphsFile")) {
         throw new InvalidStepException("Unknown closure key '" + key + "'");
       }
     }
     final String root = iri(requiredString(json, "root"), "closure.root");
+    final int forms =
+        (json.hasKey("allGraphs") ? 1 : 0)
+            + (json.hasKey("graphs") ? 1 : 0)
+            + (json.hasKey("graphsFile") ? 1 : 0);
+    if (forms != 1) {
+      throw new InvalidStepException(
+          "closure needs exactly one of graphs, graphsFile and allGraphs");
+    }
     if (json.hasKey("allGraphs")) {
-      if (!booleanValue(json, "allGraphs") || json.hasKey("graphs")) {
-        throw new InvalidStepException(
-            "closure.allGraphs must be true, and closure.graphs must then be absent");
+      if (!booleanValue(json, "allGraphs")) {
+        throw new InvalidStepException("closure.allGraphs must be true");
       }
       return new Closure(root, List.of(), true);
     }
-    final JsonValue graphs = json.get("graphs");
-    if (graphs == null || !graphs.isArray() || graphs.getAsArray().isEmpty()) {
+    final List<String> listed = new ArrayList<>();
+    if (json.hasKey("graphsFile")) {
+      listed.addAll(
+          graphsFile(insideJob(jobDirectory, requiredString(json, "graphsFile"), "graphsFile")));
+    } else {
+      final JsonValue graphs = json.get("graphs");
+      if (graphs == null || !graphs.isArray()) {
+        throw new InvalidStepException("closure.graphs must be a non-empty array of graph IRIs");
+      }
+      for (final JsonValue graph : graphs.getAsArray()) {
+        if (!graph.isString()) {
+          throw new InvalidStepException("closure.graphs must contain strings");
+        }
+        listed.add(graph.getAsString().value());
+      }
+    }
+    if (listed.isEmpty()) {
       throw new InvalidStepException("closure.graphs must be a non-empty array of graph IRIs");
     }
+    if (listed.size() > MAX_CLOSURE_GRAPHS) {
+      throw new InvalidStepException(
+          "closure lists " + listed.size() + " graphs, more than " + MAX_CLOSURE_GRAPHS);
+    }
     final Set<String> names = new LinkedHashSet<>();
-    for (final JsonValue graph : graphs.getAsArray()) {
-      if (!graph.isString()) {
-        throw new InvalidStepException("closure.graphs must contain strings");
-      }
-      if (!names.add(iri(graph.getAsString().value(), "closure.graphs"))) {
+    for (final String graph : listed) {
+      if (!names.add(iri(graph, "closure.graphs"))) {
         throw new InvalidStepException("closure.graphs lists " + graph + " twice");
       }
     }
     return new Closure(root, List.copyOf(names), false);
+  }
+
+  /** The graphs a graphs file lists, one IRI per line; blank lines are ignored. */
+  private static List<String> graphsFile(final Path file) throws InvalidStepException {
+    try {
+      if (!Files.isRegularFile(file)) {
+        throw new InvalidStepException("Graphs file " + file.getFileName() + " is missing");
+      }
+      if (Files.size(file) > MAX_GRAPHS_FILE_BYTES) {
+        throw new InvalidStepException(
+            "Graphs file "
+                + file.getFileName()
+                + " is larger than "
+                + MAX_GRAPHS_FILE_BYTES
+                + " bytes");
+      }
+      return Files.readAllLines(file).stream()
+          .map(String::strip)
+          .filter(s -> !s.isEmpty())
+          .toList();
+    } catch (final IOException e) {
+      throw new InvalidStepException("Cannot read graphs file: " + e.getMessage());
+    }
   }
 
   private static Explain explain(final JsonValue value) throws InvalidStepException {

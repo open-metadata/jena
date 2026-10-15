@@ -1,0 +1,85 @@
+# Rule admission outcomes from the store's RuleCompiler (jena openmetadata/governance-rules-step
+# 6cc5de56dd, Jena 6.2.0, maxRulePatterns 64), each file compiled as a CONSTRUCT rule named
+# vector-rule. OpenMetadata's RuleAdmissionCheck must give the same outcome and the same sorted,
+# distinct problem codes; see docs/rdf-rule-bundle-contract.md.
+accept-bind-not-in-template.rq accepted
+accept-exactly-32-template-triples.rq accepted
+accept-exactly-64-patterns.rq accepted
+accept-exists-required.rq accepted
+accept-filter-in-exists.rq accepted
+accept-fn-function.rq accepted
+accept-path-alternative-sequence.rq accepted
+accept-path-negated-set.rq accepted
+accept-path-plus.rq accepted
+accept-relative-iri.rq accepted
+accept-select-star-subquery.rq accepted
+accept-three-argument-function.rq accepted
+accept-union.rq accepted
+accept-values-in-pattern.rq accepted
+accept-values-only.rq accepted
+accept-variable-predicate.rq accepted
+accept-xsd-cast.rq accepted
+reject-arq-lateral.rq rejected RULE_PARSE
+reject-arq-let.rq rejected RULE_PARSE
+reject-ask.rq rejected RULE_NOT_CONSTRUCT
+reject-bnode-function.rq rejected RULE_NONDETERMINISTIC
+reject-body-too-long.rq rejected RULE_TOO_LARGE
+reject-bound.rq rejected RULE_NOT_MONOTONIC
+reject-describe.rq rejected RULE_NOT_CONSTRUCT
+reject-empty-pattern.rq rejected RULE_EMPTY
+reject-exists-compared.rq rejected RULE_NOT_MONOTONIC
+reject-exists-in-bind.rq rejected RULE_NOT_MONOTONIC
+reject-exists-in-or.rq rejected RULE_NOT_MONOTONIC
+reject-exists-only.rq rejected RULE_EMPTY
+reject-extension-function-afn.rq rejected RULE_UNSUPPORTED
+reject-extension-function-custom.rq rejected RULE_UNSUPPORTED
+reject-extension-function-java.rq rejected RULE_UNSUPPORTED
+reject-fn-current-datetime.rq rejected RULE_NONDETERMINISTIC
+reject-from-named.rq rejected RULE_UNSUPPORTED
+reject-from.rq rejected RULE_UNSUPPORTED
+reject-graph-iri.rq rejected RULE_UNSUPPORTED
+reject-graph-variable.rq rejected RULE_UNSUPPORTED
+reject-limit.rq rejected RULE_UNSUPPORTED
+reject-minus.rq rejected RULE_NOT_MONOTONIC
+reject-negated-exists.rq rejected RULE_NOT_MONOTONIC
+reject-nested-too-deep.rq rejected RULE_TOO_LARGE
+reject-not-exists.rq rejected RULE_NOT_MONOTONIC
+reject-now.rq rejected RULE_NONDETERMINISTIC
+reject-optional-in-exists.rq rejected RULE_NOT_MONOTONIC
+reject-optional.rq rejected RULE_NOT_MONOTONIC
+reject-order-by.rq rejected RULE_UNSUPPORTED
+reject-over-32-template-triples.rq rejected RULE_TOO_LARGE
+reject-over-64-patterns-with-exists.rq rejected RULE_TOO_LARGE
+reject-over-64-patterns.rq rejected RULE_TOO_LARGE
+reject-property-function-apf.rq rejected RULE_UNSUPPORTED
+reject-property-function-geosparql.rq rejected RULE_UNSUPPORTED
+reject-property-function-in-exists.rq rejected RULE_UNSUPPORTED
+reject-property-function-in-path.rq rejected RULE_UNSUPPORTED
+reject-property-function-list-member.rq rejected RULE_UNSUPPORTED
+reject-property-function-rdfs-member.rq rejected RULE_UNSUPPORTED
+reject-property-function-text-query.rq rejected RULE_UNSUPPORTED
+reject-rand.rq rejected RULE_NONDETERMINISTIC
+reject-select.rq rejected RULE_NOT_CONSTRUCT
+reject-service-in-subquery.rq rejected RULE_UNSUPPORTED
+reject-service.rq rejected RULE_UNSUPPORTED
+reject-struuid.rq rejected RULE_NONDETERMINISTIC
+reject-subquery-aggregate.rq rejected RULE_UNSUPPORTED
+reject-subquery-distinct.rq rejected RULE_UNSUPPORTED
+reject-subquery-limit.rq rejected RULE_UNSUPPORTED
+reject-subquery-projection.rq rejected RULE_UNSUPPORTED
+reject-syntax-error.rq rejected RULE_PARSE
+reject-template-anonymous-node.rq rejected RULE_TEMPLATE
+reject-template-blank-node.rq rejected RULE_TEMPLATE
+reject-template-computed-variable.rq rejected RULE_TEMPLATE
+reject-template-empty.rq rejected RULE_TEMPLATE
+reject-template-exists-variable.rq rejected RULE_TEMPLATE
+reject-template-literal-subject.rq rejected RULE_TEMPLATE
+reject-template-triple-term.rq rejected RULE_PARSE
+reject-trailing-values.rq rejected RULE_UNSUPPORTED
+reject-unions-too-deep.rq rejected RULE_TOO_LARGE
+reject-update.rq rejected RULE_PARSE
+reject-uuid.rq rejected RULE_NONDETERMINISTIC
+starter-domain-membership-inheritance.rq accepted
+starter-pii-propagation-via-lineage.rq accepted
+starter-schema-tag-inheritance.rq accepted
+starter-transitive-lineage-closure.rq accepted

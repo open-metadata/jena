@@ -29,7 +29,6 @@ import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.graph.Triple;
-import org.apache.jena.query.ARQ;
 import org.apache.jena.query.TxnType;
 import org.apache.jena.riot.out.NodeFmtLib;
 import org.apache.jena.sparql.algebra.Algebra;
@@ -111,9 +110,7 @@ public final class RulesStep implements Step {
 
   /** Rules run with property functions off, whatever is registered: they run code by IRI. */
   static Context context() {
-    final Context context = ARQ.getContext().copy();
-    context.set(ARQ.enablePropertyFunctions, false);
-    return context;
+    return RuleCompiler.evaluationContext();
   }
 
   /** Every rule, enabled or not, must be valid; the enabled ones are returned in bundle order. */

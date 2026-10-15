@@ -1,0 +1,6 @@
+Copied unchanged from open-metadata/OpenMetadata at commit eb169f36fef (branch feat/rdf-rule-bundle,
+2026-10-15, not yet on main when copied): openmetadata-service/src/test/resources/rdf/rule-vectors/.
+OpenMetadata's RuleAdmissionCheck and the store's RuleCompiler must give every file the outcome and
+problem codes expected.txt records (OpenMetadata's
+ADR:2026-10-15-rule-admission-matches-the-store-rule-compiler); RuleCompilerVectorsTest checks the
+store's half. Refresh these files when either side changes, and keep the commit above current.

@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/>
+INSERT DATA { :a :b :c }
