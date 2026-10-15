@@ -33,6 +33,7 @@ public record Problem(Code code, String message, String subject, String step) {
   public enum Code {
     INVALID_REQUEST,
     NOT_READY,
+    NOT_IMPLEMENTED,
     GENERATION_MISMATCH,
     SUPERSEDED,
     MISSING_IMPORT,

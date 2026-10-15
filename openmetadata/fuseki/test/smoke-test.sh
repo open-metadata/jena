@@ -432,11 +432,14 @@ check "capabilities answer the admin account" [ "$(reasoning_status capabilities
 check "and refuse anonymous requests" [ "$(reasoning_status capabilities)" = "401" ]
 check "and a wrong password" [ "$(reasoning_status capabilities -u admin:wrong)" = "401" ]
 capabilities=$(reasoning_get capabilities)
-echo "      $(jq -c '{protocolVersion, readiness, limits}' <<< "$capabilities")"
+echo "      $(jq -c '{protocolVersion, readiness, limits, operations: [.operations[] | "\(.operation)=\(.availability)"]}' <<< "$capabilities")"
 check "capabilities report READY for protocol 1" \
   [ "$(jq -r '"\(.protocolVersion) \(.readiness)"' <<< "$capabilities")" = "1 READY" ]
 check "with the memory budget the readiness check computed" \
   [ "$(jq '.memoryBudget.requiredBytes <= .memoryBudget.containerLimitBytes' <<< "$capabilities")" = "true" ]
+check "and every operation listed as not implemented yet" \
+  [ "$(jq -r '[.operations[] | "\(.operation)=\(.availability)"] | join(" ")' <<< "$capabilities")" = \
+    "REFRESH=NOT_IMPLEMENTED CHECK=NOT_IMPLEMENTED EXPLAIN=NOT_IMPLEMENTED RESULTS=NOT_IMPLEMENTED QUERY=NOT_IMPLEMENTED" ]
 request_id=$(new_uuid)
 response=$(submit_job "$(refresh_request "$request_id")")
 job_id=$(body_of "$response" | jq -r .id)
@@ -448,13 +451,14 @@ check "its request ID returns the same job with 200" \
   [ "$(tail -1 <<< "$response") $(body_of "$response" | jq -r .id)" = "200 $job_id" ]
 check "an invalid request is refused with 400" [ "$(submit_job '{"operation": "REFRESH"}' | tail -1)" = "400" ]
 check "the job fails at capture, which this build lacks" job_state_becomes "$job_id" FAILED
-check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_READY capture" ]
+check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_IMPLEMENTED capture" ]
 check "its manifest is on the data volume" docker exec "$CONTAINER" test -f "$JOBS/$job_id/job.json"
 check "cancelling a finished job leaves it unchanged" [ "$(curl -s -u "admin:$PASSWORD" -X DELETE \
   "$BASE/reasoning/jobs/$job_id" | jq -r .state)" = "FAILED" ]
 check "cancelling an unknown job answers 404" [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" \
   -X DELETE "$BASE/reasoning/jobs/$(new_uuid)")" = "404" ]
 check "results are not implemented yet" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "501" ]
+check "and say so with NOT_IMPLEMENTED" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "NOT_IMPLEMENTED" ]
 docker restart "$CONTAINER" > /dev/null
 for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
 check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]
