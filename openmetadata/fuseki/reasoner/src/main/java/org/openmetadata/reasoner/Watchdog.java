@@ -29,6 +29,11 @@ import org.openmetadata.reasoner.owl.Engine;
  * interruptible, or does not unwind in time, is ended by {@code onExpiry}, which records the
  * outcome and halts the JVM. The launcher's kill deadline is the backstop for a JVM too wedged to
  * run this thread. The watchdog also samples heap use, so every manifest reports the step's peak.
+ *
+ * <p>Past the deadline the interrupt is repeated on every sample, not sent once: HermiT clears its
+ * interrupt flag when a reasoning task starts, so an interrupt that lands between two tasks, such
+ * as the consistency checks an explanation runs one after another on the same or a fresh reasoner,
+ * would otherwise be lost and the next task would run to its end.
  */
 public final class Watchdog implements AutoCloseable {
   static final long SAMPLE_MILLIS = 50;
@@ -103,17 +108,13 @@ public final class Watchdog implements AutoCloseable {
       if (!expired && now - deadlineNanos >= 0) {
         expiredAtNanos = now;
         expired = true;
-        final Runnable interrupt = interrupter.get();
-        if (interrupt == null) {
-          unwindDeadline = now;
-        } else {
-          unwindDeadline = now + TimeUnit.MILLISECONDS.toNanos(UNWIND_GRACE_MILLIS);
-          try {
-            interrupt.run();
-          } catch (final RuntimeException e) {
-            unwindDeadline = now;
-          }
-        }
+        unwindDeadline =
+            interrupter.get() == null
+                ? now
+                : now + TimeUnit.MILLISECONDS.toNanos(UNWIND_GRACE_MILLIS);
+      }
+      if (expired && !interruptRegistered()) {
+        unwindDeadline = now;
       }
       if (expired && now - unwindDeadline >= 0) {
         if (!finished) {
@@ -126,6 +127,20 @@ public final class Watchdog implements AutoCloseable {
       } catch (final InterruptedException e) {
         // Only finish() interrupts this thread; the loop condition ends it.
       }
+    }
+  }
+
+  /** Interrupts the registered work, if any; false when the interrupt itself failed. */
+  private boolean interruptRegistered() {
+    final Runnable interrupt = interrupter.get();
+    if (interrupt == null) {
+      return true;
+    }
+    try {
+      interrupt.run();
+      return true;
+    } catch (final RuntimeException e) {
+      return false;
     }
   }
 
