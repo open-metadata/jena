@@ -71,4 +71,23 @@ public final class Sizes {
     }
     return result;
   }
+
+  /**
+   * The value of the last -XX:MaxDirectMemorySize flag in a JVM argument string, or -1 when there
+   * is none. 0 is the JVM's own default, a limit equal to the maximum heap.
+   */
+  public static long lastMaxDirectMemory(final String jvmArgs) {
+    long result = -1;
+    if (jvmArgs == null) {
+      return result;
+    }
+    final String flag = "-XX:MaxDirectMemorySize=";
+    for (final String argument : jvmArgs.trim().split("\\s+")) {
+      if (argument.startsWith(flag)) {
+        final String value = argument.substring(flag.length());
+        result = value.equals("0") ? 0 : parse("-XX:MaxDirectMemorySize in JVM_ARGS", value);
+      }
+    }
+    return result;
+  }
 }
