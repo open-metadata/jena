@@ -187,6 +187,19 @@ transitive containment hierarchy with its inverse and three assertions each (297
 collection. The axiom limit is lower than that, because terminological axioms cost the engines more
 than assertions.
 
+Measured again on the published `6.2.0-600514c` image (Apple M4 Max, `linux/arm64`, two worker
+processors), the same shape needs:
+
+| Individuals | Closure triples | Logical axioms | Peak after collection | Classifies in |
+|---:|---:|---:|---:|---|
+| 10,000 | 59,434 | 49,384 | 0.16–0.23 GiB | 512 MiB, in 9–10 s |
+| 20,000 | 118,823 | 98,773 | 0.27–0.36 GiB | 512 MiB, in 16–26 s |
+| 50,000 | 296,997 | 246,947 | 0.57–0.65 GiB | 1 GiB, in 46–88 s; a 512 MiB heap runs out |
+
+The 200,000-axiom limit of the default heap therefore admits about 40,000 individuals of this shape;
+the 50,000-individual closure needs `OPENMETADATA_REASONER_HEAP=2560m` or a `maxLogicalAxioms` in
+its step file.
+
 Each step writes `<step>.result.json`, and the launcher writes `<step>.status.json` and
 `<step>.log`. A step file with `"report": true` also gets `<step>.report.txt`, a sorted listing of
 the step's answer for tests and diagnosis; for `CLASSIFY` it repeats the output graph, so it is off
