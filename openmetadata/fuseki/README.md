@@ -227,11 +227,11 @@ the tests check against. The operations are served whenever the extension is ena
 
 | Request | Answer |
 |---|---|
-| `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the memory budget (container limit, required bytes and each term), and the limits (`maxQueuedJobs`, `maxDiskBytes`) |
+| `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the operations (`REFRESH`, `CHECK`, `EXPLAIN`, `RESULTS`, `QUERY`, each `AVAILABLE` or `NOT_IMPLEMENTED` with a reason), the memory budget (container limit, required bytes and each term), and the limits the store enforces (`maxQueuedJobs`, `maxDiskBytes`) |
 | `POST /reasoning/jobs?dataset=<name>` | `202` with the new job and a `Location`; `200` with the existing job when its `requestId` is known; `400` for a request the schema refuses; `404` for a dataset that is not served; `409` for a known `requestId` sent with a different request or dataset; `413` over 4 MiB; `415` unless `application/json`; `429` when the queue is full; `503` when reasoning is disabled or not ready, or the disk quota is reached |
 | `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
 | `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
-| `GET /reasoning/results/<id>`, `POST /reasoning/query` | `501` until snapshots arrive |
+| `GET /reasoning/results/<id>`, `POST /reasoning/query` | `501` with the problem `NOT_IMPLEMENTED` until snapshots arrive |
 
 Every refusal answers with the protocol's problem object, `{"code": ..., "message": ...}`, with
 `subject` naming the limit for `LIMIT_EXCEEDED`. A request is validated against the schema and the
@@ -267,10 +267,15 @@ run by hand, and refuses work at or over `OPENMETADATA_REASONING_DISK_QUOTA`. Fi
 removed, oldest first. Directories without a `job.json` are never removed.
 
 **What a job does in this release.** Every operation's plan starts with `capture`, which is not
-implemented yet: the job ends `FAILED` with the problem `NOT_READY`, step `capture`, and a message
-starting `NOT_IMPLEMENTED:`. The protocol has no code of its own for that. Capabilities list no
-engines and no coverage, since no operation reaches one, and omit the limits of steps that do not
-run yet. The protocol's capabilities cannot say which operations exist; the `501` answers do.
+implemented yet: the job ends `FAILED` with the problem `NOT_IMPLEMENTED` and step `capture`.
+`NOT_IMPLEMENTED` is permanent for this build, so a client stops retrying; `NOT_READY` stays the
+transient answer (reasoning disabled, memory budget, disk unmeasurable, server stopping, another
+worker running). Capabilities report every operation `NOT_IMPLEMENTED` with the reason, list no
+engines and no coverage, since no operation reaches one, and list only the limits the store
+enforces. Readiness still reports the memory budget: the protocol makes limits mandatory per
+operation, so an operation becomes `AVAILABLE` only once it runs and the store enforces every limit
+it needs (OpenMetadata's
+`ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces`).
 
 **Access.** The image's `shiro.ini` requires the admin account for every path except `/$/ping`, so
 the operations are admin-only. To give a service account reasoning and nothing else, run with

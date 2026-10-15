@@ -65,9 +65,8 @@ public interface Stage {
   }
 
   /**
-   * A stage this build does not implement yet. It fails the job with NOT_READY, the protocol's code
-   * for work the store cannot run, and says what is missing; the protocol has no code of its own
-   * for it.
+   * A stage this build does not implement yet. It fails the job with NOT_IMPLEMENTED rather than
+   * NOT_READY, because retrying cannot help until the store is upgraded, and says what is missing.
    */
   static Stage unavailable(final String name, final String missing) {
     return new Stage() {
@@ -78,8 +77,7 @@ public interface Stage {
 
       @Override
       public Result run(final Context context) {
-        return Result.failed(
-            Problem.of(Problem.Code.NOT_READY, "NOT_IMPLEMENTED: " + missing).atStep(name));
+        return Result.failed(Problem.of(Problem.Code.NOT_IMPLEMENTED, missing).atStep(name));
       }
     };
   }

@@ -199,6 +199,7 @@ public final class JobService implements AutoCloseable {
       reasons.add("The memory budget cannot be evaluated: " + e.getMessage());
     }
     json.put("reasons", reasons);
+    json.put("operations", Plans.operations());
     // No operation reaches an engine until input capture exists, so none is claimed.
     json.put("engines", new JsonArray());
     json.put("coverage", new JsonArray());
@@ -214,6 +215,8 @@ public final class JobService implements AutoCloseable {
       memory.put("safetyMargin", JsonNumber.valueDecimal("0.1"));
       json.put("memoryBudget", memory);
     }
+    // Only the limits this build enforces. The protocol requires the rest before the operations
+    // that need them may be AVAILABLE, not before readiness may be READY.
     final JsonObject limits = new JsonObject();
     limits.put("maxQueuedJobs", jobSettings.maxQueuedJobs());
     try {

@@ -168,8 +168,10 @@ class ReasoningOperationsIT {
     assertProblem(wrongMethod, 405, "INVALID_REQUEST");
     assertEquals("GET", wrongMethod.headers().firstValue("Allow").orElseThrow());
     assertProblem(
-        get("/reasoning/results/" + UUID.randomUUID(), "admin", "admin-pw"), 501, "NOT_READY");
-    assertProblem(post("/reasoning/query", "{}"), 501, "NOT_READY");
+        get("/reasoning/results/" + UUID.randomUUID(), "admin", "admin-pw"),
+        501,
+        "NOT_IMPLEMENTED");
+    assertProblem(post("/reasoning/query", "{}"), 501, "NOT_IMPLEMENTED");
   }
 
   private void start(final Path shiro, final Stage.Planner planner) throws IOException {
