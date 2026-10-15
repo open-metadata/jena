@@ -52,6 +52,7 @@ public record StepFile(
     String outputGraph,
     Path checks,
     Explain explain,
+    Governance governance,
     Limits limits) {
 
   public static final int PROTOCOL = 1;
@@ -71,13 +72,45 @@ public record StepFile(
           "output",
           "checks",
           "explain",
+          "read",
+          "rules",
+          "provenance",
           "limits");
+  private static final Pattern RULE_NAME = Pattern.compile("[a-z][a-z0-9-]{1,62}[a-z0-9]");
+  private static final Set<String> RULE_KEYS =
+      Set.of(
+          "name",
+          "displayName",
+          "description",
+          "ruleType",
+          "ruleBody",
+          "enabled",
+          "priority",
+          "tags",
+          "output");
+
+  /** Graphs the RULES step creates for itself; no caller may name one. */
+  public static final String RESERVED_GRAPH_PREFIX = "urn:openmetadata:reasoner:";
 
   /** The import closure to reason over: named graphs of the working dataset and its root. */
   public record Closure(String root, List<String> graphs) {}
 
   /** What to justify: one entailed axiom, in OWL 2 functional syntax, or the inconsistency. */
   public record Explain(String axiom, boolean inconsistency) {}
+
+  /**
+   * One rule of a RULES step's bundle, in OpenMetadata's rule shape plus the graph its conclusions
+   * go to. The body is validated by the step, not here, so a rule the step refuses is reported as a
+   * rejected input with every problem, not as a malformed step file.
+   */
+  public record Rule(
+      String name, String ruleType, String body, boolean enabled, long priority, String output) {}
+
+  /**
+   * What a RULES step reads and writes: the graphs its rules read, the rules, and the provenance
+   * graph that receives one witness per derived fact. None of the graphs it writes may be read.
+   */
+  public record Governance(List<String> read, List<Rule> rules, String provenance) {}
 
   public static Path resultPath(final Path stepFile) {
     return stepFile.resolveSibling(baseName(stepFile) + ".result.json");
@@ -128,6 +161,10 @@ public record StepFile(
     String outputGraph = null;
     Path checks = null;
     Explain explain = null;
+    Governance governance = null;
+    if (kind != StepKind.RULES) {
+      rejectKeys(json, kind, "read", "rules", "provenance");
+    }
     switch (kind) {
       case LOAD -> {
         rejectKeys(json, kind, "closure", "engine", "output", "checks", "explain");
@@ -166,6 +203,10 @@ public record StepFile(
       }
       case COMPACT ->
           rejectKeys(json, kind, "inputs", "closure", "engine", "output", "checks", "explain");
+      case RULES -> {
+        rejectKeys(json, kind, "inputs", "closure", "engine", "output", "checks", "explain");
+        governance = governance(json);
+      }
     }
     return new StepFile(
         file,
@@ -181,7 +222,104 @@ public record StepFile(
         outputGraph,
         checks,
         explain,
+        governance,
         limits);
+  }
+
+  private static Governance governance(final JsonObject json) throws InvalidStepException {
+    final JsonValue graphs = json.get("read");
+    if (graphs == null || !graphs.isArray() || graphs.getAsArray().isEmpty()) {
+      throw new InvalidStepException("RULES needs a non-empty read array of graph IRIs");
+    }
+    final Set<String> read = new LinkedHashSet<>();
+    for (final JsonValue graph : graphs.getAsArray()) {
+      if (!graph.isString()) {
+        throw new InvalidStepException("read must contain strings");
+      }
+      if (!read.add(graphIri(graph.getAsString().value(), "read"))) {
+        throw new InvalidStepException("read lists " + graph + " twice");
+      }
+    }
+    final String provenance = graphIri(requiredString(json, "provenance"), "provenance");
+    if (read.contains(provenance)) {
+      throw new InvalidStepException("provenance must not be one of the graphs the rules read");
+    }
+    final JsonValue array = json.get("rules");
+    if (array == null || !array.isArray() || array.getAsArray().isEmpty()) {
+      throw new InvalidStepException("RULES needs a non-empty rules array");
+    }
+    final List<Rule> rules = new ArrayList<>();
+    final Set<String> names = new LinkedHashSet<>();
+    for (final JsonValue value : array.getAsArray()) {
+      final Rule rule = rule(value);
+      if (!names.add(rule.name())) {
+        throw new InvalidStepException("rules lists '" + rule.name() + "' twice");
+      }
+      if (rule.output() != null) {
+        if (read.contains(rule.output())) {
+          throw new InvalidStepException(
+              "rule '" + rule.name() + "' writes " + rule.output() + ", which the rules read");
+        }
+        if (rule.output().equals(provenance)) {
+          throw new InvalidStepException(
+              "rule '" + rule.name() + "' writes the provenance graph " + provenance);
+        }
+      }
+      rules.add(rule);
+    }
+    return new Governance(List.copyOf(read), List.copyOf(rules), provenance);
+  }
+
+  private static Rule rule(final JsonValue value) throws InvalidStepException {
+    if (value == null || !value.isObject()) {
+      throw new InvalidStepException("rules must contain objects");
+    }
+    final JsonObject json = value.getAsObject();
+    for (final String key : json.keys()) {
+      if (!RULE_KEYS.contains(key)) {
+        throw new InvalidStepException("Unknown rule key '" + key + "'");
+      }
+    }
+    final String name = requiredString(json, "name");
+    if (!RULE_NAME.matcher(name).matches()) {
+      throw new InvalidStepException("rule name '" + name + "' must match " + RULE_NAME.pattern());
+    }
+    final String body = requiredString(json, "ruleBody");
+    final boolean enabled = !json.hasKey("enabled") || booleanValue(json, "enabled");
+    final String ruleType =
+        json.hasKey("ruleType") ? requiredString(json, "ruleType") : "CONSTRUCT";
+    long priority = 0;
+    if (json.hasKey("priority")) {
+      priority = requiredLong(json, "priority");
+      if (priority < 0 || priority > 10_000) {
+        throw new InvalidStepException("rule '" + name + "': priority must be 0 to 10000");
+      }
+    }
+    for (final String text : List.of("displayName", "description")) {
+      if (json.hasKey(text) && !json.get(text).isString()) {
+        throw new InvalidStepException("rule '" + name + "': " + text + " must be a string");
+      }
+    }
+    if (json.hasKey("tags")
+        && (!json.get("tags").isArray()
+            || !json.get("tags").getAsArray().stream().allMatch(JsonValue::isString))) {
+      throw new InvalidStepException("rule '" + name + "': tags must be an array of strings");
+    }
+    String output = null;
+    if (json.hasKey("output")) {
+      output = graphIri(requiredString(json, "output"), "rule '" + name + "' output");
+    } else if (enabled) {
+      throw new InvalidStepException("enabled rule '" + name + "' needs an output graph");
+    }
+    return new Rule(name, ruleType, body, enabled, priority, output);
+  }
+
+  private static String graphIri(final String value, final String key) throws InvalidStepException {
+    final String iri = iri(value, key);
+    if (iri.startsWith(RESERVED_GRAPH_PREFIX)) {
+      throw new InvalidStepException(key + " must not name a graph under " + RESERVED_GRAPH_PREFIX);
+    }
+    return iri;
   }
 
   private static JsonObject parse(final Path file) throws InvalidStepException {

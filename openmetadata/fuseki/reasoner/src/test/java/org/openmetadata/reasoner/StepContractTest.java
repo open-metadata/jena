@@ -217,6 +217,61 @@ GRAPH <urn:c> {
     assertEquals(code, Jobs.firstProblem(step));
   }
 
+  @Test
+  void rulesReadSelectedGraphsAndWriteOnlyGraphsTheyDoNotRead() {
+    final String rule =
+        "{\"name\": \"copy-p\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q> ?o } WHERE { ?s <urn:p> ?o"
+            + " }\", \"output\": \"%s\"%s}";
+    final String step =
+        "{\"protocol\": 1, \"stepId\": \"r\", \"kind\": \"RULES\", \"dataset\": \"working\","
+            + " \"timeoutMillis\": 1000%s}";
+    final String read = ", \"read\": [\"urn:c\"]";
+    final String provenance = ", \"provenance\": \"urn:prov\"";
+    final String good = rule.formatted("urn:out", "");
+    final Path valid =
+        Jobs.write(job, "valid", step.formatted(read + provenance + ", \"rules\": [" + good + "]"));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(valid), () -> Jobs.manifest(valid).toString());
+    assertEquals("CONVERGED", Jobs.outcome(valid));
+    assertInvalidStep(step.formatted(provenance + ", \"rules\": [" + good + "]"));
+    assertInvalidStep(step.formatted(read + ", \"rules\": [" + good + "]"));
+    assertInvalidStep(step.formatted(read + provenance));
+    assertInvalidStep(
+        step.formatted(read + ", \"provenance\": \"urn:c\", \"rules\": [" + good + "]"));
+    assertInvalidStep(
+        step.formatted(read + provenance + ", \"rules\": [" + rule.formatted("urn:c", "") + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read + provenance + ", \"rules\": [" + rule.formatted("urn:prov", "") + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read
+                + provenance
+                + ", \"rules\": ["
+                + rule.formatted("urn:openmetadata:reasoner:delta:1", "")
+                + "]"));
+    assertInvalidStep(
+        step.formatted(read + provenance + ", \"rules\": [" + good + ", " + good + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read
+                + provenance
+                + ", \"rules\": [{\"name\": \"no-output\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q>"
+                + " ?o } WHERE { ?s <urn:p> ?o }\"}]"));
+    assertInvalidStep(
+        step.formatted(
+            read
+                + provenance
+                + ", \"rules\": ["
+                + rule.formatted("urn:out", ", \"when\": 1")
+                + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read + provenance + ", \"rules\": [" + good.replace("copy-p", "Copy_P") + "]"));
+    assertInvalidStep(
+        step.formatted(read + provenance + ", \"output\": \"urn:x\", \"rules\": [" + good + "]"));
+    assertInvalidStep(Jobs.load("fresh", "input.trig").replace("}", ", \"rules\": []}"));
+  }
+
   private void assertInvalidStep(final String json) {
     final Path step = Jobs.write(job, "invalid", json);
     assertEquals(ExitCodes.INVALID_STEP, Jobs.run(step), json);

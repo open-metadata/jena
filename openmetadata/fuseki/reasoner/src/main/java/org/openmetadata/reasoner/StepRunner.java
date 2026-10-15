@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.jena.atlas.json.JSON;
 import org.openmetadata.reasoner.owl.ClassifyStep;
 import org.openmetadata.reasoner.owl.ExplainStep;
+import org.openmetadata.reasoner.rules.RulesStep;
 import org.openmetadata.reasoner.store.CompactStep;
 import org.openmetadata.reasoner.store.LoadStep;
 import org.slf4j.Logger;
@@ -139,6 +140,7 @@ public final class StepRunner {
       case CLASSIFY -> new ClassifyStep();
       case EXPLAIN -> new ExplainStep();
       case COMPACT -> new CompactStep();
+      case RULES -> new RulesStep();
     };
   }
 

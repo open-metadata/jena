@@ -21,10 +21,10 @@ import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonObject;
 
 /** Writes step files and inputs into a job directory and runs them in this JVM. */
-final class Jobs {
+public final class Jobs {
   private Jobs() {}
 
-  static Path write(final Path job, final String name, final String json) {
+  public static Path write(final Path job, final String name, final String json) {
     try {
       final Path path = job.resolve(name + ".json");
       Files.writeString(path, json, StandardCharsets.UTF_8);
@@ -34,7 +34,7 @@ final class Jobs {
     }
   }
 
-  static Path file(final Path job, final String name, final String content) {
+  public static Path file(final Path job, final String name, final String content) {
     try {
       final Path path = job.resolve(name);
       Files.writeString(path, content, StandardCharsets.UTF_8);
@@ -44,23 +44,23 @@ final class Jobs {
     }
   }
 
-  static int run(final Path stepFile) {
+  public static int run(final Path stepFile) {
     return new StepRunner(false).run(stepFile);
   }
 
-  static JsonObject manifest(final Path stepFile) {
+  public static JsonObject manifest(final Path stepFile) {
     return JSON.read(StepFile.resultPath(stepFile).toString());
   }
 
-  static String report(final Path stepFile) throws IOException {
+  public static String report(final Path stepFile) throws IOException {
     return Files.readString(StepFile.reportPath(stepFile), StandardCharsets.UTF_8);
   }
 
-  static String outcome(final Path stepFile) {
+  public static String outcome(final Path stepFile) {
     return manifest(stepFile).getString("outcome");
   }
 
-  static String firstProblem(final Path stepFile) {
+  public static String firstProblem(final Path stepFile) {
     return manifest(stepFile)
         .getArray("problems")
         .findFirst()
@@ -68,7 +68,7 @@ final class Jobs {
         .orElse(null);
   }
 
-  static String load(final String dataset, final String... inputs) {
+  public static String load(final String dataset, final String... inputs) {
     final StringBuilder array = new StringBuilder();
     for (final String input : inputs) {
       array.append(array.isEmpty() ? "" : ", ").append('"').append(input).append('"');

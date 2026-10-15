@@ -161,6 +161,7 @@ worker on it. Every path a step names must stay inside its job directory.
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
 | `EXPLAIN` | Computes one justification for an entailment or an inconsistency |
 | `COMPACT` | Compacts the dataset before it is published |
+| `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance graph ([Governance rules](#governance-rules)) |
 
 A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping cannot consume, or
 over an admission limit is rejected with its problems, never classified with something dropped.
@@ -180,12 +181,24 @@ records the limits a step ran with.
 | `maxExpressionDepth` | 32 | no |
 | `maxChecks` | 1,000 entailment checks per `CLASSIFY` | no |
 | `maxExplainChecks` | 1,000 consistency checks per `EXPLAIN`, each on a fresh reasoner | no |
+| `maxRules` | 256 rules in one `RULES` bundle, enabled or not | no |
+| `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
+| `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
+| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
+| `maxSpoolBytes` | 4 GiB, the file one `RULES` pass spools its solutions to | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
 transitive containment hierarchy with its inverse and three assertions each (297,000 triples,
 247,000 logical axioms) wrote 581,000 triples in 44 s and peaked at 0.67 GiB of a 2 GiB heap after
 collection. The axiom limit is lower than that, because terminological axioms cost the engines more
 than assertions.
+
+The `RULES` limits do not grow with the heap: the step keeps its solutions, facts and witnesses on
+disk, and its heap does not grow with them. The starter rules over a 551,735-triple lineage catalog
+derived 317,365 facts in 45 s and peaked at 43 MiB after collection in a 256 MiB heap; half that
+catalog peaked at 27 MiB. `maxNewFacts` and `maxSpoolBytes` bound the disk and time one refresh
+may take; `maxRules` and `maxPasses` match OpenMetadata's bundle size and its materializer's pass
+budget.
 
 Each step writes `<step>.result.json`, and the launcher writes `<step>.status.json` and
 `<step>.log`. A step file with `"report": true` also gets `<step>.report.txt`, a sorted listing of
@@ -199,7 +212,7 @@ one of:
 |---|---|
 | `SUCCEEDED` | The step completed; `reason` is its outcome, which may be `INCONSISTENT` |
 | `FAILED` | The step or its input was rejected (`INVALID_STEP`, `INVALID_INPUT`, `NOT_OWL2_DL`, `LIMIT_EXCEEDED`), or the worker failed |
-| `INCOMPLETE` | A budget ran out: `MEMORY_BUDGET` (the worker exhausted its heap, exit status 3, or was killed by a `SIGKILL` the launcher did not send, exit status 137, almost always the cgroup out-of-memory killer) or `TIME_BUDGET` (it passed its deadline); nothing it produced is complete |
+| `INCOMPLETE` | A budget ran out: `MEMORY_BUDGET` (the worker exhausted its heap, exit status 3, or was killed by a `SIGKILL` the launcher did not send, exit status 137, almost always the cgroup out-of-memory killer), `TIME_BUDGET` (it passed its deadline), or a `RULES` budget named by the manifest's outcome and `limit`, exit status 6: `PASS_BUDGET` (`maxPasses`), `FACT_BUDGET` (`maxNewFacts`) or `SPOOL_BUDGET` (`maxSpoolBytes`); nothing it produced is complete |
 | `INTERRUPTED` | The step was cancelled, or the worker was killed by another signal |
 | `NOT_READY` | The memory budget does not fit; no worker was started |
 | `BUSY` | Another worker is running; at most one runs per container. No status file is written, since the running step may be the same file |
@@ -216,6 +229,75 @@ After a step that did not succeed, it removes the step's exported closure and an
 `*.tmp` files from the job directory. A step's log keeps the first and the last 512 KiB of the
 worker's output. The worker inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `HOME` from
 the server's environment, so `ADMIN_PASSWORD` and JVM options meant for Fuseki never reach it.
+
+### Governance rules
+
+A `RULES` step runs OpenMetadata's governance rules, positive SPARQL `CONSTRUCT` rules such as PII
+propagation through column lineage, tag inheritance through containment and domain membership,
+over a working dataset that `LOAD` (and `CLASSIFY`, for ontology conclusions) filled:
+
+```json
+{"protocol": 1, "stepId": "rules", "kind": "RULES", "dataset": "working", "timeoutMillis": 600000,
+ "read": ["urn:capture:asserted", "urn:capture:context"],
+ "provenance": "urn:capture:provenance",
+ "rules": [{"name": "pii-propagation-via-lineage", "ruleBody": "PREFIX om: <...> CONSTRUCT {...} WHERE {...}",
+            "enabled": true, "priority": 200, "output": "urn:capture:inferred:pii-propagation-via-lineage"}],
+ "limits": {"maxPasses": 64}}
+```
+
+- `read` lists the graphs the rules read; they read the union of these and the output graphs, never
+  the provenance graph or any other graph. `urn:x-arq:DefaultGraph` names the default graph.
+- `rules` is OpenMetadata's rule shape (`name`, `ruleBody`, `ruleType`, `enabled`, `priority`,
+  `displayName`, `description`, `tags`) plus `output`, the graph a rule's conclusions go to, which
+  every enabled rule needs. Rules may share an output graph. Order and `priority` do not change the
+  result.
+- No output graph nor the provenance graph may be read, and no graph under
+  `urn:openmetadata:reasoner:` may be named: the step keeps its delta graphs there.
+
+**Admission.** Every rule, enabled or not, is checked on its SPARQL algebra before anything runs, and
+one invalid rule rejects the bundle (`INVALID_RULES`, every problem listed with its rule). The step
+accepts what OpenMetadata's own check accepts, a positive, finite `CONSTRUCT` that SPARQL 1.1 parses:
+no `OPTIONAL`, `MINUS`, `NOT EXISTS`, `BOUND`, or `EXISTS` other than as a condition the whole
+`FILTER` requires; no nondeterministic functions (`RAND`, `NOW`, `UUID`, `STRUUID`, `BNODE`,
+`fn:current-*`); no subqueries, aggregates, `LIMIT`, `OFFSET`, `ORDER BY` or `SERVICE`; no blank
+nodes in the template, and every template variable bound by a triple pattern, a property path or
+`VALUES`, never only by `BIND`. It is stricter in three places: `GRAPH`, `FROM` and `FROM NAMED` are
+refused, since rules read the selected union; only SPARQL's own functions, `fn:` functions and XSD
+casts may be called, never extension functions, and property functions are off, since both run code
+named by an IRI; and a rule has at most 16,384 characters, 32 template triples, `maxRulePatterns`
+patterns and 32 levels of nesting.
+
+**Evaluation.** The step first empties its output and provenance graphs, so it always recomputes from
+what it reads: a premise deleted since the last run takes every conclusion that only it supported
+with it, including conclusions around a cycle, and a conclusion with another support stays. It then
+runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later pass evaluates, for every
+triple pattern that can match the previous pass's new facts, the rule with that one pattern matching
+only them (a delta graph) and the rest matching everything, and with UNION branches that do not hold
+the pattern dropped. A solution that uses a new fact is found that way; one that does not was found
+before. A rule whose property path or EXISTS condition reads a predicate the delta holds is
+evaluated in full in that pass instead. A pass evaluates inside one read transaction and spools its
+solutions to a file in the job directory, bounded by `maxSpoolBytes`; it then reads the file back
+and applies the conclusions in write transactions of up to 500,000 solutions, never upgrading a read
+transaction. A conclusion already in a graph the rules read is not stored; one already in its rule's
+graph is a duplicate; any other goes into its rule's graph with a witness and, if no output graph
+had it, into the next delta. The step converges when a pass adds no new fact, and reports
+`CONVERGED` with per-pass and per-rule counts. Running out of passes, new facts or spool ends it
+`INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a step that does not converge leaves its
+output graphs partial and writes no run record, so its dataset must not be published.
+
+The starter rules ship with `transitive-lineage-closure` disabled: it stores every
+ancestor/descendant pair, which grows quadratically with lineage depth.
+
+**Witnesses and explanations.** For every fact it derives, the step records in the provenance graph
+the solution that first derived it: the rule, the pass and the values of the rule's variables. Those
+values are terms the dataset already holds, so a witness costs index entries, not node data. A
+converged run also records the graphs it read and every enabled rule's body and SHA-256 digest. The
+worker's `Explanations` API (used by a later `EXPLAIN` for governance facts) rebuilds a fact's
+premises from its witness, explains each premise in turn down to facts the rules read, reconstructs a
+property-path premise as one shortest chain of triples and an EXISTS condition as one match, and
+marks where it stopped at its depth, size and path bounds. A derived fact's premises were all present
+before the pass that derived it, so an explanation always ends at asserted facts. The provenance
+graph is never part of the serving union.
 
 ### Job operations
 
@@ -265,6 +347,9 @@ worker and interrupts its job. A request ID keeps returning its job as long as t
 run by hand, and refuses work at or over `OPENMETADATA_REASONING_DISK_QUOTA`. Finished jobs beyond
 `OPENMETADATA_REASONING_JOB_HISTORY` or older than `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` are
 removed, oldest first. Directories without a `job.json` are never removed.
+
+A job's worker steps report a `RULES` budget as `LIMIT_EXCEEDED` with the limit as its subject, and
+an invalid bundle as `RULE_FAILED`; no plan runs `RULES` yet.
 
 **What a job does in this release.** Every operation's plan starts with `capture`, which is not
 implemented yet: the job ends `FAILED` with the problem `NOT_READY`, step `capture`, and a message
@@ -351,7 +436,7 @@ docker exec <container> /jena-fuseki/reasoner/bin/reasoner run /fuseki/reasoning
 docker exec <container> /jena-fuseki/reasoner/bin/reasoner command /fuseki/reasoning/jobs/<job>/<step>.json
 ```
 
-`readiness` prints the budget as JSON, with `status` (`READY`, `NOT_READY` or `DISABLED`),
+Any step file runs this way, a `RULES` step included. `readiness` prints the budget as JSON, with `status` (`READY`, `NOT_READY` or `DISABLED`),
 `requiredBytes`, `availableBytes`, `limitSource`, each term, Fuseki's current anonymous memory and
 the reasons. `command` prints the worker's launch command:
 
