@@ -6,7 +6,7 @@
 #
 # Ontology graphs as OpenMetadata writes them, one per term and axiom, and the version manifest of
 # the Approved closure of https://open-metadata.org/ontology/finance, whose closure digest is
-# closure-digest sha256:4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485
+# closure-digest sha256:bfb699dae84c29bf95c74b1953da6b6df70c843765939f587db2ea54e81a1ba6
 # The Draft graph draft/loan is not pinned; with it the closure would be inconsistent. The smoke
 # test checks this closure through the image; CaptureTest checks that the manifest still matches.
 PREFIX : <https://open-metadata.org/finance#>
@@ -46,14 +46,14 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
             a                owl:Class .
 }
 
-<https://open-metadata.org/graph/manifest/4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485> {
-    <https://open-metadata.org/ontology/finance/version/4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485>
+<https://open-metadata.org/graph/manifest/bfb699dae84c29bf95c74b1953da6b6df70c843765939f587db2ea54e81a1ba6> {
+    <https://open-metadata.org/ontology/finance/version/bfb699dae84c29bf95c74b1953da6b6df70c843765939f587db2ea54e81a1ba6>
             omr:glossary         <https://open-metadata.org/glossary/finance>;
             a                    omr:OntologyVersion;
             omr:memberCount      5;
             omr:digestAlgorithm  "om-closure-v1";
             omr:createdAt        "2026-10-15T08:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>;
-            omr:closureDigest    "sha256:4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485";
+            omr:closureDigest    "sha256:bfb699dae84c29bf95c74b1953da6b6df70c843765939f587db2ea54e81a1ba6";
             omr:selection        "APPROVED";
             omr:ontology         <https://open-metadata.org/ontology/finance> .
     <https://open-metadata.org/graph/glossaryTerm/asset>
@@ -63,10 +63,10 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
     <https://open-metadata.org/graph/asset/loan>
             omr:pinnedDigest  "sha256:d7b15a0265afef032a7b9b8cac9d79a7e54484d733ab0bf61b40e694fef616cd" .
     <https://open-metadata.org/ontology/finance>
-            owl:versionIRI  <https://open-metadata.org/ontology/finance/version/4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485>;
+            owl:versionIRI  <https://open-metadata.org/ontology/finance/version/bfb699dae84c29bf95c74b1953da6b6df70c843765939f587db2ea54e81a1ba6>;
             a               owl:Ontology .
     <https://open-metadata.org/graph/axiom/disjoint>
-            omr:pinnedDigest  "sha256:5ab4ab9377638cd8ecb4331152cff9856cbab1939bd5084bde062ed25adec308" .
+            omr:pinnedDigest  "sha256:06c6ff95740ee834bf21f95de8bf69c5b86476e394f1522242a0a38ab8ab7383" .
     <https://open-metadata.org/graph/glossaryTerm/hybrid>
             omr:pinnedDigest  "sha256:ba8143ef9183636e2bdb47adf7b47072c94682ab3efbff7eca42aaa736626dbe" .
 }

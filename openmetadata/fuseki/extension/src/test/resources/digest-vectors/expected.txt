@@ -1,7 +1,12 @@
-# Digests computed by OpenMetadata's OntologyGraphDigest (RdfBlankNodeCanonicalizer) at commit
-# 54d312160d3 of open-metadata/OpenMetadata (pull request 35568), Jena 6.2.0. GraphDigestTest
-# requires the store's GraphDigest to give the same for the same files.
-axiom.ttl sha256:3550186dbd68c0824d99e7c2315b8fe541665b7021589effb2a049bf91141ef2
+# Graph digests (om-graph-v2) computed by OpenMetadata's OntologyGraphDigest over
+# OntologyGraphCanonicalForm at commit e404f59a4a6 of open-metadata/OpenMetadata (pull request
+# 35568), Jena 6.2.0; a copy of its openmetadata-service/src/test/resources/rdf/digest-vectors.
+# GraphDigestTest requires the store's GraphDigest to give the same for the same files; "refused"
+# means the graph is too symmetric to digest within the bounds.
+axiom.ttl sha256:1cf52f055ebf4d54e7c845dff23f3364d4af108d5cc9533fab63f7576b2b496c
+cycles.ttl sha256:0ceb074b1f1e8f416701a8421ef3d581004f62f60c46cb1d65ad8a9a791069b7
 empty.ttl sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-list.ttl sha256:2a7c96538fddfddaafdd53f65d7aec0669e9ab65df96f542cc12e21228ee8e5f
-twins.ttl sha256:bf5cc4c17e35b496952900922afa362f0eaebd9f1a568c6036a419ac3ba583ed
+list.ttl sha256:333c7f9389edb471dfad24562703155cfc1e054d27b0239f73085954fa672863
+nested-twins.ttl sha256:c33d1ff5f4a2ec64920c6d15bdd4eed4c792b29fb6a28e2c190c1a7e66f340ef
+too-symmetric.ttl refused
+twins.ttl sha256:337d044a2afd9ad1c9e6edbf18262c82b5d142c1a7a4292609d1b6bed4c0edad

@@ -346,20 +346,31 @@ time, one manifest's member list and the set of captured graph names, never the 
 job's deadline and cancellation; at most `maxImports` (10,000) graphs. The working dataset the load
 builds is checked against the quota again before anything reasons over it.
 
-**Graph digest.** `sha256:` and the SHA-256 of the graph's N-Triples, one triple per line, lines
-sorted in Java string order, each ending in `\n`, with every blank node replaced by
-`urn:openmetadata:annex:<hex>`: a blank node's hash starts from the sorted signatures of the triples
-it occurs in (neighbouring blank nodes written `_:blank`, itself `_:self`, other terms in
-N-Triples), is refined from its neighbours' hashes until it stops changing, at most 16 rounds, and
-the nodes, ordered by hash, get `sha256(hash + ":" + index)`. It is OpenMetadata's
-`OntologyGraphDigest` over `RdfBlankNodeCanonicalizer`; the store indexes each blank node's triples
-once, so a graph costs linear time per round rather than quadratic.
-`extension/src/test/resources/digest-vectors/` holds files with the digests OpenMetadata's classes
-compute for them; the store must give the same, also after a round trip through TDB2. Blank nodes
-whose hashes never separate are ordered by label, which differs between OpenMetadata and the store;
-in the trees the OWL 2 RDF mapping writes such nodes are interchangeable, and otherwise the capture
-reports the graph as changed, never the reverse. Literals are compared by their lexical form as
-stored.
+**Graph digest** (`om-graph-v2`). `sha256:` and the SHA-256 of the graph's canonical N-Triples,
+one triple per line, lines sorted in Java string order, each ending in `\n`. Nothing in it depends
+on blank node labels, which TDB2 assigns differently from OpenMetadata:
+
+1. *Refinement.* A blank node's first colour is the SHA-256 hex of the sorted signatures of the
+   triples it occurs in, joined by `|` (itself written `_:self`, other blank nodes `_:`, other terms
+   in N-Triples). Its next colour hashes its colour, `\n`, and the signatures with neighbours
+   written `_:<colour>`. Rounds stop at the first that does not increase the number of distinct
+   colours, keeping the colours before it.
+2. *Distinguishing.* While colours tie, for each node of the smallest tied colour, recolour it
+   SHA-256(colour + `*`), refine and repeat, and keep the result whose text sorts first, as
+   RDFC-1.0 does. When no triple joins more than two blank nodes, none is in a triple term and the
+   joins are acyclic, which holds for every tree the OWL 2 RDF mapping writes, tied nodes are
+   interchangeable and only one per tie is tried.
+3. *Text.* Each blank node is written `_:b<colour>`.
+
+Past 1,024 distinguishing steps or 10,000,000 incident-triple visits a graph has no digest: OpenMetadata
+writes its member record without one and never pins it, and a capture that meets one refuses it
+`GENERATION_MISMATCH`. It is OpenMetadata's `OntologyGraphDigest` over `OntologyGraphCanonicalForm`
+step for step; the store indexes each blank node's triples once, so a refinement round costs time
+linear in the graph. `extension/src/test/resources/digest-vectors/` is a copy of OpenMetadata's
+vectors, with the digests its classes compute, including tied blank nodes (`nested-twins.ttl`,
+`cycles.ttl`) and a graph too symmetric to digest; the store must give the same, also after a round
+trip through TDB2 and with its blank nodes relabelled (`GraphDigestTest`). Literals are compared by
+their lexical form as stored.
 
 **Measured** on an Apple M-series laptop, Java 21, worker heap 2 GiB (`CapturePerformanceIT`, run
 with `-Dreasoning.performance=true`): a catalog closure of 1,801 table graphs and a schema graph,

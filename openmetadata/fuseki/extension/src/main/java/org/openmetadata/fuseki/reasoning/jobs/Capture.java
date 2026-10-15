@@ -373,7 +373,23 @@ public final class Capture {
         triples.add(quads.next().asTriple());
         copy.count();
       }
-      final String digest = GraphDigest.of(triples);
+      final String digest;
+      try {
+        digest = GraphDigest.of(triples);
+      } catch (final GraphDigest.TooSymmetricException e) {
+        // OpenMetadata gives such a graph no digest and never pins it, so this manifest was not
+        // written by OpenMetadata from the content the store now holds.
+        throw new Refused(
+            Problem.of(
+                    Problem.Code.GENERATION_MISMATCH,
+                    "Graph <"
+                        + member.getKey()
+                        + "> pinned by manifest <"
+                        + manifest.graph().getURI()
+                        + "> has no digest: "
+                        + e.getMessage())
+                .withSubject(member.getKey()));
+      }
       if (!digest.equals(member.getValue())) {
         throw new Refused(
             Problem.of(

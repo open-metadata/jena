@@ -199,6 +199,30 @@ class CaptureTest {
   }
 
   @Test
+  void aPinnedGraphTooSymmetricToDigestIsRefused() {
+    final String term = BASE + "graph/glossaryTerm/7";
+    final StringBuilder triangles = new StringBuilder("GRAPH <" + term + "> {\n");
+    for (int cycle = 0; cycle < 8; cycle++) {
+      for (int node = 0; node < 3; node++) {
+        triangles
+            .append("_:c")
+            .append(cycle)
+            .append('n')
+            .append(node)
+            .append(" <http://ex.org/p> _:c")
+            .append(cycle)
+            .append('n')
+            .append((node + 1) % 3)
+            .append(" .\n");
+      }
+    }
+    Txn.executeWrite(
+        dataset,
+        () -> RDFParser.fromString(triangles.append("}\n").toString(), Lang.TRIG).parse(dataset));
+    assertRefused(selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, term);
+  }
+
+  @Test
   void aManifestWhoseMembersDoNotMatchItsDigestIsRefused() {
     Txn.executeWrite(
         dataset,

@@ -14,6 +14,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import java.net.URISyntaxException;
@@ -22,7 +23,10 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import org.apache.jena.dboe.base.file.Location;
 import org.apache.jena.graph.Graph;
 import org.apache.jena.graph.Node;
@@ -44,6 +48,8 @@ import org.junit.jupiter.api.io.TempDir;
  * and from the same triples read back from TDB2, whose blank node labels differ.
  */
 class GraphDigestTest {
+  private static final String REFUSED = "refused";
+
   @TempDir Path directory;
 
   @Test
@@ -57,7 +63,12 @@ class GraphDigestTest {
         }
         final String[] parts = line.split(" ");
         final Graph parsed = turtle(Files.readString(vectors.resolve(parts[0])));
-        assertEquals(parts[1], digest(parsed), parts[0]);
+        final boolean refused = REFUSED.equals(parts[1]);
+        if (refused) {
+          assertThrows(GraphDigest.TooSymmetricException.class, () -> digest(parsed), parts[0]);
+        } else {
+          assertEquals(parts[1], digest(parsed), parts[0]);
+        }
 
         final Node name = NodeFactory.createURI("urn:vector:" + parts[0]);
         Txn.executeWrite(
@@ -70,7 +81,14 @@ class GraphDigestTest {
         final List<Triple> stored =
             Txn.calculateRead(store, () -> store.getGraph(name).find().toList());
         Collections.reverse(stored);
-        assertEquals(parts[1], GraphDigest.of(stored), parts[0] + " read back from TDB2");
+        if (refused) {
+          assertThrows(
+              GraphDigest.TooSymmetricException.class,
+              () -> GraphDigest.of(stored),
+              parts[0] + " read back from TDB2");
+        } else {
+          assertEquals(parts[1], GraphDigest.of(stored), parts[0] + " read back from TDB2");
+        }
       }
     } finally {
       TDBInternal.expel(store);
@@ -85,7 +103,45 @@ class GraphDigestTest {
     assertNotEquals(digest(turtle(text)), digest(turtle(text.replace("\"5\"", "\"05\""))));
   }
 
-  /** OpenMetadata's code scans every triple per blank node per round; the store indexes them. */
+  /**
+   * Ties are where a label could leak into the digest: the nested twins and the cycles vectors have
+   * blank nodes refinement cannot tell apart, and must digest equally however they are labelled and
+   * ordered.
+   */
+  @Test
+  void tiedBlankNodesDigestEquallyWhateverTheirLabels() throws Exception {
+    final Random random = new Random(20261015L);
+    for (final String name : List.of("nested-twins.ttl", "cycles.ttl", "list.ttl", "axiom.ttl")) {
+      final List<Triple> triples =
+          turtle(Files.readString(resource("digest-vectors").resolve(name))).find().toList();
+      final String expected = GraphDigest.of(triples);
+      for (int attempt = 0; attempt < 25; attempt++) {
+        assertEquals(expected, GraphDigest.of(relabel(triples, random)), name + " " + attempt);
+      }
+    }
+  }
+
+  private static List<Triple> relabel(final List<Triple> triples, final Random random) {
+    final Map<Node, Node> names = new HashMap<>();
+    final List<Triple> relabelled = new ArrayList<>();
+    for (final Triple triple : triples) {
+      relabelled.add(
+          Triple.create(
+              rename(triple.getSubject(), names, random),
+              rename(triple.getPredicate(), names, random),
+              rename(triple.getObject(), names, random)));
+    }
+    Collections.shuffle(relabelled, random);
+    return relabelled;
+  }
+
+  private static Node rename(final Node node, final Map<Node, Node> names, final Random random) {
+    return node.isBlank()
+        ? names.computeIfAbsent(
+            node, blank -> NodeFactory.createBlankNode(Long.toHexString(random.nextLong())))
+        : node;
+  }
+
   @Test
   void aGraphWithManyBlankNodesIsDigestedInLinearTime() {
     final StringBuilder list = new StringBuilder("<http://ex.org/s> <http://ex.org/p> (");
