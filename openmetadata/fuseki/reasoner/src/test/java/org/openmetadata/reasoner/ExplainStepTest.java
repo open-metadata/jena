@@ -13,6 +13,7 @@
 package org.openmetadata.reasoner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import org.junit.jupiter.api.BeforeAll;
@@ -92,7 +93,7 @@ class ExplainStepTest {
   }
 
   @Test
-  void anInconsistentClosureHasNoUsefulEntailmentsToExplain() throws Exception {
+  void anEntailmentOfAnInconsistentClosureIsExplainedByTheInconsistency() throws Exception {
     final Path step =
         explain(
             "on-inconsistent",
@@ -100,6 +101,65 @@ class ExplainStepTest {
             "ClassAssertion(<" + FUNCTIONAL + "Team> <" + FUNCTIONAL + "alice>)");
     assertEquals(ExitCodes.COMPLETED, Jobs.run(step));
     assertEquals("INCONSISTENT", Jobs.outcome(step));
+    assertEquals(6, Jobs.manifest(step).getNumber("justificationSize").intValue());
+    assertTrue(
+        Jobs.report(step)
+            .contains(
+                "JUSTIFICATION DisjointClasses(<%1$sPerson> <%1$sTeam>)".formatted(FUNCTIONAL)));
+  }
+
+  @Test
+  void severalJustificationsAreBoundedByTheirCount() throws Exception {
+    Jobs.file(
+        job,
+        "two-ways.trig",
+        """
+        PREFIX owl: <http://www.w3.org/2002/07/owl#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        PREFIX : <http://example.org/two#>
+        GRAPH <urn:two> {
+          <http://example.org/two> a owl:Ontology .
+          :A a owl:Class ; rdfs:subClassOf :B , :D .
+          :B a owl:Class ; rdfs:subClassOf :C .
+          :D a owl:Class ; rdfs:subClassOf :C .
+          :C a owl:Class .
+        }
+        """);
+    assertEquals(
+        ExitCodes.COMPLETED,
+        Jobs.run(Jobs.write(job, "load-two", Jobs.load("two", "two-ways.trig"))));
+    final String two = "http://example.org/two#";
+    final Path all = several("several", 10, two);
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(all), () -> Jobs.manifest(all).toString());
+    assertEquals(
+        """
+        OUTCOME EXPLAINED
+        TARGET SubClassOf(<%1$sA> <%1$sC>)
+        JUSTIFICATION SubClassOf(<%1$sA> <%1$sB>)
+        JUSTIFICATION SubClassOf(<%1$sB> <%1$sC>)
+        JUSTIFICATION#2 SubClassOf(<%1$sA> <%1$sD>)
+        JUSTIFICATION#2 SubClassOf(<%1$sD> <%1$sC>)
+        """
+            .formatted(two),
+        Jobs.report(all));
+    assertEquals(2, Jobs.manifest(all).get("justifications").getAsArray().size());
+
+    final Path one = several("one", 1, two);
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(one));
+    assertEquals(1, Jobs.manifest(one).get("justifications").getAsArray().size());
+  }
+
+  private static Path several(final String id, final int max, final String namespace) {
+    return Jobs.write(
+        job,
+        id,
+        """
+        {"protocol": 1, "stepId": "%s", "kind": "EXPLAIN", "dataset": "two",
+         "timeoutMillis": 60000, "report": true,
+         "closure": {"root": "http://example.org/two", "graphs": ["urn:two"]},
+         "explain": {"axiom": "SubClassOf(<%sA> <%sC>)", "maxJustifications": %d}}
+        """
+            .formatted(id, namespace, namespace, max));
   }
 
   @Test

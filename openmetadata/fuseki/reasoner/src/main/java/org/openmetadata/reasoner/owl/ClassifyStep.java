@@ -45,6 +45,12 @@ public final class ClassifyStep implements Step {
    */
   static final int MAX_REPORT_LINES = 100_000;
 
+  /**
+   * The manifest names at most this many unsatisfiable classes, the first in IRI order, so a
+   * closure with thousands of them still has a small manifest; the count is always complete.
+   */
+  static final int MAX_LISTED_UNSATISFIABLE = 100;
+
   @Override
   public StepResult run(final StepFile step, final Watchdog watchdog) throws Exception {
     final DatasetGraph dataset = WorkingDataset.open(step.dataset());
@@ -59,6 +65,7 @@ public final class ClassifyStep implements Step {
       final Report report = step.report() ? new Report(MAX_REPORT_LINES) : null;
       final GraphWriter writer =
           step.outputGraph() == null ? null : new GraphWriter(dataset, step.outputGraph());
+      final JsonArray unsatisfiable = new JsonArray();
       final Classifier.Outcome outcome;
       try {
         outcome =
@@ -70,6 +77,10 @@ public final class ClassifyStep implements Step {
                 watchdog,
                 step.limits(),
                 fact -> {
+                  if (fact.kind() == Classification.Kind.UNSATISFIABLE
+                      && unsatisfiable.size() < MAX_LISTED_UNSATISFIABLE) {
+                    unsatisfiable.add(fact.first());
+                  }
                   if (writer != null) {
                     writer.write(fact);
                   }
@@ -96,12 +107,18 @@ public final class ClassifyStep implements Step {
         routing.put("fallback", outcome.fallback());
       }
       final JsonArray checkResults = new JsonArray();
-      for (final Classifier.CheckResult check : outcome.checks()) {
+      for (int i = 0; i < outcome.checks().size(); i++) {
+        final Classifier.CheckResult check = outcome.checks().get(i);
         final JsonObject json = new JsonObject();
         json.put("axiom", check.rendering());
         json.put("outcome", check.outcome().name());
         if (check.engine() != null) {
           json.put("engine", check.engine());
+        }
+        if (check.outcome() == Classifier.CheckOutcome.INVALID) {
+          final String reason = checks.get(i).invalidReason();
+          json.put(
+              "reason", reason != null ? reason : "The engine cannot check this kind of axiom");
         }
         checkResults.add(json);
         if (report != null) {
@@ -117,6 +134,7 @@ public final class ClassifyStep implements Step {
               .detail("closure", input.closureJson())
               .detail("admission", input.admission().toJson())
               .detail("entailments", counts)
+              .detail("unsatisfiable", unsatisfiable)
               .detail("checks", checkResults);
       return report == null ? stepResult : stepResult.report(report.lines("OUTCOME " + result));
     } finally {

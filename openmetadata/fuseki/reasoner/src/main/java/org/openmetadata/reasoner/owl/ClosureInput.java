@@ -41,7 +41,7 @@ record ClosureInput(OWLOntology ontology, JsonObject closureJson, Admission admi
       Files.deleteIfExists(document);
     }
     final Admission admission = Admission.check(ontology, step.limits());
-    return new ClosureInput(ontology, closure.toJson(step.closure().graphs().size()), admission);
+    return new ClosureInput(ontology, closure.toJson(), admission);
   }
 
   /**

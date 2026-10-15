@@ -127,6 +127,72 @@ GRAPH <urn:c> {
   }
 
   @Test
+  void allGraphsTakesEveryGraphOfTheDatasetAndAnImportMayNameAGraph() throws Exception {
+    Jobs.file(
+        job,
+        "split.trig",
+        """
+        PREFIX owl: <http://www.w3.org/2002/07/owl#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        PREFIX : <http://example.org/s#>
+        GRAPH <http://example.org/s> {
+          <http://example.org/s> a owl:Ontology ;
+            owl:imports <http://example.org/graph/term/a> , <http://example.org/graph/axiom/1> .
+        }
+        GRAPH <http://example.org/graph/term/a> { :A a owl:Class . :B a owl:Class . }
+        GRAPH <http://example.org/graph/axiom/1> { :A rdfs:subClassOf :B . }
+        """);
+    assertEquals(
+        ExitCodes.COMPLETED,
+        Jobs.run(Jobs.write(job, "load-split", Jobs.load("split", "split.trig"))));
+    final Path all =
+        Jobs.write(
+            job,
+            "all",
+            """
+            {"protocol": 1, "stepId": "all", "kind": "CLASSIFY", "dataset": "split",
+             "timeoutMillis": 60000, "report": true,
+             "closure": {"root": "http://example.org/s", "allGraphs": true}}
+            """);
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(all), () -> Jobs.manifest(all).toString());
+    assertTrue(
+        Jobs.report(all).contains("SUBCLASS <http://example.org/s#A> <http://example.org/s#B>"));
+    assertEquals(3, Jobs.manifest(all).getObj("closure").getNumber("graphs").intValue());
+
+    final Path listed =
+        Jobs.write(
+            job,
+            "listed",
+            """
+            {"protocol": 1, "stepId": "listed", "kind": "CLASSIFY", "dataset": "split",
+             "timeoutMillis": 60000,
+             "closure": {"root": "http://example.org/s",
+                         "graphs": ["http://example.org/s", "http://example.org/graph/term/a"]}}
+            """);
+    assertEquals(ExitCodes.INPUT_REJECTED, Jobs.run(listed));
+    assertEquals("MISSING_IMPORT", Jobs.firstProblem(listed));
+
+    assertInvalidStep(
+        """
+        {"protocol": 1, "stepId": "s", "kind": "CLASSIFY", "dataset": "split",
+         "timeoutMillis": 1000,
+         "closure": {"root": "http://example.org/s", "allGraphs": true, "graphs": ["urn:x"]}}
+        """);
+    assertInvalidStep(
+        """
+        {"protocol": 1, "stepId": "s", "kind": "CLASSIFY", "dataset": "split",
+         "timeoutMillis": 1000, "output": "urn:out",
+         "closure": {"root": "http://example.org/s", "allGraphs": true}}
+        """);
+    assertInvalidStep(
+        """
+        {"protocol": 1, "stepId": "s", "kind": "EXPLAIN", "dataset": "split",
+         "timeoutMillis": 1000, "closure": {"root": "http://example.org/s", "allGraphs": true},
+         "explain": {"inconsistency": true, "maxJustifications": 11}}
+        """);
+  }
+
+  @Test
   void admissionLimitsRejectRatherThanTruncate() {
     assertLimit("{\"maxClosureTriples\": 5}", "CLOSURE_TOO_LARGE");
     assertLimit("{\"maxLogicalAxioms\": 1}", "TOO_MANY_AXIOMS");
