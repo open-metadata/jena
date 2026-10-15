@@ -12,9 +12,7 @@
  */
 package org.openmetadata.reasoner.owl;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.TreeSet;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.graph.Node;
@@ -22,6 +20,7 @@ import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.query.TxnType;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.openmetadata.reasoner.InputRejectedException;
+import org.openmetadata.reasoner.SortedReport;
 import org.openmetadata.reasoner.Step;
 import org.openmetadata.reasoner.StepFile;
 import org.openmetadata.reasoner.StepResult;
@@ -62,7 +61,7 @@ public final class ClassifyStep implements Step {
               : input.checks(step.checks(), step.limits().maxChecks());
       final PropertyValues values = PropertyValues.analyse(input.ontology());
       final EngineRouter.Route route = EngineRouter.route(input.ontology(), step.engine(), values);
-      final Report report = step.report() ? new Report(MAX_REPORT_LINES) : null;
+      final SortedReport report = step.report() ? new SortedReport(MAX_REPORT_LINES) : null;
       final GraphWriter writer =
           step.outputGraph() == null ? null : new GraphWriter(dataset, step.outputGraph());
       final JsonArray unsatisfiable = new JsonArray();
@@ -179,35 +178,6 @@ public final class ClassifyStep implements Step {
         dataset.abort();
       }
       dataset.end();
-    }
-  }
-
-  /** The report's fact and check lines in order, keeping only the first {@code limit}. */
-  static final class Report {
-    private final int limit;
-    private final TreeSet<String> lines = new TreeSet<>();
-    private long omitted;
-
-    Report(final int limit) {
-      this.limit = limit;
-    }
-
-    void add(final String line) {
-      lines.add(line);
-      if (lines.size() > limit) {
-        lines.pollLast();
-        omitted++;
-      }
-    }
-
-    List<String> lines(final String outcome) {
-      final List<String> report = new ArrayList<>(lines.size() + 2);
-      report.add(outcome);
-      report.addAll(lines);
-      if (omitted > 0) {
-        report.add("OMITTED " + omitted + " lines beyond the first " + limit);
-      }
-      return report;
     }
   }
 }

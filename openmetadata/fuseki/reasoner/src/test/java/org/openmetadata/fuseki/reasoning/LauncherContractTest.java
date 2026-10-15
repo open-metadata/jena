@@ -40,6 +40,7 @@ class LauncherContractTest {
     assertEquals(ExitCodes.OUT_OF_MEMORY, WorkerExitCodes.OUT_OF_MEMORY);
     assertEquals(ExitCodes.INPUT_REJECTED, WorkerExitCodes.INPUT_REJECTED);
     assertEquals(ExitCodes.TIME_BUDGET, WorkerExitCodes.TIME_BUDGET);
+    assertEquals(ExitCodes.BUDGET, WorkerExitCodes.BUDGET);
   }
 
   /** Capabilities report the extension's copy of the limits; the worker enforces its own. */
