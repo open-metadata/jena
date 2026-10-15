@@ -1,0 +1,72 @@
+#  Copyright 2026 Collate
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Ontology graphs as OpenMetadata writes them, one per term and axiom, and the version manifest of
+# the Approved closure of https://open-metadata.org/ontology/finance, whose closure digest is
+# closure-digest sha256:4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485
+# The Draft graph draft/loan is not pinned; with it the closure would be inconsistent. The smoke
+# test checks this closure through the image; CaptureTest checks that the manifest still matches.
+PREFIX : <https://open-metadata.org/finance#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX omr: <https://open-metadata.org/reasoning/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+<https://open-metadata.org/graph/glossaryTerm/asset> {
+    :Asset  a       owl:Class .
+}
+
+<https://open-metadata.org/graph/glossaryTerm/liability> {
+    :Liability  a   owl:Class .
+}
+
+<https://open-metadata.org/graph/asset/loan> {
+    :loan   a       owl:NamedIndividual;
+            a       :Asset .
+}
+
+<https://open-metadata.org/graph/draft/loan> {
+    :loan   a       :Liability .
+}
+
+<https://open-metadata.org/graph/axiom/disjoint> {
+    _:b0    a            owl:AllDisjointClasses;
+            owl:members  _:b1 .
+    _:b1    <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>  _:b2;
+            <http://www.w3.org/1999/02/22-rdf-syntax-ns#first>  :Asset .
+    _:b2    <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>  <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil>;
+            <http://www.w3.org/1999/02/22-rdf-syntax-ns#first>  :Liability .
+}
+
+<https://open-metadata.org/graph/glossaryTerm/hybrid> {
+    :Hybrid  rdfs:subClassOf  :Liability;
+            rdfs:subClassOf  :Asset;
+            a                owl:Class .
+}
+
+<https://open-metadata.org/graph/manifest/4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485> {
+    <https://open-metadata.org/ontology/finance/version/4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485>
+            omr:glossary         <https://open-metadata.org/glossary/finance>;
+            a                    omr:OntologyVersion;
+            omr:memberCount      5;
+            omr:digestAlgorithm  "om-closure-v1";
+            omr:createdAt        "2026-10-15T08:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>;
+            omr:closureDigest    "sha256:4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485";
+            omr:selection        "APPROVED";
+            omr:ontology         <https://open-metadata.org/ontology/finance> .
+    <https://open-metadata.org/graph/glossaryTerm/asset>
+            omr:pinnedDigest  "sha256:f5dcdb9bc4e19a78ebab203b154224504ed2bb9ef866d24d1d71767865c3fc13" .
+    <https://open-metadata.org/graph/glossaryTerm/liability>
+            omr:pinnedDigest  "sha256:0c9ab1e4d94e65e795074543cca370343700b2d8ab57a2cdb6db1b6abeebc90a" .
+    <https://open-metadata.org/graph/asset/loan>
+            omr:pinnedDigest  "sha256:d7b15a0265afef032a7b9b8cac9d79a7e54484d733ab0bf61b40e694fef616cd" .
+    <https://open-metadata.org/ontology/finance>
+            owl:versionIRI  <https://open-metadata.org/ontology/finance/version/4a2583b6888d52d4dba758e565318e82d4df4036089c8fcd579fd74665a19485>;
+            a               owl:Ontology .
+    <https://open-metadata.org/graph/axiom/disjoint>
+            omr:pinnedDigest  "sha256:5ab4ab9377638cd8ecb4331152cff9856cbab1939bd5084bde062ed25adec308" .
+    <https://open-metadata.org/graph/glossaryTerm/hybrid>
+            omr:pinnedDigest  "sha256:ba8143ef9183636e2bdb47adf7b47072c94682ab3efbff7eca42aaa736626dbe" .
+}

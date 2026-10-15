@@ -1,0 +1,7 @@
+# Digests computed by OpenMetadata's OntologyGraphDigest (RdfBlankNodeCanonicalizer) at commit
+# 54d312160d3 of open-metadata/OpenMetadata (pull request 35568), Jena 6.2.0. GraphDigestTest
+# requires the store's GraphDigest to give the same for the same files.
+axiom.ttl sha256:3550186dbd68c0824d99e7c2315b8fe541665b7021589effb2a049bf91141ef2
+empty.ttl sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+list.ttl sha256:2a7c96538fddfddaafdd53f65d7aec0669e9ab65df96f542cc12e21228ee8e5f
+twins.ttl sha256:bf5cc4c17e35b496952900922afa362f0eaebd9f1a568c6036a419ac3ba583ed
