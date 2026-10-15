@@ -14,6 +14,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import org.apache.jena.atlas.json.JSON;
@@ -30,6 +31,15 @@ import org.openmetadata.fuseki.reasoning.StepOutcome;
 public final class WorkerStage implements Stage {
   static final long BUSY_RETRY_MILLIS = 1_000;
   static final long DEFAULT_MAX_BUSY_WAIT_MILLIS = TimeUnit.MINUTES.toMillis(10);
+
+  /** The capabilities' limit behind each of the worker's limit problems. */
+  private static final Map<String, String> LIMITS =
+      Map.of(
+          "CLOSURE_TOO_LARGE", "maxClosureAxioms",
+          "TOO_MANY_AXIOMS", "maxClosureAxioms",
+          "TOO_MANY_INDIVIDUALS", "maxIndividuals",
+          "EXPRESSION_TOO_DEEP", "maxExpressionDepth",
+          "INPUT_TOO_LARGE", "maxDiskBytes");
 
   private final String name;
   private final Function<Context, JsonObject> stepFile;
@@ -112,21 +122,30 @@ public final class WorkerStage implements Stage {
     return Result.failed(problem.atStep(step));
   }
 
-  /** A rejected input keeps the worker's first problem as the message. */
+  /**
+   * A rejected input keeps the worker's first problem as the message. A limit names the
+   * capabilities' limit it enforces, when there is one.
+   */
   private static Problem failure(final String reason, final JsonObject manifest) {
     final JsonObject first = firstProblem(manifest);
+    final String code = first == null ? null : first.getString("code");
     final String detail = first == null ? reason : reason + ": " + first.getString("message");
     if (reason.startsWith("NOT_OWL2_DL")) {
       return Problem.of(Problem.Code.PROFILE_VIOLATION, detail);
     }
     if (reason.startsWith("LIMIT_EXCEEDED")) {
-      return Problem.of(Problem.Code.LIMIT_EXCEEDED, detail);
+      final Problem problem = Problem.of(Problem.Code.LIMIT_EXCEEDED, detail);
+      final String limit = code == null ? null : LIMITS.get(code);
+      return limit == null ? problem : problem.withSubject(limit);
     }
     if (reason.startsWith("INVALID_INPUT")) {
-      final boolean missingImport =
-          first != null && "MISSING_IMPORT".equals(first.getString("code"));
-      return Problem.of(
-          missingImport ? Problem.Code.MISSING_IMPORT : Problem.Code.PROFILE_VIOLATION, detail);
+      if ("MISSING_IMPORT".equals(code)) {
+        return Problem.of(Problem.Code.MISSING_IMPORT, detail);
+      }
+      if ("UNKNOWN_ENTITY".equals(code) || "INVALID_TARGET".equals(code)) {
+        return Problem.of(Problem.Code.INVALID_REQUEST, detail);
+      }
+      return Problem.of(Problem.Code.PROFILE_VIOLATION, detail);
     }
     if (reason.startsWith("PROTOCOL_ERROR")) {
       return Problem.of(Problem.Code.WORKER_LOST, detail);

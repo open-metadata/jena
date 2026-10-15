@@ -136,12 +136,12 @@ public final class ReasoningServlet extends HttpServlet {
           send(
               response,
               501,
-              Problem.of(Problem.Code.NOT_IMPLEMENTED, Plans.RESULTS_MISSING).toJson());
+              Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.RESULTS_MISSING).toJson());
       case QUERY ->
           send(
               response,
               501,
-              Problem.of(Problem.Code.NOT_IMPLEMENTED, Plans.QUERY_MISSING).toJson());
+              Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.QUERY_MISSING).toJson());
     }
   }
 

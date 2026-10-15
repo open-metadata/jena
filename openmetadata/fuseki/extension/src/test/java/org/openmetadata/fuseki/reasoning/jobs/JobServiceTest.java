@@ -36,6 +36,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonObject;
+import org.apache.jena.sparql.core.DatasetGraph;
+import org.apache.jena.sparql.core.DatasetGraphFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -265,19 +267,44 @@ class JobServiceTest {
   }
 
   @Test
-  void everyOperationFailsAtCaptureUntilCaptureExists() throws Exception {
-    final JobService service = service(Plans.current(), Map.of());
-    for (final String example :
-        List.of("refresh-request", "check-subsumption-request", "explain-request")) {
+  void aRefreshFailsAtCaptureUntilSnapshotsExist() throws Exception {
+    final JobService service = service(plans(name -> null), Map.of());
+    final JsonObject failed =
+        await(service, id(service.submit(request("refresh-request"))), state("FAILED"));
+    final JsonObject problem = failed.getObj("problem");
+    assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
+    assertEquals("capture", problem.getString("step"));
+    assertEquals(Operations.REFRESH_MISSING, problem.getString("message"));
+    assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
+    assertConforms(failed);
+  }
+
+  @Test
+  void aCheckOfAnOntologyTheDatasetDoesNotHoldFailsAtCapture() throws Exception {
+    final DatasetGraph empty = DatasetGraphFactory.createTxnMem();
+    final JobService service = service(plans(name -> empty), Map.of());
+    // The candidate names no closure digest; the Approved explanation has no active closure.
+    for (final Map.Entry<String, String> example :
+        Map.of(
+                "check-subsumption-request", "INVALID_REQUEST",
+                "explain-request", "MISSING_IMPORT")
+            .entrySet()) {
       final JsonObject failed =
-          await(service, id(service.submit(request(example))), state("FAILED"));
+          await(service, id(service.submit(request(example.getKey()))), state("FAILED"));
       final JsonObject problem = failed.getObj("problem");
-      assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
+      assertEquals(example.getValue(), problem.getString("code"), failed.toString());
       assertEquals("capture", problem.getString("step"));
-      assertEquals(Plans.CAPTURE_MISSING, problem.getString("message"));
-      assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
+      assertEquals(
+          Contract.example(example.getKey()).getString("ontologyIri"),
+          problem.getString("subject"));
       assertConforms(failed);
     }
+    final JobService gone = service(plans(name -> null), Map.of());
+    final JsonObject retried = Contract.example("check-subsumption-request");
+    retried.put("requestId", UUID.randomUUID().toString());
+    final JsonObject failed =
+        await(gone, id(gone.submit(JobRequest.validate(retried, "openmetadata"))), state("FAILED"));
+    assertEquals("INVALID_REQUEST", failed.getObj("problem").getString("code"));
   }
 
   @Test
@@ -409,23 +436,39 @@ class JobServiceTest {
         capabilities.getObj("memoryBudget").getNumber("containerLimitBytes").longValue());
     assertEquals(16, capabilities.getObj("limits").getNumber("maxQueuedJobs").intValue());
     assertEquals(3L << 30, capabilities.getObj("limits").getNumber("maxDiskBytes").longValue());
-    assertTrue(capabilities.get("engines").getAsArray().isEmpty(), "no engine is reachable yet");
-    final List<String> listed = new ArrayList<>();
+    final JsonObject limits = capabilities.getObj("limits");
+    assertEquals(3600, limits.getNumber("maxJobSeconds").intValue());
+    assertEquals(Operations.MAX_IMPORTS, limits.getNumber("maxImports").intValue());
+    assertEquals(32, limits.getNumber("maxExpressionDepth").intValue());
+    assertEquals(200_000, limits.getNumber("maxClosureAxioms").longValue(), "2 GiB worker heap");
+    assertEquals(50_000, limits.getNumber("maxIndividuals").longValue());
+    assertTrue(capabilities.get("engines").getAsArray().isEmpty(), "no worker jar in this test");
+    final Map<String, String> availability = new java.util.LinkedHashMap<>();
     capabilities
         .get("operations")
         .getAsArray()
         .forEach(
-            support -> {
-              listed.add(support.getAsObject().getString("operation"));
-              assertEquals("NOT_IMPLEMENTED", support.getAsObject().getString("availability"));
-            });
-    assertEquals(Contract.enumeration(Contract.CAPABILITIES, "operation"), listed);
+            support ->
+                availability.put(
+                    support.getAsObject().getString("operation"),
+                    support.getAsObject().getString("availability")));
+    assertEquals(
+        Contract.enumeration(Contract.CAPABILITIES, "operation"),
+        new ArrayList<>(availability.keySet()));
+    assertEquals(
+        Map.of(
+            "REFRESH", "NOT_IMPLEMENTED",
+            "CHECK", "AVAILABLE",
+            "EXPLAIN", "AVAILABLE",
+            "RESULTS", "NOT_IMPLEMENTED",
+            "QUERY", "NOT_IMPLEMENTED"),
+        availability);
   }
 
   @Test
   void capabilitiesCannotClaimAnOperationWithoutTheLimitsItNeeds() throws Exception {
     final JobService service = service(worker(SUCCEED), Map.of());
-    for (final String operation : Contract.enumeration(Contract.CAPABILITIES, "operation")) {
+    for (final String operation : List.of("REFRESH", "RESULTS", "QUERY")) {
       final JsonObject claimed = service.capabilities();
       claimed
           .get("operations")
@@ -441,6 +484,12 @@ class JobServiceTest {
               .anyMatch(violation -> violation.startsWith("$.limits.")),
           operation + " was accepted as AVAILABLE without its limits");
     }
+    final JsonObject withoutJobSeconds = service.capabilities();
+    withoutJobSeconds.getObj("limits").remove("maxJobSeconds");
+    assertTrue(
+        Contract.violations(Contract.CAPABILITIES, withoutJobSeconds).stream()
+            .anyMatch(violation -> violation.startsWith("$.limits.")),
+        "CHECK was accepted as AVAILABLE without maxJobSeconds");
     assertEquals(
         List.of(),
         Contract.violations(Contract.CAPABILITIES, Contract.example("ready-capabilities")));
@@ -500,6 +549,10 @@ class JobServiceTest {
     service.open();
     service.start();
     return service;
+  }
+
+  private Stage.Planner plans(final ServingDatasets datasets) {
+    return Plans.current(new Operations(settings, JobSettings.fromEnvironment(Map.of())), datasets);
   }
 
   private static Stage.Planner worker(final String behaviour) {

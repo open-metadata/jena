@@ -62,6 +62,36 @@ class WorkerStageTest {
         Problem.Code.LIMIT_EXCEEDED,
         null);
     assertProblem(
+        Status.FAILED,
+        "LIMIT_EXCEEDED",
+        rejected("TOO_MANY_AXIOMS", "z"),
+        Problem.Code.LIMIT_EXCEEDED,
+        "maxClosureAxioms");
+    assertProblem(
+        Status.FAILED,
+        "LIMIT_EXCEEDED",
+        rejected("CLOSURE_TOO_LARGE", "z"),
+        Problem.Code.LIMIT_EXCEEDED,
+        "maxClosureAxioms");
+    assertProblem(
+        Status.FAILED,
+        "LIMIT_EXCEEDED",
+        rejected("TOO_MANY_INDIVIDUALS", "z"),
+        Problem.Code.LIMIT_EXCEEDED,
+        "maxIndividuals");
+    assertProblem(
+        Status.FAILED,
+        "LIMIT_EXCEEDED",
+        rejected("EXPRESSION_TOO_DEEP", "z"),
+        Problem.Code.LIMIT_EXCEEDED,
+        "maxExpressionDepth");
+    assertProblem(
+        Status.FAILED,
+        "INVALID_INPUT",
+        rejected("UNKNOWN_ENTITY", "Not in the closure: Class <urn:x>"),
+        Problem.Code.INVALID_REQUEST,
+        null);
+    assertProblem(
         Status.FAILED, "INVALID_STEP: stepId must match", null, Problem.Code.INTERNAL, null);
   }
 
