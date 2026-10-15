@@ -16,6 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
+import java.lang.management.ManagementFactory;
 import org.apache.jena.atlas.json.JSON;
 import org.junit.jupiter.api.Test;
 
@@ -32,6 +34,18 @@ class LimitsTest {
     assertEquals(1_000, limits.maxChecks());
     assertEquals(1_000, limits.maxExplainChecks());
     assertEquals(32, limits.maxExpressionDepth());
+  }
+
+  @Test
+  void theDefaultsFollowTheConfiguredHeapNotTheUsableOne() {
+    final long configured =
+        ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class)
+            .getVMOption("MaxHeapSize")
+            .getValue()
+            .transform(Long::parseLong);
+    assertEquals(configured, Limits.configuredHeap());
+    assertTrue(Limits.configuredHeap() >= Runtime.getRuntime().maxMemory());
+    assertEquals(Limits.forHeap(configured), Limits.defaults());
   }
 
   @Test
