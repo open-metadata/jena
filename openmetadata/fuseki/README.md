@@ -456,5 +456,20 @@ Images are published only from `release/<fuseki-version>` branches, never from `
 is cut from the matching upstream tag (`jena-6.2.0` for `release/6.2.0`), and its name must match the
 `FUSEKI_VERSION` in the Dockerfile.
 
-Each publish pushes two tags for `linux/amd64` and `linux/arm64`: `<version>`, which moves to the latest
-build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in tests.
+A publish (a push to the release branch, or a manual run of the workflow with the branch as input)
+runs in three jobs of `.github/workflows/openmetadata-fuseki-image.yml`:
+
+1. **Build and push.** After the extension, reasoner and local smoke tests pass, it pushes one
+   multi-architecture image (`linux/amd64`, `linux/arm64`) under the immutable tag
+   `<version>-<commit>` only, then pulls the pushed amd64 image by its digest and runs
+   `test/smoke-test.sh <image>@<digest>` against it.
+2. **arm64.** A native arm64 runner pulls the same digest for `linux/arm64` and runs the same smoke
+   test. The build ran arm64 only under emulation; this is the first time it starts natively.
+3. **Promote.** Once both pass, `docker buildx imagetools create` points `<version>` at that digest
+   without rebuilding, and the job fails unless `<version>` then resolves to exactly the tested digest.
+
+So `<version>` moves only to a digest that passed the smoke test on both architectures as pushed.
+A `<version>-<commit>` tag whose run failed after the push stays in the registry but is never
+promoted; do not use it. Pull requests build and smoke-test the image and publish nothing. Pin
+`<version>-<commit>`, or `<version>@<digest>`, in tests and deployments; `<version>` moves with
+each release build.
