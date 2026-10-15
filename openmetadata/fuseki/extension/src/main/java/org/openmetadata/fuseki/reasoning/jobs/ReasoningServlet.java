@@ -42,8 +42,10 @@ import org.apache.jena.fuseki.server.DataAccessPointRegistry;
  *                                            with the existing job for a known request ID
  *   GET    /reasoning/jobs/{id}              the job's state
  *   DELETE /reasoning/jobs/{id}              request cancellation: 202 while it stops, else 200
- *   GET    /reasoning/results/{id}           501 until snapshots exist
- *   POST   /reasoning/query                  501 until snapshots exist
+ *   GET    /reasoning/results/{id}           a page of a finished job's result
+ *                                            (?offset=, ?limit= up to maxResultRows)
+ *   POST   /reasoning/query?dataset=NAME     a bounded SELECT or ASK over the dataset's current
+ *                                            snapshot
  * </pre>
  *
  * Every refusal answers with the protocol's problem object.
@@ -132,45 +134,115 @@ public final class ReasoningServlet extends HttpServlet {
           send(response, method.equals("DELETE") && stopping ? 202 : 200, job.get());
         }
       }
-      case RESULTS ->
-          send(
-              response,
-              501,
-              Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.RESULTS_MISSING).toJson());
-      case QUERY ->
-          send(
-              response,
-              501,
-              Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.QUERY_MISSING).toJson());
+      case RESULTS -> results(request, response, route.id());
+      case QUERY -> query(request, response);
     }
   }
 
-  private void submit(final HttpServletRequest request, final HttpServletResponse response)
+  private void results(
+      final HttpServletRequest request, final HttpServletResponse response, final UUID id)
+      throws IOException {
+    final int max = jobs.operations().jobSettings().maxResultRows();
+    final Integer offset = integer(request.getParameter("offset"), 0, Integer.MAX_VALUE);
+    final Integer limit = integer(request.getParameter("limit"), 1, max);
+    if (offset == null || limit == null) {
+      problem(response, 400, "offset is a non-negative integer and limit is 1 to " + max);
+      return;
+    }
+    try {
+      send(
+          response,
+          200,
+          jobs.results(id, offset, request.getParameter("limit") == null ? max : limit));
+    } catch (final JobService.Refused e) {
+      send(response, e.status(), e.problem().toJson());
+    }
+  }
+
+  private void query(final HttpServletRequest request, final HttpServletResponse response)
+      throws IOException {
+    final String name = servedDataset(request, response);
+    if (name == null) {
+      return;
+    }
+    final byte[] body = jsonBody(request, response, SnapshotQueries.MAX_REQUEST_BYTES);
+    if (body == null) {
+      return;
+    }
+    try {
+      final byte[] answer = jobs.operations().queries().run(name, body).body();
+      response.setStatus(200);
+      response.setContentType("application/json");
+      response.setCharacterEncoding("UTF-8");
+      response.setHeader("Cache-Control", "no-store");
+      response.setContentLength(answer.length);
+      try (OutputStream out = response.getOutputStream()) {
+        out.write(answer);
+      }
+    } catch (final JobService.Refused e) {
+      send(response, e.status(), e.problem().toJson());
+    }
+  }
+
+  /** A query parameter as an integer in range, the fallback when absent, or null when invalid. */
+  private static Integer integer(final String value, final int min, final int max) {
+    if (value == null) {
+      return min == 0 ? 0 : max;
+    }
+    try {
+      final int parsed = Integer.parseInt(value);
+      return parsed < min || parsed > max ? null : parsed;
+    } catch (final NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /** The served dataset ?dataset= names, or null once a refusal has been sent. */
+  private String servedDataset(final HttpServletRequest request, final HttpServletResponse response)
       throws IOException {
     final String dataset = request.getParameter("dataset");
     if (dataset == null || !DATASET.matcher(dataset).matches()) {
       problem(response, 400, "Name the serving dataset with ?dataset=<name>");
-      return;
+      return null;
     }
     final String name = dataset.startsWith("/") ? dataset.substring(1) : dataset;
     final DataAccessPointRegistry registry = DataAccessPointRegistry.get(getServletContext());
     if (registry == null || !registry.isRegistered("/" + name)) {
       problem(response, 404, "No dataset '" + name + "' is served here");
-      return;
+      return null;
     }
+    return name;
+  }
+
+  /** A JSON body of at most {@code max} bytes, or null once a refusal has been sent. */
+  private static byte[] jsonBody(
+      final HttpServletRequest request, final HttpServletResponse response, final int max)
+      throws IOException {
     final String contentType = request.getContentType();
     if (contentType == null
         || !contentType.toLowerCase(Locale.ROOT).startsWith("application/json")) {
-      problem(response, 415, "A job request is application/json");
-      return;
+      problem(response, 415, "A request body is application/json");
+      return null;
     }
-    if (request.getContentLengthLong() > JobRequest.MAX_BYTES) {
-      problem(response, 413, "A job request is at most " + JobRequest.MAX_BYTES + " bytes");
-      return;
+    if (request.getContentLengthLong() > max) {
+      problem(response, 413, "A request body is at most " + max + " bytes");
+      return null;
     }
-    final byte[] body = readBounded(request.getInputStream(), JobRequest.MAX_BYTES);
+    final byte[] body = readBounded(request.getInputStream(), max);
     if (body == null) {
-      problem(response, 413, "A job request is at most " + JobRequest.MAX_BYTES + " bytes");
+      problem(response, 413, "A request body is at most " + max + " bytes");
+    }
+    return body;
+  }
+
+  private void submit(final HttpServletRequest request, final HttpServletResponse response)
+      throws IOException {
+    final String name = servedDataset(request, response);
+    if (name == null) {
+      return;
+    }
+    final byte[] body = jsonBody(request, response, JobRequest.MAX_BYTES);
+    if (body == null) {
       return;
     }
     final JobRequest jobRequest;

@@ -1,0 +1,7 @@
+# Rule bundle digests (om-rules-v1) computed independently of OpenMetadata's RuleBundle from
+# docs/rdf-rule-bundle-contract.md; each file is a JSON array of rules in arbitrary order. The
+# store's bundle capture must compute the same digests for the same rules.
+empty.json sha256:e02faaf86d862629514456a549ec6156871ef4b7dce4afaf033a46be1f7edbee
+one-rule.json sha256:6dcf53df3c477e7d4ca0f755b2b74ee589333959e43dce0982cbedc4fa798678
+starter-enabled.json sha256:8db7d6a6dc8cd63e659508c5c42907f0c554f7e347033549087bf7a6344f32cc
+unicode-and-whitespace.json sha256:2ebc082c1525a5c6674869aa94cd3f70fb04281ca3aa497970c6fe8a5cd85c4a

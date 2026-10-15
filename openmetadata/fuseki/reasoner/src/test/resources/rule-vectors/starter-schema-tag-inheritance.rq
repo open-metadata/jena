@@ -1,0 +1,16 @@
+PREFIX om: <https://open-metadata.org/ontology/>
+CONSTRUCT {
+  ?descendant om:hasTag ?tag .
+  ?descendant om:inferredTagSource ?ancestor
+}
+WHERE {
+  {
+    ?ancestor a om:DatabaseSchema ;
+              om:hasTag ?tag .
+    ?descendant om:belongsToSchema ?ancestor .
+  } UNION {
+    ?ancestor a om:Table ;
+              om:hasTag ?tag .
+    ?ancestor om:hasColumn ?descendant .
+  }
+}

@@ -215,22 +215,7 @@ public final class Capture {
         copy.file = file;
         final StreamRDF writer = StreamRDFWriter.getWriterStream(out, RDFFormat.NQUADS_UTF8);
         writer.start();
-        final Deque<Node> pending = new ArrayDeque<>();
-        final Set<Node> seen = new HashSet<>();
-        pending.add(rootManifest);
-        seen.add(rootManifest);
-        while (!pending.isEmpty()) {
-          final Node graph = pending.removeFirst();
-          final Manifest manifest =
-              graph.equals(rootManifest) ? root : Manifest.read(dataset, graph);
-          copyManifest(dataset, manifest, writer, copy, graphs);
-          manifests.add(graph.getURI());
-          for (final Node imported : manifest.imports()) {
-            if (seen.add(imported)) {
-              pending.add(imported);
-            }
-          }
-        }
+        copyClosure(dataset, rootManifest, root, writer, copy, manifests, graphs);
         writer.finish();
       }
       copy.checkBytes(copy.file.count());
@@ -249,6 +234,37 @@ public final class Capture {
       dataset.end();
       if (!complete) {
         Files.deleteIfExists(partial);
+      }
+    }
+  }
+
+  /**
+   * Copies the closure of one manifest: its header and pinned graphs, then those of each manifest
+   * it imports, breadth first, every manifest and graph checked against its digest. Graphs already
+   * in {@code graphs} are not copied again.
+   */
+  static void copyClosure(
+      final DatasetGraph dataset,
+      final Node rootManifest,
+      final Manifest root,
+      final StreamRDF writer,
+      final Copy copy,
+      final List<String> manifests,
+      final Set<String> graphs)
+      throws Refused, Cancelled, IOException {
+    final Deque<Node> pending = new ArrayDeque<>();
+    final Set<Node> seen = new HashSet<>();
+    pending.add(rootManifest);
+    seen.add(rootManifest);
+    while (!pending.isEmpty()) {
+      final Node graph = pending.removeFirst();
+      final Manifest manifest = graph.equals(rootManifest) ? root : Manifest.read(dataset, graph);
+      copyManifest(dataset, manifest, writer, copy, graphs);
+      manifests.add(graph.getURI());
+      for (final Node imported : manifest.imports()) {
+        if (seen.add(imported)) {
+          pending.add(imported);
+        }
       }
     }
   }
@@ -425,7 +441,7 @@ public final class Capture {
   }
 
   /** One manifest's header, read from its graph; a manifest without one is refused. */
-  private record Manifest(
+  record Manifest(
       Node graph,
       String ontologyIri,
       Node versionIri,
@@ -539,11 +555,11 @@ public final class Capture {
   }
 
   /** The copy's running counts and its checks against the bounds. */
-  private static final class Copy {
+  static final class Copy {
     private final Bounds bounds;
     private final BooleanSupplier cancelled;
-    private CountingOutputStream file;
-    private long triples;
+    CountingOutputStream file;
+    long triples;
 
     Copy(final Bounds bounds, final BooleanSupplier cancelled) {
       this.bounds = bounds;
@@ -596,14 +612,14 @@ public final class Capture {
    * The lowest compression level: capture runs in the server's JVM, and the spool is read once and
    * deleted, so CPU matters more than its size.
    */
-  private static final class FastGzip extends GZIPOutputStream {
+  static final class FastGzip extends GZIPOutputStream {
     FastGzip(final OutputStream out) throws IOException {
       super(out, 1 << 16);
       def.setLevel(Deflater.BEST_SPEED);
     }
   }
 
-  private static final class CountingOutputStream extends FilterOutputStream {
+  static final class CountingOutputStream extends FilterOutputStream {
     private long count;
 
     CountingOutputStream(final OutputStream out) {

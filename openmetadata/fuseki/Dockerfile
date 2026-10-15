@@ -128,7 +128,8 @@ COPY --from=distribution /jena-fuseki /jena-fuseki
 COPY --from=extension /build/openmetadata-fuseki-extensions.jar \
     /jena-fuseki/extensions/openmetadata-fuseki-extensions.jar
 # Read-only in the image, never on the volume: an upgrade can never leave stale worker jars, and
-# no reasoner dependency is ever loaded by the Fuseki JVM.
+# no reasoner dependency is ever loaded by the Fuseki JVM, which loads only the worker jar's rule
+# code, in a class loader of its own (README: Governance explanations).
 COPY --from=reasoner /out/reasoner /jena-fuseki/reasoner
 COPY shiro.ini /jena-fuseki/shiro.ini
 COPY dataset.ttl.template /jena-fuseki/dataset.ttl.template

@@ -283,6 +283,93 @@ GRAPH <urn:c> {
     assertEquals(code, Jobs.firstProblem(step));
   }
 
+  @Test
+  void rulesReadSelectedGraphsAndWriteOnlyGraphsTheyDoNotRead() {
+    final String rule =
+        "{\"name\": \"copy-p\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q> ?o } WHERE { ?s <urn:p> ?o"
+            + " }\", \"output\": \"%s\"%s}";
+    final String step =
+        "{\"protocol\": 1, \"stepId\": \"r\", \"kind\": \"RULES\", \"dataset\": \"working\","
+            + " \"timeoutMillis\": 1000%s}";
+    final String read = ", \"read\": [\"urn:c\"]";
+    final String provenance = ", \"provenance\": \"urn:prov\"";
+    final String good = rule.formatted("urn:out", "");
+    final Path valid =
+        Jobs.write(job, "valid", step.formatted(read + provenance + ", \"rules\": [" + good + "]"));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(valid), () -> Jobs.manifest(valid).toString());
+    assertEquals("CONVERGED", Jobs.outcome(valid));
+    assertInvalidStep(step.formatted(provenance + ", \"rules\": [" + good + "]"));
+    assertInvalidStep(step.formatted(read + ", \"rules\": [" + good + "]"));
+    assertInvalidStep(step.formatted(read + provenance));
+    assertInvalidStep(
+        step.formatted(read + ", \"provenance\": \"urn:c\", \"rules\": [" + good + "]"));
+    assertInvalidStep(
+        step.formatted(read + provenance + ", \"rules\": [" + rule.formatted("urn:c", "") + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read + provenance + ", \"rules\": [" + rule.formatted("urn:prov", "") + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read
+                + provenance
+                + ", \"rules\": ["
+                + rule.formatted("urn:openmetadata:reasoner:delta:1", "")
+                + "]"));
+    assertInvalidStep(
+        step.formatted(read + provenance + ", \"rules\": [" + good + ", " + good + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read
+                + provenance
+                + ", \"rules\": [{\"name\": \"no-output\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q>"
+                + " ?o } WHERE { ?s <urn:p> ?o }\"}]"));
+    assertInvalidStep(
+        step.formatted(
+            read
+                + provenance
+                + ", \"rules\": ["
+                + rule.formatted("urn:out", ", \"when\": 1")
+                + "]"));
+    assertInvalidStep(
+        step.formatted(
+            read + provenance + ", \"rules\": [" + good.replace("copy-p", "Copy_P") + "]"));
+    assertInvalidStep(
+        step.formatted(read + provenance + ", \"output\": \"urn:x\", \"rules\": [" + good + "]"));
+    assertInvalidStep(Jobs.load("fresh", "input.trig").replace("}", ", \"rules\": []}"));
+  }
+
+  @Test
+  void aClosureOrARulesStepMayListItsGraphsInAFileOfTheJob() {
+    Jobs.file(job, "closure.graphs", "urn:c\n\n");
+    final String classify =
+        "{\"protocol\": 1, \"stepId\": \"%s\", \"kind\": \"CLASSIFY\", \"dataset\":"
+            + " \"working\", \"timeoutMillis\": 60000, \"output\": \"urn:out\","
+            + " \"closure\": {\"root\": \"http://example.org/c\", %s}}";
+    final Path listed =
+        Jobs.write(
+            job, "listed", classify.formatted("listed", "\"graphsFile\": \"closure.graphs\""));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(listed), () -> Jobs.manifest(listed).toString());
+    assertTrue(outputTriples(listed) > 0);
+    assertInvalidStep(classify.formatted("invalid", "\"graphsFile\": \"absent.graphs\""));
+    assertInvalidStep(classify.formatted("invalid", "\"graphsFile\": \"../closure.graphs\""));
+    assertInvalidStep(
+        classify.formatted(
+            "invalid", "\"graphsFile\": \"closure.graphs\", \"graphs\": [\"urn:c\"]"));
+
+    Jobs.file(job, "rules.read", "urn:c\n");
+    final String rules =
+        "{\"protocol\": 1, \"stepId\": \"r\", \"kind\": \"RULES\", \"dataset\": \"working\","
+            + " \"timeoutMillis\": 60000, %s \"provenance\": \"urn:prov\", \"rules\": [{\"name\":"
+            + " \"copy-p\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q> ?o } WHERE { ?s <urn:p> ?o }\","
+            + " \"output\": \"urn:rule-out\"}]}";
+    final Path read = Jobs.write(job, "r", rules.formatted("\"readFile\": \"rules.read\","));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(read), () -> Jobs.manifest(read).toString());
+    assertEquals("CONVERGED", Jobs.outcome(read));
+    assertInvalidStep(rules.formatted("\"readFile\": \"rules.read\", \"read\": [\"urn:c\"],"));
+    Jobs.file(job, "reserved.read", "urn:openmetadata:reasoner:delta:1\n");
+    assertInvalidStep(rules.formatted("\"readFile\": \"reserved.read\","));
+  }
+
   private void assertInvalidStep(final String json) {
     final Path step = Jobs.write(job, "invalid", json);
     assertEquals(ExitCodes.INVALID_STEP, Jobs.run(step), json);

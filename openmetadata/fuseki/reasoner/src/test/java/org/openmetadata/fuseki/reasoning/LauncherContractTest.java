@@ -40,6 +40,7 @@ class LauncherContractTest {
     assertEquals(ExitCodes.OUT_OF_MEMORY, WorkerExitCodes.OUT_OF_MEMORY);
     assertEquals(ExitCodes.INPUT_REJECTED, WorkerExitCodes.INPUT_REJECTED);
     assertEquals(ExitCodes.TIME_BUDGET, WorkerExitCodes.TIME_BUDGET);
+    assertEquals(ExitCodes.BUDGET, WorkerExitCodes.BUDGET);
   }
 
   /** Capabilities report the extension's copy of the limits; the worker enforces its own. */
@@ -58,7 +59,12 @@ class LauncherContractTest {
               worker.maxExpressionDepth(),
               worker.maxOutputTriples(),
               worker.maxChecks(),
-              worker.maxExplainChecks()),
+              worker.maxExplainChecks(),
+              worker.maxRules(),
+              worker.maxRulePatterns(),
+              worker.maxPasses(),
+              worker.maxNewFacts(),
+              worker.maxSpoolBytes()),
           List.of(
               extension.maxInputBytes(),
               extension.maxClosureTriples(),
@@ -67,7 +73,12 @@ class LauncherContractTest {
               extension.maxExpressionDepth(),
               extension.maxOutputTriples(),
               extension.maxChecks(),
-              extension.maxExplainChecks()),
+              extension.maxExplainChecks(),
+              extension.maxRules(),
+              extension.maxRulePatterns(),
+              extension.maxPasses(),
+              extension.maxNewFacts(),
+              extension.maxSpoolBytes()),
           "heap " + heap);
     }
   }

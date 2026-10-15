@@ -33,6 +33,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.openmetadata.fuseki.reasoning.ImageLayout;
 import org.openmetadata.fuseki.reasoning.StepOutcome;
+import org.openmetadata.reasoner.rules.RuleFixtures;
 
 /**
  * The packaged worker in its own JVM, started by the extension's launcher with its real command:
@@ -140,6 +141,63 @@ class WorkerProcessIT {
     final long peakAfterGc = worker.getNumber("heapPeakAfterGcBytes").longValue();
     assertTrue(outcome.elapsedMillis() < 120_000, outcome.elapsedMillis() + " ms");
     assertTrue(peakAfterGc < (1L << 30), peakAfterGc + " bytes after collection");
+  }
+
+  /**
+   * Governance rules through the launcher: the starter bundle converges, and a pass budget that
+   * runs out ends the step INCOMPLETE with the budget as its reason (exit status 6).
+   */
+  @Test
+  void governanceRulesRunThroughTheLauncher() throws Exception {
+    Jobs.file(job, "catalog.trig", RuleFixtures.lineageCatalog(3, 4, 3, 2));
+    assertEquals(
+        ExitCodes.COMPLETED,
+        worker("256m", Jobs.write(job, "load", Jobs.load("working", "catalog.trig"))).exitCode(),
+        log("load"));
+    final Path rules =
+        Jobs.write(
+            job, "rules", RuleFixtures.step("rules", RuleFixtures.starterBundle(), null, true));
+    final StepOutcome converged = worker("256m", rules);
+    assertEquals(StepOutcome.Status.SUCCEEDED, converged.status(), log("rules"));
+    assertEquals("CONVERGED", converged.reason());
+    assertTrue(Jobs.report(rules).startsWith("OUTCOME CONVERGED\nFACT "), log("rules"));
+    final Path budget =
+        Jobs.write(
+            job,
+            "short",
+            RuleFixtures.step("short", RuleFixtures.starterBundle(), "{\"maxPasses\": 2}", false));
+    final StepOutcome incomplete = worker("256m", budget);
+    assertEquals(ExitCodes.BUDGET, incomplete.exitCode(), log("short"));
+    assertEquals(StepOutcome.Status.INCOMPLETE, incomplete.status());
+    assertEquals("PASS_BUDGET", incomplete.reason());
+    assertEquals("maxPasses", Jobs.manifest(budget).getString("limit"));
+  }
+
+  /**
+   * The starter rules over a lineage-shaped catalog of 276,000 triples: six layers of 300 tables
+   * with 25 columns each, every column feeding three in the next layer. They derive 157,805 facts
+   * with a witness each in 8 passes; it takes about 25 s and peaks below 50 MiB after collection in
+   * a 512 MiB heap, since solutions, facts and witnesses stay on disk. The bounds leave room for
+   * slower machines.
+   */
+  @Test
+  void aLineageCatalogConvergesInASmallHeap() throws Exception {
+    Jobs.file(job, "catalog.trig", RuleFixtures.lineageCatalog(6, 300, 25, 3));
+    final Path load = Jobs.write(job, "load", Jobs.load("working", "catalog.trig"));
+    assertEquals(ExitCodes.COMPLETED, worker("512m", load).exitCode(), log("load"));
+    assertEquals(275_893, Jobs.manifest(load).getNumber("quads").longValue());
+    final Path rules =
+        Jobs.write(
+            job, "rules", RuleFixtures.step("rules", RuleFixtures.starterBundle(), null, false));
+    final StepOutcome outcome = worker("512m", rules);
+    assertEquals(StepOutcome.Status.SUCCEEDED, outcome.status(), log("rules"));
+    final JsonObject manifest = Jobs.manifest(rules);
+    assertEquals(8, manifest.getNumber("passes").longValue());
+    assertEquals(157_805, manifest.getNumber("derived").longValue());
+    final long peakAfterGc =
+        manifest.getObj("worker").getNumber("heapPeakAfterGcBytes").longValue();
+    assertTrue(outcome.elapsedMillis() < 120_000, outcome.elapsedMillis() + " ms");
+    assertTrue(peakAfterGc < (256L << 20), peakAfterGc + " bytes after collection");
   }
 
   private Path hardClassification(final long timeoutMillis) throws Exception {

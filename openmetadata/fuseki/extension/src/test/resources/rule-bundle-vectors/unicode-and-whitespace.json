@@ -1,0 +1,12 @@
+[
+  {
+    "name": "label-copy",
+    "ruleType": "CONSTRUCT",
+    "ruleBody": "PREFIX : <http://example.org/>\r\nCONSTRUCT { ?x :étiquette ?y }\tWHERE { ?x :label \"café ☕\" . ?x :p ?y }"
+  },
+  {
+    "name": "a-first",
+    "ruleType": "CONSTRUCT",
+    "ruleBody": "PREFIX : <http://example.org/> CONSTRUCT { ?x :q ?y } WHERE { ?x :p ?y }"
+  }
+]

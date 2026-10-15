@@ -17,8 +17,12 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.jar.Attributes;
 import java.util.jar.JarFile;
+import org.apache.jena.Jena;
+import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.openmetadata.fuseki.reasoning.ReasoningSettings;
@@ -26,11 +30,13 @@ import org.openmetadata.fuseki.reasoning.WorkerLimits;
 
 /**
  * What this build can do, for capabilities: which operations are AVAILABLE, the limits the store
- * enforces for them, and the engines and constructs they reason with. CHECK and EXPLAIN run; an
- * operation is AVAILABLE only with every limit the protocol requires of it (OpenMetadata's
+ * enforces for them, and the engines and constructs they reason with; and what the job service, its
+ * plans and the HTTP operations share: the snapshot store, the worker's rule code and the query
+ * quota. An operation is AVAILABLE only with every limit the protocol requires of it
+ * (OpenMetadata's
  * ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces).
  */
-public final class Operations {
+public final class Operations implements AutoCloseable {
   /**
    * Graphs in one import closure. OpenMetadata keeps each axiom, relationship type and glossary
    * term in its own graph, so a closure is many small graphs; the bound keeps the set of graph
@@ -38,13 +44,14 @@ public final class Operations {
    */
   public static final int MAX_IMPORTS = 10_000;
 
-  static final String REFRESH_MISSING =
-      "Refreshing a snapshot is not available in this build; it arrives with reasoning snapshots"
-          + " and the governance rules step.";
-  static final String RESULTS_MISSING =
-      "Snapshot results are not available in this build; they arrive with reasoning snapshots.";
-  static final String QUERY_MISSING =
-      "Snapshot queries are not available in this build; they arrive with reasoning snapshots.";
+  static final String RULE_CODE_MISSING =
+      "The worker's rule compiler is not installed, so a refresh cannot admit its rules.";
+
+  /** The engine a REFRESH's governance rules run on, as capabilities and snapshots name it. */
+  static final String GOVERNANCE_ENGINE = "governance-rules";
+
+  /** How long after its deadline a query's lease may still be held: writing its answer. */
+  static final long LEASE_MARGIN_MILLIS = 30_000;
 
   /**
    * The OWL 2 constructs, by structural-specification name, that HermiT answers with full
@@ -114,12 +121,47 @@ public final class Operations {
   private final JobSettings jobSettings;
   private final WorkerLimits workerLimits;
   private final JsonArray engines;
+  private final SnapshotStore snapshots;
+  private final Optional<RuleCode> ruleCode;
+  private final SnapshotQueries queries;
 
   public Operations(final ReasoningSettings settings, final JobSettings jobSettings) {
     this.settings = settings;
     this.jobSettings = jobSettings;
     this.workerLimits = WorkerLimits.forHeap(settings.workerHeap());
-    this.engines = engines(settings.fusekiHome().resolve("reasoner"));
+    final Path reasoner = settings.fusekiHome().resolve("reasoner");
+    this.engines = engines(reasoner);
+    this.snapshots =
+        new SnapshotStore(
+            settings.reasoningRoot(),
+            TimeUnit.SECONDS.toMillis(jobSettings.maxQuerySeconds()) + LEASE_MARGIN_MILLIS);
+    this.ruleCode = settings.enabled() ? RuleCode.load(reasoner) : Optional.empty();
+    this.queries = new SnapshotQueries(snapshots, jobSettings);
+  }
+
+  public SnapshotStore snapshots() {
+    return snapshots;
+  }
+
+  public Optional<RuleCode> ruleCode() {
+    return ruleCode;
+  }
+
+  public SnapshotQueries queries() {
+    return queries;
+  }
+
+  @Override
+  public void close() {
+    snapshots.close();
+    ruleCode.ifPresent(
+        code -> {
+          try {
+            code.close();
+          } catch (final IOException e) {
+            // Only the class loader's jar handle; nothing to recover.
+          }
+        });
   }
 
   public WorkerLimits workerLimits() {
@@ -135,8 +177,9 @@ public final class Operations {
   }
 
   /**
-   * The capabilities' operations list. CHECK and EXPLAIN are reported NOT_IMPLEMENTED when the disk
-   * quota cannot be resolved: they would then run without one of the limits they need.
+   * The capabilities' operations list. The job operations are reported NOT_IMPLEMENTED when the
+   * disk quota cannot be resolved: they would then run without one of the limits they need. A
+   * REFRESH also needs the worker's rule compiler, to admit its rules.
    */
   JsonArray operations(final boolean diskQuotaKnown) {
     final String noQuota =
@@ -144,11 +187,13 @@ public final class Operations {
             ? null
             : "The reasoning disk quota cannot be resolved, so it is not enforced.";
     final JsonArray operations = new JsonArray();
-    operations.add(support("REFRESH", REFRESH_MISSING));
+    operations.add(
+        support(
+            "REFRESH", noQuota != null ? noQuota : ruleCode.isEmpty() ? RULE_CODE_MISSING : null));
     operations.add(support("CHECK", noQuota));
     operations.add(support("EXPLAIN", noQuota));
-    operations.add(support("RESULTS", RESULTS_MISSING));
-    operations.add(support("QUERY", QUERY_MISSING));
+    operations.add(support("RESULTS", null));
+    operations.add(support("QUERY", null));
     return operations;
   }
 
@@ -165,14 +210,28 @@ public final class Operations {
     limits.put("maxExpressionDepth", workerLimits.maxExpressionDepth());
     limits.put("maxImports", MAX_IMPORTS);
     limits.put("maxJobSeconds", jobSettings.maxJobSeconds());
+    limits.put("maxQuerySeconds", jobSettings.maxQuerySeconds());
+    limits.put("maxDerivedTriples", workerLimits.maxNewFacts());
+    limits.put("maxRulePasses", workerLimits.maxPasses());
     if (diskQuota > 0) {
       limits.put("maxDiskBytes", diskQuota);
     }
+    limits.put("maxResultRows", jobSettings.maxResultRows());
     return limits;
   }
 
+  /** The installed engines, and the governance rules when a refresh can run them. */
   JsonArray engines() {
-    return engines;
+    final JsonArray all = JSON.copy(engines).getAsArray();
+    if (ruleCode.isPresent()) {
+      all.add(governanceEngine());
+    }
+    return all;
+  }
+
+  /** The governance rules engine: Jena's ARQ, the build the server and its workers run. */
+  static JsonObject governanceEngine() {
+    return engine(GOVERNANCE_ENGINE, "jena-" + Jena.VERSION);
   }
 
   static JsonArray coverage() {
@@ -186,7 +245,13 @@ public final class Operations {
     final JsonObject engine = new JsonObject();
     engine.put("name", name);
     engine.put("version", version);
-    engine.put("profile", name.equals("ELK") ? "OWL 2 EL" : "OWL 2 DL");
+    engine.put(
+        "profile",
+        switch (name) {
+          case "ELK" -> "OWL 2 EL";
+          case GOVERNANCE_ENGINE -> "SPARQL CONSTRUCT rules";
+          default -> "OWL 2 DL";
+        });
     return engine;
   }
 

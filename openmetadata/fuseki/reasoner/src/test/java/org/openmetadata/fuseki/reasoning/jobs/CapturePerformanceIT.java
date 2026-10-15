@@ -90,13 +90,13 @@ class CapturePerformanceIT {
     final ImageLayout image = ImageLayout.create(root.resolve("image"), FUSEKI_SERVER, REASONER);
     final ReasoningSettings settings = image.settings("2g");
     final JobSettings jobs = JobSettings.fromEnvironment(Map.of());
+    final Operations operations = new Operations(settings, jobs);
     final JobService service =
         new JobService(
-            settings,
-            jobs,
+            operations,
             image.launcher(settings),
             image.launcher(settings)::readiness,
-            Plans.current(new Operations(settings, jobs), name -> serving),
+            Plans.current(operations, name -> serving),
             System::currentTimeMillis);
     try {
       service.open();

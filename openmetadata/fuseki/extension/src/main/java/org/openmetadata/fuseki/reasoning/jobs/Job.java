@@ -44,6 +44,7 @@ public final class Job {
   private final String requestDigest;
   private final JsonObject input;
   private final long submittedAt;
+  private final long sequence;
   private State state;
   private volatile boolean cancelRequested;
   private String outcome;
@@ -62,7 +63,8 @@ public final class Job {
       final String dataset,
       final String requestDigest,
       final JsonObject input,
-      final long submittedAt) {
+      final long submittedAt,
+      final long sequence) {
     this.id = id;
     this.requestId = requestId;
     this.operation = operation;
@@ -70,10 +72,15 @@ public final class Job {
     this.requestDigest = requestDigest;
     this.input = input;
     this.submittedAt = submittedAt;
+    this.sequence = sequence;
     this.state = State.QUEUED;
   }
 
-  static Job submitted(final JobRequest request, final long now) {
+  /**
+   * @param sequence the job's place in submission order, which a refresh's publication compares so
+   *     a job submitted earlier never replaces the snapshot of one submitted later
+   */
+  static Job submitted(final JobRequest request, final long now, final long sequence) {
     return new Job(
         UUID.randomUUID(),
         request.requestId(),
@@ -81,7 +88,8 @@ public final class Job {
         request.dataset(),
         request.digest(),
         request.input(),
-        now);
+        now,
+        sequence);
   }
 
   public UUID id() {
@@ -102,6 +110,19 @@ public final class Job {
 
   String requestDigest() {
     return requestDigest;
+  }
+
+  long sequence() {
+    return sequence;
+  }
+
+  /** The job's input as recorded, the engines included. */
+  JsonObject input() {
+    return JSON.copy(input).getAsObject();
+  }
+
+  void published(final UUID snapshot) {
+    snapshotId = snapshot;
   }
 
   public State state() {
@@ -187,6 +208,7 @@ public final class Job {
     manifest.put("job", toJson());
     manifest.put("dataset", dataset);
     manifest.put("requestDigest", requestDigest);
+    manifest.put("sequence", sequence);
     return manifest;
   }
 
@@ -200,7 +222,11 @@ public final class Job {
             manifest.getString("dataset"),
             manifest.getString("requestDigest"),
             json.getObj("input"),
-            json.getNumber("submittedAt").longValue());
+            json.getNumber("submittedAt").longValue(),
+            // Manifests written before jobs had a sequence order by submission time instead.
+            manifest.hasKey("sequence")
+                ? manifest.getNumber("sequence").longValue()
+                : json.getNumber("submittedAt").longValue());
     job.state = State.valueOf(json.getString("state"));
     job.cancelRequested = json.getBoolean("cancelRequested");
     job.outcome = json.hasKey("outcome") ? json.getString("outcome") : null;

@@ -267,14 +267,14 @@ class JobServiceTest {
   }
 
   @Test
-  void aRefreshFailsAtCaptureUntilSnapshotsExist() throws Exception {
+  void aRefreshFailsAtCaptureWithoutTheWorkersRuleCompiler() throws Exception {
     final JobService service = service(plans(name -> null), Map.of());
     final JsonObject failed =
         await(service, id(service.submit(request("refresh-request"))), state("FAILED"));
     final JsonObject problem = failed.getObj("problem");
     assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
     assertEquals("capture", problem.getString("step"));
-    assertEquals(Operations.REFRESH_MISSING, problem.getString("message"));
+    assertEquals(Operations.RULE_CODE_MISSING, problem.getString("message"));
     assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
     assertConforms(failed);
   }
@@ -460,16 +460,24 @@ class JobServiceTest {
             "REFRESH", "NOT_IMPLEMENTED",
             "CHECK", "AVAILABLE",
             "EXPLAIN", "AVAILABLE",
-            "RESULTS", "NOT_IMPLEMENTED",
-            "QUERY", "NOT_IMPLEMENTED"),
+            "RESULTS", "AVAILABLE",
+            "QUERY", "AVAILABLE"),
         availability);
   }
 
   @Test
   void capabilitiesCannotClaimAnOperationWithoutTheLimitsItNeeds() throws Exception {
     final JobService service = service(worker(SUCCEED), Map.of());
-    for (final String operation : List.of("REFRESH", "RESULTS", "QUERY")) {
+    for (final String[] claim :
+        List.of(
+            new String[] {"REFRESH", "maxRulePasses"},
+            new String[] {"REFRESH", "maxDerivedTriples"},
+            new String[] {"RESULTS", "maxResultRows"},
+            new String[] {"QUERY", "maxResultRows"},
+            new String[] {"QUERY", "maxQuerySeconds"})) {
+      final String operation = claim[0];
       final JsonObject claimed = service.capabilities();
+      claimed.getObj("limits").remove(claim[1]);
       claimed
           .get("operations")
           .getAsArray()
@@ -482,7 +490,7 @@ class JobServiceTest {
       assertTrue(
           Contract.violations(Contract.CAPABILITIES, claimed).stream()
               .anyMatch(violation -> violation.startsWith("$.limits.")),
-          operation + " was accepted as AVAILABLE without its limits");
+          operation + " was accepted as AVAILABLE without " + claim[1]);
     }
     final JsonObject withoutJobSeconds = service.capabilities();
     withoutJobSeconds.getObj("limits").remove("maxJobSeconds");
@@ -539,8 +547,7 @@ class JobServiceTest {
     final ReasoningSettings current = settings;
     final JobService service =
         new JobService(
-            current,
-            JobSettings.fromEnvironment(jobEnv),
+            new Operations(current, JobSettings.fromEnvironment(jobEnv)),
             workers.launcher(current),
             () -> workers.readiness(current),
             planner,

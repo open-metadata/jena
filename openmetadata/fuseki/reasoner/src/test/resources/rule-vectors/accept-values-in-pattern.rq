@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/>
+CONSTRUCT { ?x :q ?k } WHERE { VALUES ?k { :a :b } ?x :p ?k }

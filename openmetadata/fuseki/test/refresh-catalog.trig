@@ -1,0 +1,55 @@
+#  Copyright 2026 Collate
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# What OpenMetadata adds for a REFRESH next to check-closure.trig: the activation of that
+# closure, the member records of its ontology graphs, a catalog with column lineage from a PII
+# column, a phase 0 inferred graph a refresh must not read, and the published rule bundle with
+# OpenMetadata's PII propagation rule, whose om-rules-v1 digest is
+# rule-bundle-digest sha256:ef76f8c1ebb56960f62738de23455cfa58ba762effe1475d86e2897ba6aadaf9
+# The smoke test refreshes over it through the image; RuleBundleTest checks the digest.
+PREFIX om: <https://open-metadata.org/ontology/>
+PREFIX omr: <https://open-metadata.org/reasoning/>
+PREFIX c: <https://open-metadata.org/catalog/>
+
+<https://open-metadata.org/graph/ontology/activations> {
+    <https://open-metadata.org/glossary/finance> omr:activeManifest <https://open-metadata.org/graph/manifest/f84eca3a8f684983ed64508cb957ac95a2ccea8a471d70e29f405919b24a2bfb> ;
+        omr:activeVersion <https://open-metadata.org/ontology/finance/version/f84eca3a8f684983ed64508cb957ac95a2ccea8a471d70e29f405919b24a2bfb> ;
+        omr:ontology <https://open-metadata.org/ontology/finance> ;
+        omr:closureDigest "sha256:f84eca3a8f684983ed64508cb957ac95a2ccea8a471d70e29f405919b24a2bfb" .
+}
+
+<https://open-metadata.org/graph/ontology/members> {
+    <https://open-metadata.org/graph/glossaryTerm/asset> a omr:OntologyGraph .
+    <https://open-metadata.org/graph/glossaryTerm/liability> a omr:OntologyGraph .
+    <https://open-metadata.org/graph/glossaryTerm/hybrid> a omr:OntologyGraph .
+    <https://open-metadata.org/graph/axiom/disjoint> a omr:OntologyGraph .
+    <https://open-metadata.org/graph/asset/loan> a omr:OntologyGraph .
+    <https://open-metadata.org/graph/draft/loan> a omr:OntologyGraph .
+}
+
+<https://open-metadata.org/graph/knowledge> {
+    c:pii om:tagFQN "PII.Sensitive" .
+    c:c1 om:hasTag c:pii .
+    c:l1 om:fromColumn c:c1 ; om:toColumn c:c2 .
+    c:l2 om:fromColumn c:c2 ; om:toColumn c:c3 .
+}
+
+<https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
+    c:c9 om:hasTag c:pii .
+}
+
+<https://open-metadata.org/graph/rules/bundle/ef76f8c1ebb56960f62738de23455cfa58ba762effe1475d86e2897ba6aadaf9> {
+    <https://open-metadata.org/graph/rules/bundle/ef76f8c1ebb56960f62738de23455cfa58ba762effe1475d86e2897ba6aadaf9> a omr:RuleBundle ;
+        omr:bundleDigest "sha256:ef76f8c1ebb56960f62738de23455cfa58ba762effe1475d86e2897ba6aadaf9" ;
+        omr:digestAlgorithm "om-rules-v1" ;
+        omr:ruleCount 1 ;
+        omr:rule <https://open-metadata.org/graph/rules/bundle/ef76f8c1ebb56960f62738de23455cfa58ba762effe1475d86e2897ba6aadaf9/rule/pii-propagation-via-lineage> .
+    <https://open-metadata.org/graph/rules/bundle/ef76f8c1ebb56960f62738de23455cfa58ba762effe1475d86e2897ba6aadaf9/rule/pii-propagation-via-lineage> a omr:Rule ;
+        omr:ruleName "pii-propagation-via-lineage" ;
+        omr:ruleType "CONSTRUCT" ;
+        omr:ruleBody "PREFIX om: <https://open-metadata.org/ontology/>\nCONSTRUCT {\n  ?downstream om:hasTag ?piiTag .\n  ?downstream om:inferredTagSource ?upstream\n}\nWHERE {\n  ?upstream om:hasTag ?piiTag .\n  ?piiTag om:tagFQN ?fqn .\n  FILTER(STRSTARTS(?fqn, \"PII.\"))\n  ?colLineage om:fromColumn ?upstream ;\n              om:toColumn ?downstream .\n}" ;
+        omr:bodyDigest "sha256:a1ebdd7e4755b632b5c99801df57d9512f49d684c377860d598a5f1622982943" .
+}
