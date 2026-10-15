@@ -45,6 +45,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_JOB_HISTORY` | `1000` | Finished jobs kept, with their request IDs and directories. At most 4 digits. |
 | `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` | `168` | How long a finished job is kept. |
 | `OPENMETADATA_REASONING_DISK_QUOTA` | `25%` | Disk all of `/fuseki/reasoning` may use before jobs are refused: a size, or a percentage of the volume's capacity. |
+| `OPENMETADATA_REASONING_MAX_JOB_SECONDS` | `3600` | How long one job may run, capture included; each worker step gets what is left as its deadline. At most 6 digits. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
 must be positive integers; sizes use the JVM's notation (`512m`, `2g`) with at most 13 digits;
@@ -113,10 +114,10 @@ Fuseki, its heap and its serving datasets are untouched. The worker opens only i
 TDB2 dataset under `/fuseki/reasoning`, has no network listener and never fetches anything.
 
 This release adds the worker, its launcher, the memory-budget check and the HTTP job operations
-OpenMetadata will call ([Job operations](#job-operations)). Jobs are admitted, queued, run,
-cancelled and recovered for real, but capturing their input from a serving dataset arrives with
-reasoning snapshots in a later release, so every job ends `FAILED` at its `capture` step for now.
-Until then reasoning over your own data runs only through `bin/reasoner` (below).
+OpenMetadata calls ([Job operations](#job-operations)). `CHECK` and `EXPLAIN` run end to end: the
+extension captures the closure OpenMetadata pinned from the serving dataset
+([Capture](#capture)), and a worker loads it and classifies or explains it. `REFRESH`, snapshot
+results and snapshot queries arrive with reasoning snapshots in a later release.
 
 ### Engines
 
@@ -159,8 +160,15 @@ worker on it. Every path a step names must stay inside its job directory.
 |---|---|
 | `LOAD` | Bulk-loads exported N-Quads or TriG (optionally gzip-compressed) into a fresh private TDB2 dataset |
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
-| `EXPLAIN` | Computes one justification for an entailment or an inconsistency |
+| `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
 | `COMPACT` | Compacts the dataset before it is published |
+
+A closure is either the listed `closure.graphs` or, with `"allGraphs": true`, every named graph of
+the working dataset, as when it holds exactly one captured closure. An `owl:imports` target must be
+the IRI or version IRI of an ontology header in the closure, or the name of one of its graphs.
+`CLASSIFY`'s manifest names the first 100 unsatisfiable classes in IRI order (`unsatisfiable`);
+the count in `entailments` is always complete. A check that cannot be asked of the closure is
+answered `INVALID` with its `reason`.
 
 A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping cannot consume, or
 over an admission limit is rejected with its problems, never classified with something dropped.
@@ -204,8 +212,12 @@ one of:
 | `NOT_READY` | The memory budget does not fit; no worker was started |
 | `BUSY` | Another worker is running; at most one runs per container. No status file is written, since the running step may be the same file |
 
-A worker enforces its own deadline by interrupting the engine. If it has not exited 15 seconds
-after its deadline it gets `SIGTERM`, and `SIGKILL` 10 seconds later. Cancelling a step sends
+A worker enforces its own deadline by interrupting the engine, and repeats the interrupt every
+50 ms until the step unwinds: HermiT clears its interrupt flag whenever a reasoning task starts, so
+an interrupt sent once between two tasks, such as the consistency checks of an explanation, was
+lost and the next task ran to its end. A step that has not unwound 5 seconds after its deadline
+ends the worker JVM. If the worker has not exited 15 seconds after its deadline it gets `SIGTERM`,
+and `SIGKILL` 10 seconds later. Cancelling a step sends
 `SIGTERM` at once and `SIGKILL` 10 seconds later; a cancellation applies only to the step running
 when it is made. If the thread waiting for a worker is interrupted, the worker is killed and the
 launcher waits for it to exit before releasing the worker lock.
@@ -231,7 +243,7 @@ the tests check against. The operations are served whenever the extension is ena
 | `POST /reasoning/jobs?dataset=<name>` | `202` with the new job and a `Location`; `200` with the existing job when its `requestId` is known; `400` for a request the schema refuses; `404` for a dataset that is not served; `409` for a known `requestId` sent with a different request or dataset; `413` over 4 MiB; `415` unless `application/json`; `429` when the queue is full; `503` when reasoning is disabled or not ready, or the disk quota is reached |
 | `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
 | `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
-| `GET /reasoning/results/<id>`, `POST /reasoning/query` | `501` with the problem `NOT_IMPLEMENTED` until snapshots arrive |
+| `GET /reasoning/results/<id>`, `POST /reasoning/query` | `501` with the problem `NOT_IMPLEMENTED` until snapshots arrive; a finished check's detail is in its job directory's `result.json` meanwhile |
 
 Every refusal answers with the protocol's problem object, `{"code": ..., "message": ...}`, with
 `subject` naming the limit for `LIMIT_EXCEEDED`. A request is validated against the schema and the
@@ -266,16 +278,96 @@ run by hand, and refuses work at or over `OPENMETADATA_REASONING_DISK_QUOTA`. Fi
 `OPENMETADATA_REASONING_JOB_HISTORY` or older than `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` are
 removed, oldest first. Directories without a `job.json` are never removed.
 
-**What a job does in this release.** Every operation's plan starts with `capture`, which is not
-implemented yet: the job ends `FAILED` with the problem `NOT_IMPLEMENTED` and step `capture`.
-`NOT_IMPLEMENTED` is permanent for this build, so a client stops retrying; `NOT_READY` stays the
-transient answer (reasoning disabled, memory budget, disk unmeasurable, server stopping, another
-worker running). Capabilities report every operation `NOT_IMPLEMENTED` with the reason, list no
-engines and no coverage, since no operation reaches one, and list only the limits the store
-enforces. Readiness still reports the memory budget: the protocol makes limits mandatory per
-operation, so an operation becomes `AVAILABLE` only once it runs and the store enforces every limit
-it needs (OpenMetadata's
-`ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces`).
+**What a job does in this release.** A `CHECK` runs `capture`, `load` and `classify`; an
+`EXPLAIN` runs `capture`, `load` and `explain`. The job's `outcome` is the protocol's answer:
+
+| Result | Job |
+|---|---|
+| Consistent closure, `CONSISTENCY` | `SUCCEEDED`, `NOT_ENTAILED` |
+| `SATISFIABILITY`, `SUBSUMPTION`, `ENTAILMENT`, or `EXPLAIN` | `SUCCEEDED`, `ENTAILED` or `NOT_ENTAILED` (`SATISFIABILITY` asks whether the class is a subclass of `owl:Nothing`) |
+| Inconsistent closure | `SUCCEEDED`, `INCONSISTENT` |
+| A limit, the job's time, or the worker's heap ran out | `SUCCEEDED`, `INCOMPLETE`, with the problem `LIMIT_EXCEEDED` naming the limit (`maxImports`, `maxClosureAxioms`, `maxIndividuals`, `maxExpressionDepth`, `maxDiskBytes`, `maxJobSeconds`) or `MEMORY_BUDGET_EXHAUSTED` |
+| Closure outside OWL 2 DL | `FAILED`, `PROFILE_VIOLATION` |
+| No manifest for the request, or a manifest or import that is not one | `FAILED`, `MISSING_IMPORT`, `subject` the ontology or manifest |
+| A pinned graph or manifest whose content changed | `FAILED`, `GENERATION_MISMATCH`, `subject` the graph or version IRI |
+| A question naming an entity outside the closure | `FAILED`, `INVALID_REQUEST` |
+| Cancelled | `CANCELLED` |
+
+The job's `input.engines` names the engine build that answered. `result.json` in the job directory
+holds the detail: the unsatisfiable classes (at most 100, with the full count) and the check's
+axiom for a `CHECK`, the justifications for an `EXPLAIN`, and the closure's admission counts.
+`capture.json` lists the captured graphs. A question the schema admits but OWL cannot state, such as
+an intersection without operands, is refused with `400` when the job is submitted.
+
+Capabilities report `CHECK` and `EXPLAIN` `AVAILABLE` with the limits the protocol requires of them
+(`maxQueuedJobs`, `maxJobSeconds`, `maxDiskBytes`, `maxClosureAxioms`, `maxIndividuals`,
+`maxExpressionDepth`, `maxImports`), the engine builds read from the worker jar's manifest, and the
+OWL 2 DL constructs as coverage; `REFRESH`, `RESULTS` and `QUERY` stay `NOT_IMPLEMENTED`, so a
+`REFRESH` still fails at `capture` with `NOT_IMPLEMENTED`, which is permanent for this build.
+`NOT_READY` stays the transient answer (reasoning disabled, memory budget, disk unmeasurable, server
+stopping, another worker running). An operation is `AVAILABLE` only while the store enforces every
+limit it needs (OpenMetadata's
+`ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces`); when
+the disk quota cannot be resolved, `CHECK` and `EXPLAIN` are reported `NOT_IMPLEMENTED` and
+readiness `NOT_READY`. The admission limits are the worker's for `OPENMETADATA_REASONER_HEAP` and
+are written into every step file, so the worker enforces exactly what capabilities report.
+
+### Capture
+
+OpenMetadata keeps each ontology axiom, term and relationship type in a named graph of its own,
+and pins a closure in a content-addressed version manifest, the graph
+`{base}graph/manifest/<hex>` (OpenMetadata's
+`ADR:2026-10-15-reasoning-closures-are-approved-graphs-pinned-by-a-content-manifest` and
+`docs/rdf-ontology-contract.md`). A request names its closure with `ontologyIri`,
+`ontologySelection` and `ontologyDigest`, the closure digest. The capture finds the manifest by the
+version IRI those give (`<ontologyIri>/version/<hex>`, or `/candidate/<hex>` for a candidate) and
+checks the graph's name; an `APPROVED` request without a digest uses the manifest
+`{base}graph/ontology/activations` names for the ontology. The store never needs OpenMetadata's
+base IRI.
+
+Inside one read transaction of the serving dataset, the capture then, for the manifest and each
+manifest it imports (`omr:importsManifest`):
+
+1. recomputes the closure digest (`om-closure-v1`) from the manifest's header and its
+   `omr:pinnedDigest` members and compares it with the manifest's `omr:closureDigest`, and the
+   root's with the request's `ontologyDigest`;
+2. copies the manifest's `owl:Ontology` header (type, version IRI, imports), never its `omr:`
+   control triples;
+3. reads each pinned graph not copied yet, recomputes its digest and compares it with the pinned
+   one, then copies it.
+
+It writes N-Quads, gzip level 1, to `capture.nq.gz` in the job directory, renamed into place only
+when complete. Graphs that are not pinned, such as Draft graphs outside a candidate closure, are
+never read. A read transaction never blocks Fuseki's writer: a write commits during a capture, which
+keeps seeing the version it started with (`CaptureTest`). The server holds one pinned graph at a
+time, one manifest's member list and the set of captured graph names, never the closure. Every
+4,096 quads the capture checks the triple bound (the worker's `maxClosureTriples`, which protects
+`maxClosureAxioms` before parsing), the compressed size against what the disk quota leaves, the
+job's deadline and cancellation; at most `maxImports` (10,000) graphs. The working dataset the load
+builds is checked against the quota again before anything reasons over it.
+
+**Graph digest.** `sha256:` and the SHA-256 of the graph's N-Triples, one triple per line, lines
+sorted in Java string order, each ending in `\n`, with every blank node replaced by
+`urn:openmetadata:annex:<hex>`: a blank node's hash starts from the sorted signatures of the triples
+it occurs in (neighbouring blank nodes written `_:blank`, itself `_:self`, other terms in
+N-Triples), is refined from its neighbours' hashes until it stops changing, at most 16 rounds, and
+the nodes, ordered by hash, get `sha256(hash + ":" + index)`. It is OpenMetadata's
+`OntologyGraphDigest` over `RdfBlankNodeCanonicalizer`; the store indexes each blank node's triples
+once, so a graph costs linear time per round rather than quadratic.
+`extension/src/test/resources/digest-vectors/` holds files with the digests OpenMetadata's classes
+compute for them; the store must give the same, also after a round trip through TDB2. Blank nodes
+whose hashes never separate are ordered by label, which differs between OpenMetadata and the store;
+in the trees the OWL 2 RDF mapping writes such nodes are interchangeable, and otherwise the capture
+reports the graph as changed, never the reverse. Literals are compared by their lexical form as
+stored.
+
+**Measured** on an Apple M-series laptop, Java 21, worker heap 2 GiB (`CapturePerformanceIT`, run
+with `-Dreasoning.performance=true`): a catalog closure of 1,801 table graphs and a schema graph,
+225,116 triples, 37,900 individuals and 187,304 logical axioms, captured with every digest checked
+in 2.2 s to a 1.7 MB spool; loaded in 3.4 s into a 254 MB working dataset (TDB2 allocates its files
+in segments); classified with HermiT in 20.3 s, peaking at 0.27 GiB after collection; 27.8 s for the
+whole job. A closure five times larger, 1,125,116 triples in 9,002 graphs, captured in 11.3 s in a
+JVM of its own with a 256 MiB heap, TDB2's default caches included.
 
 **Access.** The image's `shiro.ini` requires the admin account for every path except `/$/ping`, so
 the operations are admin-only. To give a service account reasoning and nothing else, run with
@@ -452,7 +544,11 @@ runs the same suite through the built image.
 `mvn verify` in `extension/` runs the job operations against stand-in worker processes: queueing,
 cancellation, restart recovery and retention on real job directories, and the HTTP operations on a
 real Fuseki server with Shiro. It checks every request example, job and capabilities document
-against OpenMetadata's schemas. The smoke test submits, reads and cancels a job in the image, and
+against OpenMetadata's schemas, and captures closures from real TDB2 datasets laid out as
+OpenMetadata writes them. In `reasoner/`, `OntologyJobsIT` runs `CHECK` and `EXPLAIN` jobs end to
+end with the packaged worker: consistent, unsatisfiable, a candidate closure made inconsistent by a
+Draft graph, and a changed graph refused. The smoke test loads `test/check-closure.trig` and runs a
+`CHECK` and an `EXPLAIN` over it in the image, submits, reads and cancels a job, and
 restarts the container to check that the job and its request ID survive.
 
 ## Publishing

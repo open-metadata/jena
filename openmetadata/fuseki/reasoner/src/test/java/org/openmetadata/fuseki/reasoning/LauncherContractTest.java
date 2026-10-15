@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.openmetadata.reasoner.ExitCodes;
 import org.openmetadata.reasoner.InvalidStepException;
+import org.openmetadata.reasoner.Limits;
 import org.openmetadata.reasoner.StepFile;
 
 /**
@@ -39,6 +40,36 @@ class LauncherContractTest {
     assertEquals(ExitCodes.OUT_OF_MEMORY, WorkerExitCodes.OUT_OF_MEMORY);
     assertEquals(ExitCodes.INPUT_REJECTED, WorkerExitCodes.INPUT_REJECTED);
     assertEquals(ExitCodes.TIME_BUDGET, WorkerExitCodes.TIME_BUDGET);
+  }
+
+  /** Capabilities report the extension's copy of the limits; the worker enforces its own. */
+  @Test
+  void theExtensionComputesTheWorkersLimitsForEveryHeap() {
+    for (final long heap :
+        List.of(16L << 20, 512L << 20, 1L << 30, 2L << 30, 3L << 30, 7L << 30, 64L << 30)) {
+      final Limits worker = Limits.forHeap(heap);
+      final WorkerLimits extension = WorkerLimits.forHeap(heap);
+      assertEquals(
+          List.of(
+              worker.maxInputBytes(),
+              worker.maxClosureTriples(),
+              worker.maxLogicalAxioms(),
+              worker.maxIndividuals(),
+              worker.maxExpressionDepth(),
+              worker.maxOutputTriples(),
+              worker.maxChecks(),
+              worker.maxExplainChecks()),
+          List.of(
+              extension.maxInputBytes(),
+              extension.maxClosureTriples(),
+              extension.maxLogicalAxioms(),
+              extension.maxIndividuals(),
+              extension.maxExpressionDepth(),
+              extension.maxOutputTriples(),
+              extension.maxChecks(),
+              extension.maxExplainChecks()),
+          "heap " + heap);
+    }
   }
 
   @Test
