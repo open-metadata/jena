@@ -11,7 +11,8 @@
 
 # Apache Jena Fuseki packaged by OpenMetadata. This is not an Apache Software Foundation release.
 #
-# Built from the released Apache Jena Fuseki distribution, verified against its published SHA-512.
+# Built from the released Apache Jena Fuseki distribution, verified against its published SHA-512,
+# with newer Apache Shiro and Micrometer releases swapped into fuseki-server.jar (the server stage).
 # The layout and environment contract match daschswiss/apache-jena-fuseki (stain/jena-docker
 # lineage), so this image replaces it after a one-time ownership fix of the volume, because it
 # runs as non-root: FUSEKI_BASE=/fuseki holds configuration/*.ttl, databases/ and shiro.ini.
@@ -29,7 +30,7 @@ ARG HERMIT_REPOSITORY=https://github.com/open-metadata/hermit-reasoner.git
 ARG HERMIT_COMMIT=bb78447a0563958eb52409e10a592022c14ff934
 ARG HERMIT_VERSION=1.4.6.519-om.1
 
-FROM eclipse-temurin:21-jre-jammy AS distribution
+FROM eclipse-temurin:21-jre-noble AS distribution
 ARG FUSEKI_VERSION
 ARG FUSEKI_SHA512
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -49,9 +50,23 @@ RUN set -eux; \
 RUN /jena-fuseki/fuseki-server --version 2>&1 | grep -qx "Apache Jena version ${FUSEKI_VERSION}"
 
 # Jars are architecture-independent, so builder stages run natively on the build host.
-FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-jammy AS extension
+# Fuseki 6.2.0 bundles Apache Shiro 2.2.1 and Micrometer 1.17.0 inside fuseki-server.jar, which
+# scanners report as CVE-2026-56091 and CVE-2026-59296. This stage swaps in the releases pinned in
+# server-jar/replacements.sha256 and leaves every other class of Apache's jar as released. Remove
+# it once a Fuseki release ships fixed versions of both.
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-noble AS server
+ARG FUSEKI_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates zip unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=distribution /jena-fuseki /jena-fuseki
+COPY server-jar /build/server-jar
+RUN /build/server-jar/replace-libraries.sh /jena-fuseki/fuseki-server.jar \
+        /build/server-jar/replacements.sha256 \
+    && /jena-fuseki/fuseki-server --version 2>&1 | grep -qx "Apache Jena version ${FUSEKI_VERSION}"
+
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-noble AS extension
 WORKDIR /build
-COPY --from=distribution /jena-fuseki/fuseki-server.jar /build/fuseki-server.jar
+COPY --from=server /jena-fuseki/fuseki-server.jar /build/fuseki-server.jar
 COPY extension/src/main/java /build/src
 COPY extension/src/main/resources /build/resources
 # Compiled against the exact server jar it will run with, so an incompatible Fuseki fails the build.
@@ -62,8 +77,9 @@ RUN mkdir classes \
 
 # The reasoner worker and its dependencies, run as a separate JVM with the classpath
 # /jena-fuseki/fuseki-server.jar:/jena-fuseki/reasoner/*. Jena is provided by fuseki-server.jar;
-# the build fails if the jar Maven compiled against is not byte for byte the one the image ships,
-# or if any third-party jar differs from dependencies.sha256.
+# the build fails if the jar Maven compiled against is not byte for byte Apache's released jar,
+# whose Jena classes the image ships unchanged, or if any third-party jar differs from
+# dependencies.sha256.
 # Pinned by digest, so a rebuild of the same commit uses the same Maven and JDK.
 FROM --platform=$BUILDPLATFORM maven:3.9.16-eclipse-temurin-21@sha256:99e61abcff91a9b1333463bd8451fb18495d6eba9250ac66a338b518f8278320 AS reasoner
 ARG FUSEKI_VERSION
@@ -102,11 +118,13 @@ RUN set -eux; \
     cp -r NOTICE THIRD-PARTY.md licenses /out/reasoner/; \
     cp bin/reasoner /out/reasoner/bin/reasoner
 
-FROM eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:21-jre-noble
 ARG FUSEKI_VERSION
 
 # gettext-base provides envsubst, used by the entrypoint to render shiro.ini and dataset configs.
+# The upgrade ships Ubuntu's current security fixes even when the base image is older than them.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends tini curl ca-certificates gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
@@ -124,7 +142,7 @@ ENV FUSEKI_VERSION=${FUSEKI_VERSION} \
     FUSEKI_HOME=/jena-fuseki \
     FUSEKI_BASE=/fuseki
 
-COPY --from=distribution /jena-fuseki /jena-fuseki
+COPY --from=server /jena-fuseki /jena-fuseki
 COPY --from=extension /build/openmetadata-fuseki-extensions.jar \
     /jena-fuseki/extensions/openmetadata-fuseki-extensions.jar
 # Read-only in the image, never on the volume: an upgrade can never leave stale worker jars, and
@@ -139,8 +157,10 @@ RUN chmod 755 /docker-entrypoint.sh /healthcheck.sh
 # copies the ownership below; group 0 with group write keeps it usable under OpenShift, which
 # runs containers as an arbitrary uid in group 0. Volumes written by a root-running image need
 # the one-time ownership fix in README.md.
+# Ubuntu 24.04 images ship an "ubuntu" account with uid and gid 1000, so it is removed first.
 ARG FUSEKI_UID=1000
-RUN groupadd --gid "${FUSEKI_UID}" fuseki \
+RUN if id ubuntu > /dev/null 2>&1; then userdel --remove ubuntu; fi \
+    && groupadd --gid "${FUSEKI_UID}" fuseki \
     && useradd --uid "${FUSEKI_UID}" --gid fuseki --home-dir /fuseki --no-create-home \
         --shell /usr/sbin/nologin fuseki \
     && mkdir -p /fuseki \
