@@ -424,6 +424,13 @@ The image build downloads the release from Apache's CDN, falling back to the arc
 published SHA-512. The extension is compiled against the exact `fuseki-server.jar` it runs with, so an
 incompatible Fuseki fails the build. The smoke test needs `docker`, `curl`, `awk` and `jq`.
 
+Fuseki 6.2.0 bundles Apache Shiro 2.2.1 and Micrometer 1.17.0 inside `fuseki-server.jar`, and both
+carry published CVEs. The `server` stage of the Dockerfile replaces them with the releases listed in
+`server-jar/replacements.sha256`, downloaded from Maven Central and checked by SHA-256; the rest of
+Apache's jar is unchanged. Fuseki's own classes call the same Shiro and Micrometer methods when
+compiled against the new releases, and Fuseki's test suite gives the same results on them. Drop the
+stage when a Fuseki release ships fixed versions of both.
+
 The reasoner depends on OpenMetadata's HermiT build, which has no release yet. Install it once from
 the commit the Dockerfile pins, as the image build and the workflow do:
 
@@ -457,4 +464,6 @@ is cut from the matching upstream tag (`jena-6.2.0` for `release/6.2.0`), and it
 `FUSEKI_VERSION` in the Dockerfile.
 
 Each publish pushes two tags for `linux/amd64` and `linux/arm64`: `<version>`, which moves to the latest
-build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in tests.
+build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in deployments
+and tests: with `imagePullPolicy: IfNotPresent`, a node that already has `<version>` never pulls a
+rebuild of it.
