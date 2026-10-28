@@ -36,7 +36,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_EXTENSION_ENABLED` | `false` | `true` loads the OpenMetadata Graph Store extension. |
 | `OPENMETADATA_WRITE_TIMEOUT_MS` | `50000` | Extension only: deadline for a Graph Store upload, after which it is rolled back. |
 | `OPENMETADATA_MAX_UPLOAD_BYTES` | `67108864` | Extension only: largest accepted upload; larger ones get HTTP 413. |
-| `OPENMETADATA_STORAGE_MIN_FREE` | `10%` | Extension only: free space the data volume keeps. Below it every write gets HTTP 503 with `Retry-After` and `X-OpenMetadata-Storage: low-disk`, nothing is applied, and reads and compaction keep working. A size such as `20g`, or a percentage of the volume. See [Disk space](#disk-space). |
+| `OPENMETADATA_STORAGE_MIN_FREE` | `10%` | Extension only: free space the data volume keeps. Below it every write gets HTTP 507 Insufficient Storage, nothing is applied, and reads and compaction keep working. A size such as `20g`, or a percentage of the volume. See [Disk space](#disk-space). |
 | `OPENMETADATA_STORAGE_ROOT` | `$FUSEKI_BASE/databases` | Extension only: the directory holding the TDB2 datasets, which the write guard and the storage report measure. |
 | `OPENMETADATA_REASONING_ENABLED` | `false` | `true` lets the extension run reasoner workers once the memory budget fits. Needs `OPENMETADATA_EXTENSION_ENABLED=true`. See [Reasoner](#reasoner). |
 | `OPENMETADATA_REASONER_HEAP` | `2g` | Worker heap `H_w`, its `-Xms` and `-Xmx`. At least `16m`. |
@@ -86,19 +86,16 @@ doing so on every restart. Compaction also needs free space about the size of th
 The extension protects both:
 
 - **A write guard.** Below `OPENMETADATA_STORAGE_MIN_FREE`, SPARQL updates and Graph Store uploads and
-  deletes get HTTP 503 before they reach TDB2. Reads and compaction are not refused, so the volume can
-  always be compacted back below the reserve.
-- **A storage report.** `GET /$/openmetadata/storage` (admin only) returns the volume's total and free
-  bytes, the reserve, whether writes are being refused, and for each dataset its serving `Data-NNNN`
-  generation, that generation's size, and any older generations left behind.
+  deletes get HTTP 507 Insufficient Storage before they reach TDB2. Reads and compaction are not
+  refused, so the volume can always be compacted back above the reserve.
+- **A storage report.** `GET /$/openmetadata/storage` (admin only) returns the volume's
+  `totalBytes`, `usableBytes` and `reserveBytes`, and `lowOnSpace`, whether writes are refused.
 
-OpenMetadata reads the report to compact before the reserve is reached and maps the guard's 503 to a
-retry that does not count as a failed delivery.
+OpenMetadata reads the report to compact before the reserve is reached, and retries a 507 without
+counting it as a failed delivery.
 
-At startup the entrypoint deletes any `Data-NNNN` generation below the highest in each dataset. Only a
-server stopped between switching to a compacted copy and deleting the old one leaves one, and nothing
-reads it. The image also disables JVM core dumps: one is as large as the heap and lands on the node's
-disk rather than the data volume.
+The image also starts the JVM with `-XX:-CreateCoredumpOnCrash`: a crash core dump is as large as
+the heap and lands on the node's disk rather than the data volume.
 
 ## Settings for OpenMetadata
 

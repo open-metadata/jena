@@ -151,10 +151,6 @@ seed_datasets() {
 # always resolves to the jar shipped in the running image, so upgrades need no manual step.
 configure_extension() {
   require_boolean OPENMETADATA_EXTENSION_ENABLED "$OPENMETADATA_EXTENSION_ENABLED"
-  local reserve="${OPENMETADATA_STORAGE_MIN_FREE:-}"
-  if [ -n "$reserve" ] && [[ ! "$reserve" =~ ^[1-9][0-9]?%$ ]] && ! size_bytes "$reserve" > /dev/null; then
-    fail "OPENMETADATA_STORAGE_MIN_FREE must be a size such as 20g or a percentage of the data volume such as 10%, got '$reserve'"
-  fi
   if [ "$OPENMETADATA_EXTENSION_ENABLED" = "true" ]; then
     mkdir -p "$FUSEKI_BASE/extra"
     ln -sfn "$EXTENSION_JAR" "$EXTENSION_LINK"
@@ -213,23 +209,6 @@ configure_reasoning() {
     mkdir -p "$FUSEKI_BASE/reasoning"
     log INFO "Reasoning enabled: worker heap ${OPENMETADATA_REASONER_HEAP:-2g}; the extension reports whether the memory budget fits"
   fi
-}
-
-# TDB2 serves a dataset's highest Data-NNNN generation. A compaction writes the next one, switches to
-# it and only then deletes the old one, so a server stopped in between leaves a full-size copy that
-# nothing reads and nothing would ever delete. Fuseki is not running yet, so removing it is safe.
-remove_orphaned_generations() {
-  local dataset generation
-  local -a generations
-  for dataset in "$FUSEKI_BASE"/databases/*/; do
-    [ -d "$dataset" ] || continue
-    mapfile -t generations < <(find "$dataset" -mindepth 1 -maxdepth 1 -type d -regex '.*/Data-[0-9][0-9][0-9][0-9]' | sort)
-    ((${#generations[@]} > 1)) || continue
-    for generation in "${generations[@]:0:${#generations[@]}-1}"; do
-      log WARN "Removing orphaned TDB2 generation $generation; $(basename "${generations[-1]}") is the one in service"
-      rm -rf -- "$generation"
-    done
-  done
 }
 
 compose_jvm_args() {
@@ -296,9 +275,7 @@ has_config_argument() {
 }
 
 main() {
-  ulimit -c 0
   prepare_base
-  remove_orphaned_generations
   render_shiro
   seed_datasets
   configure_extension
