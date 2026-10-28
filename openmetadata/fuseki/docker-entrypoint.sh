@@ -215,6 +215,9 @@ compose_jvm_args() {
   if [ -z "${JVM_ARGS:-}" ]; then
     JVM_ARGS="-Xms$FUSEKI_HEAP -Xmx$FUSEKI_HEAP"
   fi
+  # A crash core dump is as large as the heap and lands on the node's disk, not the data volume:
+  # in production it filled the node and got the pod evicted. The hs_err report is enough.
+  JVM_ARGS="$JVM_ARGS -XX:-CreateCoredumpOnCrash"
   require_boolean FUSEKI_UNION_DEFAULT_GRAPH "$FUSEKI_UNION_DEFAULT_GRAPH"
   if [ "$FUSEKI_UNION_DEFAULT_GRAPH" = "true" ]; then
     JVM_ARGS="$JVM_ARGS -Dtdb2:unionDefaultGraph=true"

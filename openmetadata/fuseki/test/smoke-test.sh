@@ -303,6 +303,38 @@ job_state_becomes() {
   return 1
 }
 
+# Status of a SPARQL update inserting $2 into $1's default graph.
+update_status() {
+  curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" -X POST \
+    -H 'Content-Type: application/sparql-update' \
+    --data "INSERT DATA { <$2> <urn:smoke:p> \"v\" }" "$BASE/$1"
+}
+
+update_applied() {
+  [[ "$(update_status "$1" "$2")" == 2* ]]
+}
+
+storage_report() {
+  curl -fs -u "admin:$PASSWORD" "$BASE/\$/openmetadata/storage"
+}
+
+dataset_ask() {
+  curl -fs -u "admin:$PASSWORD" -H 'Accept: application/sparql-results+json' -G \
+    --data-urlencode "query=$2" "$BASE/$1/sparql" | jq -r .boolean
+}
+
+# A file of the Fuseki JVM's /proc entry, seen from inside the container: docker top lists host
+# pids. The [S] keeps the probe's own command line from matching.
+fuseki_proc() {
+  docker exec "$CONTAINER" sh -c "for p in /proc/[0-9]*; do
+    if grep -q 'Fuseki[S]erver' \$p/cmdline 2> /dev/null; then tr '\0' ' ' < \$p/$1; break; fi
+  done"
+}
+
+fuseki_jvm_has() {
+  fuseki_proc cmdline | grep -q -- "$1"
+}
+
 echo "== Defaults: stock Fuseki, extension off =="
 start -e FUSEKI_DATASETS=ds
 check "dataset seeded from FUSEKI_DATASETS" dataset_exists ds
@@ -367,6 +399,24 @@ fresh_volume
 start --user 123456:0 -e FUSEKI_DATASETS=arbitrary
 check "a random uid in group 0 can create datasets" dataset_exists arbitrary
 
+echo "== Disk space =="
+fresh_volume
+STORAGE=(-e FUSEKI_DATASETS=openmetadata -e OPENMETADATA_EXTENSION_ENABLED=true)
+start "${STORAGE[@]}"
+check "the storage report requires the admin account" status_is 401 "$BASE/\$/openmetadata/storage"
+check "it reports the volume" [ "$(storage_report | jq '.totalBytes > 0 and .usableBytes > 0 and .reserveBytes > 0')" = "true" ]
+check "writes are open above the reserve" [ "$(storage_report | jq .lowOnSpace)" = "false" ]
+check "an update is applied above the reserve" update_applied openmetadata/update urn:smoke:kept
+check "the JVM is told not to dump core" fuseki_jvm_has -XX:-CreateCoredumpOnCrash
+start "${STORAGE[@]}" -e OPENMETADATA_STORAGE_MIN_FREE=999t
+check "below the reserve the report says writes are refused" [ "$(storage_report | jq .lowOnSpace)" = "true" ]
+check "an update gets 507 Insufficient Storage" [ "$(update_status openmetadata/update urn:smoke:refused)" = "507" ]
+check "so does an update sent to the dataset URL" [ "$(update_status openmetadata urn:smoke:refused)" = "507" ]
+check "and a Graph Store upload" [ "$(upload_status openmetadata 1024)" = "507" ]
+check "nothing refused was applied" [ "$(dataset_ask openmetadata 'ASK { <urn:smoke:refused> ?p ?o }')" = "false" ]
+check "queries still work" [ "$(dataset_ask openmetadata 'ASK { <urn:smoke:kept> ?p ?o }')" = "true" ]
+check "compaction is not refused" status_is 200 -u "admin:$PASSWORD" -X POST "$BASE/\$/compact/openmetadata"
+
 echo "== Invalid settings fail fast =="
 check "missing ADMIN_PASSWORD" exits_with_error
 check "non-numeric FUSEKI_QUERY_TIMEOUT_MS" exits_with_error -e ADMIN_PASSWORD=x -e FUSEKI_QUERY_TIMEOUT_MS=abc
@@ -380,6 +430,7 @@ check "invalid OPENMETADATA_REASONER_PAGE_CACHE_FLOOR" exits_with_error -e ADMIN
 check "non-numeric OPENMETADATA_REASONER_CPUS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_CPUS=two
 check "a zero OPENMETADATA_REASONING_MAX_QUEUED_JOBS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_MAX_QUEUED_JOBS=0
 check "invalid OPENMETADATA_REASONING_DISK_QUOTA" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_DISK_QUOTA=0%
+check "invalid OPENMETADATA_STORAGE_MIN_FREE" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=true -e OPENMETADATA_STORAGE_MIN_FREE=lots
 
 echo "== Reasoner: readiness refuses an undersized container =="
 fresh_volume
