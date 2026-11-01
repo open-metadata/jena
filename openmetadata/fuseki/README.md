@@ -36,6 +36,8 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_EXTENSION_ENABLED` | `false` | `true` loads the OpenMetadata Graph Store extension. |
 | `OPENMETADATA_WRITE_TIMEOUT_MS` | `50000` | Extension only: deadline for a Graph Store upload, after which it is rolled back. |
 | `OPENMETADATA_MAX_UPLOAD_BYTES` | `67108864` | Extension only: largest accepted upload; larger ones get HTTP 413. |
+| `OPENMETADATA_STORAGE_MIN_FREE` | `10%` | Extension only: free space the data volume keeps. Below it every write gets HTTP 507 Insufficient Storage, nothing is applied, and reads and compaction keep working. A size such as `20g`, or a percentage of the volume. See [Disk space](#disk-space). |
+| `OPENMETADATA_STORAGE_ROOT` | `$FUSEKI_BASE/databases` | Extension only: the directory holding the TDB2 datasets, which the write guard and the storage report measure. |
 | `OPENMETADATA_REASONING_ENABLED` | `false` | `true` lets the extension run reasoner workers once the memory budget fits. Needs `OPENMETADATA_EXTENSION_ENABLED=true`. See [Reasoner](#reasoner). |
 | `OPENMETADATA_REASONER_HEAP` | `2g` | Worker heap `H_w`, its `-Xms` and `-Xmx`. At least `16m`. |
 | `OPENMETADATA_REASONER_OFF_HEAP` | `512m` | Worker off-heap budget `O_w`. At least `512m`, what the worker's flags cap. |
@@ -72,6 +74,28 @@ guarantees are missing.
 
 When `OPENMETADATA_EXTENSION_ENABLED` is not `true`, the server runs with exactly the stock launch
 command: the extension's classes are never loaded.
+
+### Disk space
+
+TDB2 never reuses space on its own: every write transaction copies the index pages it touches, and the
+old pages stay on disk until the dataset is compacted (`POST /$/compact/<dataset>?deleteOld=true`).
+A dataset that only receives updates therefore grows until its volume is full. TDB2 memory-maps its
+files, so a write on a full volume does not fail cleanly: the JVM gets SIGBUS and exits, and keeps
+doing so on every restart. Compaction also needs free space about the size of the live data.
+
+The extension protects both:
+
+- **A write guard.** Below `OPENMETADATA_STORAGE_MIN_FREE`, SPARQL updates and Graph Store uploads and
+  deletes get HTTP 507 Insufficient Storage before they reach TDB2. Reads and compaction are not
+  refused, so the volume can always be compacted back above the reserve.
+- **A storage report.** `GET /$/openmetadata/storage` (admin only) returns the volume's
+  `totalBytes`, `usableBytes` and `reserveBytes`, and `lowOnSpace`, whether writes are refused.
+
+OpenMetadata reads the report to compact before the reserve is reached, and retries a 507 without
+counting it as a failed delivery.
+
+The image also starts the JVM with `-XX:-CreateCoredumpOnCrash`: a crash core dump is as large as
+the heap and lands on the node's disk rather than the data volume.
 
 ## Settings for OpenMetadata
 
