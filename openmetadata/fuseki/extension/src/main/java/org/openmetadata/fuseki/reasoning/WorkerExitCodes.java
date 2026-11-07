@@ -29,6 +29,9 @@ final class WorkerExitCodes {
   static final int INPUT_REJECTED = 4;
   static final int TIME_BUDGET = 5;
 
+  /** A budget other than time ran out; the manifest's outcome names it. */
+  static final int BUDGET = 6;
+
   /** 128 plus the signal number, as the JDK reports a process ended by a signal. */
   static final int SIGNALLED = 128;
 

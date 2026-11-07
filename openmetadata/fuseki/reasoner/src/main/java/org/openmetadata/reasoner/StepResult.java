@@ -80,6 +80,16 @@ public final class StepResult {
                 + " produced is complete");
   }
 
+  /**
+   * A budget other than time ran out: {@code outcome} names it, and the problem names the limit.
+   * Nothing the step produced is complete.
+   */
+  public static StepResult budget(final String outcome, final String limit, final String message) {
+    return new StepResult(Status.INCOMPLETE, outcome, ExitCodes.BUDGET)
+        .problem(outcome, message)
+        .detail("limit", limit);
+  }
+
   public StepResult problem(final String code, final String message) {
     problems.add(new Problem(code, message));
     problemCount++;
