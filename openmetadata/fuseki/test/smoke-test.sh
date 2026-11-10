@@ -112,6 +112,11 @@ status_is() {
 }
 
 # Fuseki 6.2 labels the sample with application="fuseki" and prints it in scientific notation.
+server_flag_set() {
+  docker exec "$CONTAINER" sh -c 'tr "\0" " " < /proc/$(pgrep -f fuseki-server.jar | head -1)/cmdline' \
+    | grep -q -- "$1"
+}
+
 heap_max_bytes_is() {
   local actual
   actual=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics" \
@@ -303,6 +308,38 @@ job_state_becomes() {
   return 1
 }
 
+# Status of a SPARQL update inserting $2 into $1's default graph.
+update_status() {
+  curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" -X POST \
+    -H 'Content-Type: application/sparql-update' \
+    --data "INSERT DATA { <$2> <urn:smoke:p> \"v\" }" "$BASE/$1"
+}
+
+update_applied() {
+  [[ "$(update_status "$1" "$2")" == 2* ]]
+}
+
+storage_report() {
+  curl -fs -u "admin:$PASSWORD" "$BASE/\$/openmetadata/storage"
+}
+
+dataset_ask() {
+  curl -fs -u "admin:$PASSWORD" -H 'Accept: application/sparql-results+json' -G \
+    --data-urlencode "query=$2" "$BASE/$1/sparql" | jq -r .boolean
+}
+
+# A file of the Fuseki JVM's /proc entry, seen from inside the container: docker top lists host
+# pids. The [S] keeps the probe's own command line from matching.
+fuseki_proc() {
+  docker exec "$CONTAINER" sh -c "for p in /proc/[0-9]*; do
+    if grep -q 'Fuseki[S]erver' \$p/cmdline 2> /dev/null; then tr '\0' ' ' < \$p/$1; break; fi
+  done"
+}
+
+fuseki_jvm_has() {
+  fuseki_proc cmdline | grep -q -- "$1"
+}
+
 echo "== Defaults: stock Fuseki, extension off =="
 start -e FUSEKI_DATASETS=ds
 check "dataset seeded from FUSEKI_DATASETS" dataset_exists ds
@@ -312,6 +349,7 @@ check "union default graph is off by default" union_is ds false
 check "health ping is anonymous" status_is 200 "$BASE/\$/ping"
 check "queries require the admin account" status_is 401 -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
 check "heap follows FUSEKI_HEAP" heap_max_bytes_is 536870912
+check "direct buffers are capped" server_flag_set "-XX:MaxDirectMemorySize=256m"
 check "reasoning is off by default" [ "$(reasoner readiness 2> /dev/null | jq -r .status)" = "DISABLED" ]
 check "no reasoning directory without reasoning" docker exec "$CONTAINER" test ! -e /fuseki/reasoning
 
@@ -367,6 +405,24 @@ fresh_volume
 start --user 123456:0 -e FUSEKI_DATASETS=arbitrary
 check "a random uid in group 0 can create datasets" dataset_exists arbitrary
 
+echo "== Disk space =="
+fresh_volume
+STORAGE=(-e FUSEKI_DATASETS=openmetadata -e OPENMETADATA_EXTENSION_ENABLED=true)
+start "${STORAGE[@]}"
+check "the storage report requires the admin account" status_is 401 "$BASE/\$/openmetadata/storage"
+check "it reports the volume" [ "$(storage_report | jq '.totalBytes > 0 and .usableBytes > 0 and .reserveBytes > 0')" = "true" ]
+check "writes are open above the reserve" [ "$(storage_report | jq .lowOnSpace)" = "false" ]
+check "an update is applied above the reserve" update_applied openmetadata/update urn:smoke:kept
+check "the JVM is told not to dump core" fuseki_jvm_has -XX:-CreateCoredumpOnCrash
+start "${STORAGE[@]}" -e OPENMETADATA_STORAGE_MIN_FREE=999t
+check "below the reserve the report says writes are refused" [ "$(storage_report | jq .lowOnSpace)" = "true" ]
+check "an update gets 507 Insufficient Storage" [ "$(update_status openmetadata/update urn:smoke:refused)" = "507" ]
+check "so does an update sent to the dataset URL" [ "$(update_status openmetadata urn:smoke:refused)" = "507" ]
+check "and a Graph Store upload" [ "$(upload_status openmetadata 1024)" = "507" ]
+check "nothing refused was applied" [ "$(dataset_ask openmetadata 'ASK { <urn:smoke:refused> ?p ?o }')" = "false" ]
+check "queries still work" [ "$(dataset_ask openmetadata 'ASK { <urn:smoke:kept> ?p ?o }')" = "true" ]
+check "compaction is not refused" status_is 200 -u "admin:$PASSWORD" -X POST "$BASE/\$/compact/openmetadata"
+
 echo "== Invalid settings fail fast =="
 check "missing ADMIN_PASSWORD" exits_with_error
 check "non-numeric FUSEKI_QUERY_TIMEOUT_MS" exits_with_error -e ADMIN_PASSWORD=x -e FUSEKI_QUERY_TIMEOUT_MS=abc
@@ -380,6 +436,7 @@ check "invalid OPENMETADATA_REASONER_PAGE_CACHE_FLOOR" exits_with_error -e ADMIN
 check "non-numeric OPENMETADATA_REASONER_CPUS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_CPUS=two
 check "a zero OPENMETADATA_REASONING_MAX_QUEUED_JOBS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_MAX_QUEUED_JOBS=0
 check "invalid OPENMETADATA_REASONING_DISK_QUOTA" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_DISK_QUOTA=0%
+check "invalid OPENMETADATA_STORAGE_MIN_FREE" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=true -e OPENMETADATA_STORAGE_MIN_FREE=lots
 
 echo "== Reasoner: readiness refuses an undersized container =="
 fresh_volume
@@ -432,11 +489,14 @@ check "capabilities answer the admin account" [ "$(reasoning_status capabilities
 check "and refuse anonymous requests" [ "$(reasoning_status capabilities)" = "401" ]
 check "and a wrong password" [ "$(reasoning_status capabilities -u admin:wrong)" = "401" ]
 capabilities=$(reasoning_get capabilities)
-echo "      $(jq -c '{protocolVersion, readiness, limits}' <<< "$capabilities")"
+echo "      $(jq -c '{protocolVersion, readiness, limits, operations: [.operations[] | "\(.operation)=\(.availability)"]}' <<< "$capabilities")"
 check "capabilities report READY for protocol 1" \
   [ "$(jq -r '"\(.protocolVersion) \(.readiness)"' <<< "$capabilities")" = "1 READY" ]
 check "with the memory budget the readiness check computed" \
   [ "$(jq '.memoryBudget.requiredBytes <= .memoryBudget.containerLimitBytes' <<< "$capabilities")" = "true" ]
+check "and every operation listed as not implemented yet" \
+  [ "$(jq -r '[.operations[] | "\(.operation)=\(.availability)"] | join(" ")' <<< "$capabilities")" = \
+    "REFRESH=NOT_IMPLEMENTED CHECK=NOT_IMPLEMENTED EXPLAIN=NOT_IMPLEMENTED RESULTS=NOT_IMPLEMENTED QUERY=NOT_IMPLEMENTED" ]
 request_id=$(new_uuid)
 response=$(submit_job "$(refresh_request "$request_id")")
 job_id=$(body_of "$response" | jq -r .id)
@@ -448,13 +508,14 @@ check "its request ID returns the same job with 200" \
   [ "$(tail -1 <<< "$response") $(body_of "$response" | jq -r .id)" = "200 $job_id" ]
 check "an invalid request is refused with 400" [ "$(submit_job '{"operation": "REFRESH"}' | tail -1)" = "400" ]
 check "the job fails at capture, which this build lacks" job_state_becomes "$job_id" FAILED
-check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_READY capture" ]
+check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_IMPLEMENTED capture" ]
 check "its manifest is on the data volume" docker exec "$CONTAINER" test -f "$JOBS/$job_id/job.json"
 check "cancelling a finished job leaves it unchanged" [ "$(curl -s -u "admin:$PASSWORD" -X DELETE \
   "$BASE/reasoning/jobs/$job_id" | jq -r .state)" = "FAILED" ]
 check "cancelling an unknown job answers 404" [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" \
   -X DELETE "$BASE/reasoning/jobs/$(new_uuid)")" = "404" ]
 check "results are not implemented yet" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "501" ]
+check "and say so with NOT_IMPLEMENTED" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "NOT_IMPLEMENTED" ]
 docker restart "$CONTAINER" > /dev/null
 for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
 check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]

@@ -67,7 +67,7 @@ public record Readiness(
         fusekiHeap > 0
             ? fusekiHeap
             : settings.fusekiHeap() > 0 ? settings.fusekiHeap() : limit.bytes() / 4;
-    final long offHeapF = ReasoningSettings.fusekiOffHeap(heapF);
+    final long offHeapF = ReasoningSettings.fusekiOffHeap(heapF, settings.fusekiDirectMemory());
     final long floor =
         settings.pageCacheFloorBytes() >= 0
             ? settings.pageCacheFloorBytes()

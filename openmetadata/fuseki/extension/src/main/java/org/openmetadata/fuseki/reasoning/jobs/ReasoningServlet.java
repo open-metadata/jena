@@ -36,7 +36,8 @@ import org.apache.jena.fuseki.server.DataAccessPointRegistry;
  * every other path, so the image's shiro.ini makes it admin-only.
  *
  * <pre>
- *   GET    /reasoning/capabilities           protocol version, readiness, memory budget, limits
+ *   GET    /reasoning/capabilities           protocol version, readiness, operations, memory
+ *                                            budget, limits
  *   POST   /reasoning/jobs?dataset=NAME      submit a job against a serving dataset: 202, or 200
  *                                            with the existing job for a known request ID
  *   GET    /reasoning/jobs/{id}              the job's state
@@ -49,8 +50,6 @@ import org.apache.jena.fuseki.server.DataAccessPointRegistry;
  */
 public final class ReasoningServlet extends HttpServlet {
   public static final String PATH_SPEC = "/reasoning/*";
-  private static final String SNAPSHOTS_MISSING =
-      "NOT_IMPLEMENTED: snapshot results and queries are not available in this build";
   private static final Pattern DATASET = Pattern.compile("/?[A-Za-z0-9][A-Za-z0-9_.-]*");
 
   private final transient JobService jobs;
@@ -133,8 +132,16 @@ public final class ReasoningServlet extends HttpServlet {
           send(response, method.equals("DELETE") && stopping ? 202 : 200, job.get());
         }
       }
-      case RESULTS, QUERY ->
-          send(response, 501, Problem.of(Problem.Code.NOT_READY, SNAPSHOTS_MISSING).toJson());
+      case RESULTS ->
+          send(
+              response,
+              501,
+              Problem.of(Problem.Code.NOT_IMPLEMENTED, Plans.RESULTS_MISSING).toJson());
+      case QUERY ->
+          send(
+              response,
+              501,
+              Problem.of(Problem.Code.NOT_IMPLEMENTED, Plans.QUERY_MISSING).toJson());
     }
   }
 
