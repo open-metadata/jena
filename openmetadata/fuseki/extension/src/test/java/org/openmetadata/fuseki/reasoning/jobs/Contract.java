@@ -26,9 +26,10 @@ import org.apache.jena.atlas.json.JsonValue;
 /**
  * OpenMetadata's reasoning schemas and examples, copied into test resources (see SOURCE.txt), and a
  * checker for the documents the store writes. It applies the keywords those schemas use for the
- * store's output (type, properties, required, additionalProperties, enum, pattern, minimum, items,
- * and $ref between the four schemas); a $ref to any other OpenMetadata schema is not followed, and
- * format is not asserted. Requests are validated by JobRequest itself, not by this checker.
+ * store's output (type, properties, required, additionalProperties, enum, const, pattern, minimum,
+ * items, contains with minContains and maxContains, allOf, if/then, and $ref between the four
+ * schemas); a $ref to any other OpenMetadata schema is not followed, and format is not asserted.
+ * Requests are validated by JobRequest itself, not by this checker.
  */
 final class Contract {
   static final String REQUEST = "rdfReasoningJobRequest";
@@ -87,36 +88,21 @@ final class Contract {
       check(target, resolved, value, path, violations);
       return;
     }
+    checkApplicators(schemaName, schema, value, path, violations);
     final String type = schema.hasKey("type") ? schema.getString("type") : null;
-    if ("object".equals(type)) {
+    if (type == null) {
+      if (value.isObject() && (schema.hasKey("properties") || schema.hasKey("required"))) {
+        checkObject(schemaName, schema, value, path, violations);
+      }
+      if (schema.hasKey("enum") && !schema.get("enum").getAsArray().contains(value)) {
+        violations.add(path + " " + value + " is not in " + schema.get("enum"));
+      }
+    } else if ("object".equals(type)) {
       if (!value.isObject()) {
         violations.add(path + " is not an object");
         return;
       }
-      final JsonObject properties =
-          schema.hasKey("properties") ? schema.getObj("properties") : new JsonObject();
-      if (schema.hasKey("required")) {
-        schema
-            .get("required")
-            .getAsArray()
-            .forEach(
-                key -> {
-                  if (!value.getAsObject().hasKey(key.getAsString().value())) {
-                    violations.add(path + "." + key.getAsString().value() + " is required");
-                  }
-                });
-      }
-      value
-          .getAsObject()
-          .forEach(
-              (key, member) -> {
-                if (properties.hasKey(key)) {
-                  check(schemaName, properties.getObj(key), member, path + "." + key, violations);
-                } else if (schema.hasKey("additionalProperties")
-                    && !schema.getBoolean("additionalProperties")) {
-                  violations.add(path + "." + key + " is not allowed");
-                }
-              });
+      checkObject(schemaName, schema, value, path, violations);
     } else if ("array".equals(type)) {
       if (!value.isArray()) {
         violations.add(path + " is not an array");
@@ -158,6 +144,82 @@ final class Contract {
       }
     } else if ("boolean".equals(type) && !value.isBoolean()) {
       violations.add(path + " is not a boolean");
+    }
+  }
+
+  private static void checkObject(
+      final String schemaName,
+      final JsonObject schema,
+      final JsonValue value,
+      final String path,
+      final List<String> violations) {
+    final JsonObject properties =
+        schema.hasKey("properties") ? schema.getObj("properties") : new JsonObject();
+    if (schema.hasKey("required")) {
+      schema
+          .get("required")
+          .getAsArray()
+          .forEach(
+              key -> {
+                if (!value.getAsObject().hasKey(key.getAsString().value())) {
+                  violations.add(path + "." + key.getAsString().value() + " is required");
+                }
+              });
+    }
+    value
+        .getAsObject()
+        .forEach(
+            (key, member) -> {
+              if (properties.hasKey(key)) {
+                check(schemaName, properties.getObj(key), member, path + "." + key, violations);
+              } else if (schema.hasKey("additionalProperties")
+                  && !schema.getBoolean("additionalProperties")) {
+                violations.add(path + "." + key + " is not allowed");
+              }
+            });
+  }
+
+  /** The keywords that combine subschemas or constrain any type. */
+  private static void checkApplicators(
+      final String schemaName,
+      final JsonObject schema,
+      final JsonValue value,
+      final String path,
+      final List<String> violations) {
+    if (schema.hasKey("const") && !schema.get("const").equals(value)) {
+      violations.add(path + " " + value + " is not " + schema.get("const"));
+    }
+    if (schema.hasKey("allOf")) {
+      schema
+          .get("allOf")
+          .getAsArray()
+          .forEach(member -> check(schemaName, member.getAsObject(), value, path, violations));
+    }
+    if (schema.hasKey("if") && schema.hasKey("then")) {
+      final List<String> condition = new ArrayList<>();
+      check(schemaName, schema.getObj("if"), value, path, condition);
+      if (condition.isEmpty()) {
+        check(schemaName, schema.getObj("then"), value, path, violations);
+      }
+    }
+    if (schema.hasKey("contains") && value.isArray()) {
+      long matches = 0;
+      for (final JsonValue item : value.getAsArray()) {
+        final List<String> itemViolations = new ArrayList<>();
+        check(schemaName, schema.getObj("contains"), item, path, itemViolations);
+        if (itemViolations.isEmpty()) {
+          matches++;
+        }
+      }
+      final long min =
+          schema.hasKey("minContains") ? schema.getNumber("minContains").longValue() : 1;
+      if (matches < min) {
+        violations.add(path + " has " + matches + " items matching " + schema.get("contains"));
+      }
+      if (schema.hasKey("maxContains") && matches > schema.getNumber("maxContains").longValue()) {
+        violations.add(
+            path + " has " + matches + " items matching " + schema.get("contains") + ", too many");
+      }
     }
   }
 
