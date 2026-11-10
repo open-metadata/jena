@@ -32,6 +32,11 @@ class LimitsTest {
     assertEquals(1_000, limits.maxChecks());
     assertEquals(1_000, limits.maxExplainChecks());
     assertEquals(32, limits.maxExpressionDepth());
+    assertEquals(256, limits.maxRules());
+    assertEquals(64, limits.maxRulePatterns());
+    assertEquals(64, limits.maxPasses());
+    assertEquals(10_000_000, limits.maxNewFacts());
+    assertEquals(4L << 30, limits.maxSpoolBytes());
   }
 
   @Test
@@ -45,6 +50,9 @@ class LimitsTest {
     assertEquals(two.maxInputBytes(), eight.maxInputBytes());
     assertEquals(two.maxExpressionDepth(), eight.maxExpressionDepth());
     assertEquals(two.maxChecks(), eight.maxChecks());
+    assertEquals(two.maxPasses(), eight.maxPasses());
+    assertEquals(two.maxNewFacts(), eight.maxNewFacts());
+    assertEquals(two.maxSpoolBytes(), eight.maxSpoolBytes());
     assertTrue(Limits.forHeap(1).maxClosureTriples() >= 1);
   }
 

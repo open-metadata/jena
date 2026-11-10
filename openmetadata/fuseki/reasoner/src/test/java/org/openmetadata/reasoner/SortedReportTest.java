@@ -10,7 +10,7 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-package org.openmetadata.reasoner.owl;
+package org.openmetadata.reasoner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -18,10 +18,10 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** The canonical report never grows past its line limit, whatever the order facts arrive in. */
-class ClassifyStepReportTest {
+class SortedReportTest {
   @Test
   void theReportKeepsTheFirstLinesInOrderAndCountsTheRest() {
-    final ClassifyStep.Report report = new ClassifyStep.Report(3);
+    final SortedReport report = new SortedReport(3);
     for (final String line : List.of("TYPE e", "SUBCLASS b", "VALUE f", "SUBCLASS a", "TYPE c")) {
       report.add(line);
     }
@@ -37,7 +37,7 @@ class ClassifyStepReportTest {
 
   @Test
   void aReportWithinItsLimitIsComplete() {
-    final ClassifyStep.Report report = new ClassifyStep.Report(3);
+    final SortedReport report = new SortedReport(3);
     report.add("TYPE b");
     report.add("SUBCLASS a");
     assertEquals(
