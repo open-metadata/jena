@@ -1,10 +1,14 @@
-Copied unchanged from open-metadata/OpenMetadata at commit 12f9e16ed2693af671179c81ce847438d44d3ceb (main, 2026-10-10):
+Copied unchanged from open-metadata/OpenMetadata at commit 1728d000a5cdd9de0b0489680569517dd2380498
+(branch feat/rdf-reasoning-protocol-gaps, 2026-10-14, not yet on main when copied):
 
   schema/*.json    openmetadata-spec/src/main/resources/json/schema/api/rdf/
   examples/*.json  openmetadata-service/src/test/resources/rdf/reasoning/
 
 They define the reasoning protocol this extension implements without OpenMetadata's classes; the
-tests load them to pin the wire format. The per-operation and per-check requirements of the request
-schema come from OpenMetadata pull request 35199 (open at the time of copying), which adds them as
-allOf/if/then rules; JobRequestTest checks them by hand. Refresh these files when the protocol
-changes, and keep the commit above current.
+tests load them to pin the wire format. That commit adds the capabilities' operations list, the
+per-operation limit rules and the NOT_IMPLEMENTED problem code
+(ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces in
+OpenMetadata); the request schema's per-operation rules come from OpenMetadata pull request 35199.
+Contract applies the schemas' allOf/if/then and contains rules to the documents the store writes;
+JobRequestTest checks the request rules against the store's own validator. Refresh these files when
+the protocol changes, and keep the commit above current.

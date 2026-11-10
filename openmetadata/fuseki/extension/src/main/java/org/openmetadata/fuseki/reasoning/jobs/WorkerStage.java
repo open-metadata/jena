@@ -93,10 +93,7 @@ public final class WorkerStage implements Stage {
           case SUCCEEDED -> null;
           case NOT_READY -> Problem.of(Problem.Code.NOT_READY, reason);
           case BUSY -> Problem.of(Problem.Code.NOT_READY, reason);
-          case INCOMPLETE ->
-              reason.startsWith("MEMORY_BUDGET")
-                  ? Problem.of(Problem.Code.MEMORY_BUDGET_EXHAUSTED, reason)
-                  : Problem.of(Problem.Code.LIMIT_EXCEEDED, reason).withSubject("maxJobSeconds");
+          case INCOMPLETE -> incomplete(reason, outcome.manifest());
           case INTERRUPTED ->
               reason.equals("CANCELLED") ? null : Problem.of(Problem.Code.WORKER_LOST, reason);
           case FAILED -> failure(reason, outcome.manifest());
@@ -110,6 +107,28 @@ public final class WorkerStage implements Stage {
       return Result.stopped();
     }
     return Result.failed(problem.atStep(step));
+  }
+
+  /**
+   * A step that ran out of its heap, its time, or another budget its manifest names, such as a
+   * RULES step's {@code maxPasses}; the protocol's subject is the limit to raise.
+   */
+  private static Problem incomplete(final String reason, final JsonObject manifest) {
+    if (reason.startsWith("MEMORY_BUDGET")) {
+      return Problem.of(Problem.Code.MEMORY_BUDGET_EXHAUSTED, reason);
+    }
+    final String limit =
+        reason.startsWith("TIME_BUDGET") || manifest == null || !manifest.hasKey("limit")
+            ? null
+            : manifest.getString("limit");
+    if (limit == null) {
+      return Problem.of(Problem.Code.LIMIT_EXCEEDED, reason).withSubject("maxJobSeconds");
+    }
+    final JsonObject first = firstProblem(manifest);
+    return Problem.of(
+            Problem.Code.LIMIT_EXCEEDED,
+            first == null ? reason : reason + ": " + first.getString("message"))
+        .withSubject(limit);
   }
 
   /** A rejected input keeps the worker's first problem as the message. */
@@ -127,6 +146,9 @@ public final class WorkerStage implements Stage {
           first != null && "MISSING_IMPORT".equals(first.getString("code"));
       return Problem.of(
           missingImport ? Problem.Code.MISSING_IMPORT : Problem.Code.PROFILE_VIOLATION, detail);
+    }
+    if (reason.startsWith("INVALID_RULES")) {
+      return Problem.of(Problem.Code.RULE_FAILED, detail);
     }
     if (reason.startsWith("PROTOCOL_ERROR")) {
       return Problem.of(Problem.Code.WORKER_LOST, detail);

@@ -35,5 +35,11 @@ public final class ExitCodes {
   /** The step's own deadline expired before it finished; nothing it produced is complete. */
   public static final int TIME_BUDGET = 5;
 
+  /**
+   * Another budget of the step ran out before it finished, such as a RULES step's passes, new facts
+   * or spool; the manifest's outcome names it. Nothing the step produced is complete.
+   */
+  public static final int BUDGET = 6;
+
   private ExitCodes() {}
 }

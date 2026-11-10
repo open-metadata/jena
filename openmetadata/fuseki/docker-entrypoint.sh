@@ -222,6 +222,9 @@ compose_jvm_args() {
   if [[ "$JVM_ARGS" != *-XX:MaxDirectMemorySize=* ]]; then
     JVM_ARGS="$JVM_ARGS -XX:MaxDirectMemorySize=256m"
   fi
+  # A crash core dump is as large as the heap and lands on the node's disk, not the data volume:
+  # in production it filled the node and got the pod evicted. The hs_err report is enough.
+  JVM_ARGS="$JVM_ARGS -XX:-CreateCoredumpOnCrash"
   require_boolean FUSEKI_UNION_DEFAULT_GRAPH "$FUSEKI_UNION_DEFAULT_GRAPH"
   if [ "$FUSEKI_UNION_DEFAULT_GRAPH" = "true" ]; then
     JVM_ARGS="$JVM_ARGS -Dtdb2:unionDefaultGraph=true"

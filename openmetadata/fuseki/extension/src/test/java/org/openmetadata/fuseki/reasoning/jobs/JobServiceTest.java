@@ -272,9 +272,9 @@ class JobServiceTest {
       final JsonObject failed =
           await(service, id(service.submit(request(example))), state("FAILED"));
       final JsonObject problem = failed.getObj("problem");
-      assertEquals("NOT_READY", problem.getString("code"));
+      assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
       assertEquals("capture", problem.getString("step"));
-      assertTrue(problem.getString("message").startsWith("NOT_IMPLEMENTED: capturing input"));
+      assertEquals(Plans.CAPTURE_MISSING, problem.getString("message"));
       assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
       assertConforms(failed);
     }
@@ -410,6 +410,40 @@ class JobServiceTest {
     assertEquals(16, capabilities.getObj("limits").getNumber("maxQueuedJobs").intValue());
     assertEquals(3L << 30, capabilities.getObj("limits").getNumber("maxDiskBytes").longValue());
     assertTrue(capabilities.get("engines").getAsArray().isEmpty(), "no engine is reachable yet");
+    final List<String> listed = new ArrayList<>();
+    capabilities
+        .get("operations")
+        .getAsArray()
+        .forEach(
+            support -> {
+              listed.add(support.getAsObject().getString("operation"));
+              assertEquals("NOT_IMPLEMENTED", support.getAsObject().getString("availability"));
+            });
+    assertEquals(Contract.enumeration(Contract.CAPABILITIES, "operation"), listed);
+  }
+
+  @Test
+  void capabilitiesCannotClaimAnOperationWithoutTheLimitsItNeeds() throws Exception {
+    final JobService service = service(worker(SUCCEED), Map.of());
+    for (final String operation : Contract.enumeration(Contract.CAPABILITIES, "operation")) {
+      final JsonObject claimed = service.capabilities();
+      claimed
+          .get("operations")
+          .getAsArray()
+          .forEach(
+              support -> {
+                if (support.getAsObject().getString("operation").equals(operation)) {
+                  support.getAsObject().put("availability", "AVAILABLE");
+                }
+              });
+      assertTrue(
+          Contract.violations(Contract.CAPABILITIES, claimed).stream()
+              .anyMatch(violation -> violation.startsWith("$.limits.")),
+          operation + " was accepted as AVAILABLE without its limits");
+    }
+    assertEquals(
+        List.of(),
+        Contract.violations(Contract.CAPABILITIES, Contract.example("ready-capabilities")));
   }
 
   @Test
@@ -431,7 +465,8 @@ class JobServiceTest {
             "incomplete-check-job",
             "generation-mismatch-job",
             "cancel-requested-job",
-            "interrupted-job")) {
+            "interrupted-job",
+            "not-implemented-job")) {
       final JsonObject json = Contract.example(example);
       assertEquals(json, Job.fromManifest(manifest(example)).toJson(), example);
     }

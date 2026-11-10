@@ -21,5 +21,7 @@ public enum StepKind {
   /** Compute one bounded justification for an entailment or an inconsistency. */
   EXPLAIN,
   /** Compact the working dataset before it is published. */
-  COMPACT
+  COMPACT,
+  /** Run a bundle of governance rules to a fixed point and write their conclusions. */
+  RULES
 }
