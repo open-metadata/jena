@@ -215,6 +215,13 @@ compose_jvm_args() {
   if [ -z "${JVM_ARGS:-}" ]; then
     JVM_ARGS="-Xms$FUSEKI_HEAP -Xmx$FUSEKI_HEAP"
   fi
+  # Fuseki allocates direct buffers per request and frees them only when a collection finds their
+  # owners; under the JVM default limit, the whole heap, they pile up outside the heap between
+  # collections. At this limit the JVM collects instead. The extension's memory budget assumes the
+  # same value (ReasoningSettings.DEFAULT_FUSEKI_DIRECT_MEMORY); JVM_ARGS can set another.
+  if [[ "$JVM_ARGS" != *-XX:MaxDirectMemorySize=* ]]; then
+    JVM_ARGS="$JVM_ARGS -XX:MaxDirectMemorySize=256m"
+  fi
   # A crash core dump is as large as the heap and lands on the node's disk, not the data volume:
   # in production it filled the node and got the pod evicted. The hs_err report is enough.
   JVM_ARGS="$JVM_ARGS -XX:-CreateCoredumpOnCrash"
