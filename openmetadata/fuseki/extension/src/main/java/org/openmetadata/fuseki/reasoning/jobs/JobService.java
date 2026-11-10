@@ -57,6 +57,7 @@ public final class JobService implements AutoCloseable {
   private final WorkerLauncher launcher;
   private final Supplier<Readiness> readiness;
   private final Stage.Planner planner;
+  private final Operations operations;
   private final LongSupplier clock;
   private final JobStore store;
 
@@ -102,12 +103,17 @@ public final class JobService implements AutoCloseable {
     this.launcher = launcher;
     this.readiness = readiness;
     this.planner = planner;
+    this.operations = new Operations(settings, jobSettings);
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
   }
 
-  /** The service the Fuseki module runs, with the container's memory and this JVM's heap. */
-  public static JobService create(final ReasoningSettings settings, final JobSettings jobs) {
+  /**
+   * The service the Fuseki module runs, with the container's memory and this JVM's heap. Jobs read
+   * the datasets {@code datasets} serves, which may answer only once the server has started.
+   */
+  public static JobService create(
+      final ReasoningSettings settings, final JobSettings jobs, final ServingDatasets datasets) {
     final long fusekiHeap = Runtime.getRuntime().maxMemory();
     final ContainerMemory memory = ContainerMemory.system();
     return new JobService(
@@ -115,7 +121,7 @@ public final class JobService implements AutoCloseable {
         jobs,
         new WorkerLauncher(settings, memory, fusekiHeap, false),
         () -> Readiness.evaluate(settings, memory, fusekiHeap, false, false),
-        Plans.current(),
+        Plans.current(new Operations(settings, jobs), datasets),
         System::currentTimeMillis);
   }
 
@@ -198,11 +204,21 @@ public final class JobService implements AutoCloseable {
       json.put("readiness", settings.enabled() ? "NOT_READY" : "DISABLED");
       reasons.add("The memory budget cannot be evaluated: " + e.getMessage());
     }
+    long quota = -1;
+    try {
+      quota = jobSettings.diskQuota(settings.reasoningRoot());
+    } catch (final RuntimeException e) {
+      LOG.warn("Cannot resolve the reasoning disk quota: {}", e.toString());
+      if (settings.enabled()) {
+        json.put("readiness", "NOT_READY");
+        reasons.add("The reasoning disk quota cannot be resolved: " + e.getMessage());
+      }
+    }
     json.put("reasons", reasons);
-    json.put("operations", Plans.operations());
-    // No operation reaches an engine until input capture exists, so none is claimed.
-    json.put("engines", new JsonArray());
-    json.put("coverage", new JsonArray());
+    // Without the quota maxDiskBytes cannot be listed, and the protocol then forbids AVAILABLE.
+    json.put("operations", operations.operations(quota > 0));
+    json.put("engines", operations.engines());
+    json.put("coverage", Operations.coverage());
     if (budget != null) {
       final JsonObject memory = new JsonObject();
       memory.put("containerLimitBytes", budget.availableBytes());
@@ -215,15 +231,7 @@ public final class JobService implements AutoCloseable {
       memory.put("safetyMargin", JsonNumber.valueDecimal("0.1"));
       json.put("memoryBudget", memory);
     }
-    // Only the limits this build enforces. The protocol requires the rest before the operations
-    // that need them may be AVAILABLE, not before readiness may be READY.
-    final JsonObject limits = new JsonObject();
-    limits.put("maxQueuedJobs", jobSettings.maxQueuedJobs());
-    try {
-      limits.put("maxDiskBytes", jobSettings.diskQuota(settings.reasoningRoot()));
-    } catch (final RuntimeException e) {
-      LOG.warn("Cannot resolve the reasoning disk quota: {}", e.toString());
-    }
+    final JsonObject limits = operations.limits(quota);
     json.put("limits", limits);
     return json;
   }
@@ -455,6 +463,18 @@ public final class JobService implements AutoCloseable {
       }
       if (result.cancelled()) {
         end(job, Job.State.CANCELLED, null, null);
+        return;
+      }
+      if (result.engines() != null) {
+        synchronized (lock) {
+          job.recordEngines(result.engines());
+        }
+      }
+      if (result.answered()) {
+        synchronized (lock) {
+          job.progress(stage.name(), i + 1);
+        }
+        end(job, Job.State.SUCCEEDED, result.outcome(), result.problem());
         return;
       }
       if (result.problem() != null) {

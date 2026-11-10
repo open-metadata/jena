@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.openmetadata.fuseki.reasoning.WorkerLauncher;
 
@@ -37,24 +38,35 @@ public interface Stage {
       BooleanSupplier cancelled) {}
 
   /**
-   * How a stage ended: completed, possibly with the job's outcome; failed with a problem; or
-   * stopped after a cancellation.
+   * How a stage ended: completed, possibly with the job's outcome; answered, which ends the job
+   * SUCCEEDED with its outcome now, possibly INCOMPLETE with the problem that stopped it; failed
+   * with a problem; or stopped after a cancellation. {@code engines} are the engine builds that
+   * computed the result, recorded with the job's input; null when the stage ran none.
    */
-  record Result(String outcome, Problem problem, boolean cancelled) {
+  record Result(
+      String outcome, Problem problem, boolean cancelled, boolean answered, JsonArray engines) {
     public static Result completed() {
-      return new Result(null, null, false);
+      return new Result(null, null, false, false, null);
     }
 
     public static Result completed(final String outcome) {
-      return new Result(outcome, null, false);
+      return new Result(outcome, null, false, false, null);
+    }
+
+    public static Result answered(final String outcome, final Problem problem) {
+      return new Result(outcome, problem, false, true, null);
     }
 
     public static Result failed(final Problem problem) {
-      return new Result(null, problem, false);
+      return new Result(null, problem, false, false, null);
     }
 
     public static Result stopped() {
-      return new Result(null, null, true);
+      return new Result(null, null, true, false, null);
+    }
+
+    public Result withEngines(final JsonArray computedBy) {
+      return new Result(outcome, problem, cancelled, answered, computedBy);
     }
   }
 

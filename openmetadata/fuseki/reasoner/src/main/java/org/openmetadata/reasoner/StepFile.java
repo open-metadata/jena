@@ -73,11 +73,22 @@ public record StepFile(
           "explain",
           "limits");
 
-  /** The import closure to reason over: named graphs of the working dataset and its root. */
-  public record Closure(String root, List<String> graphs) {}
+  /**
+   * The import closure to reason over: named graphs of the working dataset and its root. With
+   * {@code allGraphs} the graphs are every named graph of the working dataset, as when it holds
+   * exactly one captured closure, and {@code graphs} is empty; a closure of many small graphs then
+   * does not have to be listed in the step file.
+   */
+  public record Closure(String root, List<String> graphs, boolean allGraphs) {}
 
-  /** What to justify: one entailed axiom, in OWL 2 functional syntax, or the inconsistency. */
-  public record Explain(String axiom, boolean inconsistency) {}
+  /**
+   * What to justify: one entailed axiom, in OWL 2 functional syntax, or the inconsistency; and how
+   * many justifications to compute at most.
+   */
+  public record Explain(String axiom, boolean inconsistency, int maxJustifications) {}
+
+  /** The most justifications one EXPLAIN step computes, as OpenMetadata's request allows. */
+  public static final int MAX_JUSTIFICATIONS = 10;
 
   public static Path resultPath(final Path stepFile) {
     return stepFile.resolveSibling(baseName(stepFile) + ".result.json");
@@ -152,8 +163,11 @@ public record StepFile(
           rejectKeys(json, kind, "explain");
           if (json.hasKey("output")) {
             outputGraph = iri(requiredString(json, "output"), "output");
-            if (closure.graphs().contains(outputGraph)) {
-              throw new InvalidStepException("output must not be one of the closure's graphs");
+            if (closure.allGraphs() || closure.graphs().contains(outputGraph)) {
+              // With allGraphs the output graph would join the closure of the next step.
+              throw new InvalidStepException(
+                  "output must not be one of the closure's graphs, and is not allowed with"
+                      + " closure.allGraphs");
             }
           }
           if (json.hasKey("checks")) {
@@ -241,11 +255,18 @@ public record StepFile(
     }
     final JsonObject json = value.getAsObject();
     for (final String key : json.keys()) {
-      if (!key.equals("root") && !key.equals("graphs")) {
+      if (!key.equals("root") && !key.equals("graphs") && !key.equals("allGraphs")) {
         throw new InvalidStepException("Unknown closure key '" + key + "'");
       }
     }
     final String root = iri(requiredString(json, "root"), "closure.root");
+    if (json.hasKey("allGraphs")) {
+      if (!booleanValue(json, "allGraphs") || json.hasKey("graphs")) {
+        throw new InvalidStepException(
+            "closure.allGraphs must be true, and closure.graphs must then be absent");
+      }
+      return new Closure(root, List.of(), true);
+    }
     final JsonValue graphs = json.get("graphs");
     if (graphs == null || !graphs.isArray() || graphs.getAsArray().isEmpty()) {
       throw new InvalidStepException("closure.graphs must be a non-empty array of graph IRIs");
@@ -259,7 +280,7 @@ public record StepFile(
         throw new InvalidStepException("closure.graphs lists " + graph + " twice");
       }
     }
-    return new Closure(root, List.copyOf(names));
+    return new Closure(root, List.copyOf(names), false);
   }
 
   private static Explain explain(final JsonValue value) throws InvalidStepException {
@@ -274,11 +295,21 @@ public record StepFile(
       throw new InvalidStepException("explain needs exactly one of axiom or inconsistency=true");
     }
     for (final String key : json.keys()) {
-      if (!key.equals("axiom") && !key.equals("inconsistency")) {
+      if (!key.equals("axiom")
+          && !key.equals("inconsistency")
+          && !key.equals("maxJustifications")) {
         throw new InvalidStepException("Unknown explain key '" + key + "'");
       }
     }
-    return new Explain(axiom, inconsistency);
+    long maxJustifications = 1;
+    if (json.hasKey("maxJustifications")) {
+      maxJustifications = requiredLong(json, "maxJustifications");
+      if (maxJustifications < 1 || maxJustifications > MAX_JUSTIFICATIONS) {
+        throw new InvalidStepException(
+            "explain.maxJustifications must be between 1 and " + MAX_JUSTIFICATIONS);
+      }
+    }
+    return new Explain(axiom, inconsistency, (int) maxJustifications);
   }
 
   private static void rejectKeys(final JsonObject json, final StepKind kind, final String... keys)

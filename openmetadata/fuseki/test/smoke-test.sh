@@ -437,9 +437,12 @@ check "capabilities report READY for protocol 1" \
   [ "$(jq -r '"\(.protocolVersion) \(.readiness)"' <<< "$capabilities")" = "1 READY" ]
 check "with the memory budget the readiness check computed" \
   [ "$(jq '.memoryBudget.requiredBytes <= .memoryBudget.containerLimitBytes' <<< "$capabilities")" = "true" ]
-check "and every operation listed as not implemented yet" \
+check "and CHECK and EXPLAIN available, the rest not implemented yet" \
   [ "$(jq -r '[.operations[] | "\(.operation)=\(.availability)"] | join(" ")' <<< "$capabilities")" = \
-    "REFRESH=NOT_IMPLEMENTED CHECK=NOT_IMPLEMENTED EXPLAIN=NOT_IMPLEMENTED RESULTS=NOT_IMPLEMENTED QUERY=NOT_IMPLEMENTED" ]
+    "REFRESH=NOT_IMPLEMENTED CHECK=AVAILABLE EXPLAIN=AVAILABLE RESULTS=NOT_IMPLEMENTED QUERY=NOT_IMPLEMENTED" ]
+check "with the limits they need and the worker's engines" \
+  [ "$(jq -r '[(.limits | has("maxJobSeconds", "maxImports", "maxClosureAxioms") | tostring), (.engines | map(.name) | join(","))] | join(" ")' <<< "$capabilities")" = \
+    "true true true HermiT,ELK" ]
 request_id=$(new_uuid)
 response=$(submit_job "$(refresh_request "$request_id")")
 job_id=$(body_of "$response" | jq -r .id)
@@ -464,6 +467,34 @@ for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1
 check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]
 response=$(submit_job "$(refresh_request "$request_id")")
 check "and so does its request ID" [ "$(body_of "$response" | jq -r .id)" = "$job_id" ]
+
+echo "== Reasoner: a CHECK and an EXPLAIN over a pinned closure =="
+curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/trig' \
+  --data-binary "@$HERE/check-closure.trig" "$BASE/ds/data"
+closure_digest=$(sed -n 's/^# closure-digest //p' "$HERE/check-closure.trig")
+ontology_request() {
+  printf '{"requestId": "%s", "operation": "%s", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 1}, "ontologySelection": "APPROVED", "ontologyIri": "https://open-metadata.org/ontology/finance", "ontologyDigest": "%s", %s}' \
+    "$(new_uuid)" "$1" "$closure_digest" "$2"
+}
+job_answer() {
+  local id
+  id=$(body_of "$(submit_job "$1")" | jq -r .id)
+  for _ in $(seq 1 120); do
+    case "$(reasoning_get "jobs/$id" | jq -r .state)" in QUEUED|RUNNING) sleep 1 ;; *) break ;; esac
+  done
+  reasoning_get "jobs/$id" | jq -r '"\(.state) \(.outcome // .problem.code)"'
+}
+check "the Approved closure is consistent: its Draft graph is not captured" \
+  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "CONSISTENCY"}')")" = "SUCCEEDED NOT_ENTAILED" ]
+check "a class it makes unsatisfiable is found" \
+  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "SATISFIABILITY", "classExpression": {"kind": "NAMED_CLASS", "classIri": "https://open-metadata.org/finance#Hybrid"}}')")" = "SUCCEEDED ENTAILED" ]
+check "and explained" \
+  [ "$(job_answer "$(ontology_request EXPLAIN '"explain": {"statement": {"subjectIri": "https://open-metadata.org/finance#Hybrid", "predicateIri": "http://www.w3.org/2000/01/rdf-schema#subClassOf", "objectKind": "IRI", "objectIri": "http://www.w3.org/2002/07/owl#Nothing"}}')")" = "SUCCEEDED ENTAILED" ]
+curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/sparql-update' \
+  --data 'INSERT DATA { GRAPH <https://open-metadata.org/graph/asset/loan> { <https://open-metadata.org/finance#loan> a <https://open-metadata.org/finance#Liability> } }' \
+  "$BASE/ds/update"
+check "a pinned graph that changed fails the job with GENERATION_MISMATCH" \
+  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "CONSISTENCY"}')")" = "FAILED GENERATION_MISMATCH" ]
 
 echo "== Reasoner: a worker never disturbs Fuseki =="
 awk 'BEGIN { for (i = 0; i < 1000; i++) printf "<urn:smoke:s%d> <urn:smoke:p> \"%d\" .\n", i, i }' > "/tmp/$CONTAINER.serving.nt"

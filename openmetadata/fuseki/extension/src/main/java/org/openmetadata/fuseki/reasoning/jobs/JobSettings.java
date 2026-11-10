@@ -32,22 +32,32 @@ import org.openmetadata.fuseki.reasoning.Sizes;
  * @param retentionHours OPENMETADATA_REASONING_JOB_RETENTION_HOURS: how long a finished job is kept
  * @param diskQuotaBytes OPENMETADATA_REASONING_DISK_QUOTA as bytes, or -1 when a percentage
  * @param diskQuotaPercent the quota as a percentage of the data volume's capacity
+ * @param maxJobSeconds OPENMETADATA_REASONING_MAX_JOB_SECONDS: how long one job may run, from its
+ *     start to its last step's deadline
  */
 public record JobSettings(
     int maxQueuedJobs,
     int jobHistory,
     int retentionHours,
     long diskQuotaBytes,
-    int diskQuotaPercent) {
+    int diskQuotaPercent,
+    int maxJobSeconds) {
 
   public static final String MAX_QUEUED_JOBS = "OPENMETADATA_REASONING_MAX_QUEUED_JOBS";
   public static final String JOB_HISTORY = "OPENMETADATA_REASONING_JOB_HISTORY";
   public static final String RETENTION_HOURS = "OPENMETADATA_REASONING_JOB_RETENTION_HOURS";
   public static final String DISK_QUOTA = "OPENMETADATA_REASONING_DISK_QUOTA";
+  public static final String MAX_JOB_SECONDS = "OPENMETADATA_REASONING_MAX_JOB_SECONDS";
 
   public static final int DEFAULT_MAX_QUEUED_JOBS = 16;
   public static final int DEFAULT_JOB_HISTORY = 1000;
   public static final int DEFAULT_RETENTION_HOURS = 168;
+
+  /**
+   * An hour, until refresh times are measured: long enough for a catalog-sized closure, which
+   * classifies in under a minute in the default heap, plus its capture and load.
+   */
+  public static final int DEFAULT_MAX_JOB_SECONDS = 3600;
 
   /**
    * A quarter of the volume, until refresh and snapshot sizes are measured: the serving datasets
@@ -66,6 +76,7 @@ public record JobSettings(
         integer(environment, MAX_QUEUED_JOBS, FOUR_DIGITS, 4, DEFAULT_MAX_QUEUED_JOBS);
     final int history = integer(environment, JOB_HISTORY, FOUR_DIGITS, 4, DEFAULT_JOB_HISTORY);
     final int hours = integer(environment, RETENTION_HOURS, COUNT, 6, DEFAULT_RETENTION_HOURS);
+    final int jobSeconds = integer(environment, MAX_JOB_SECONDS, COUNT, 6, DEFAULT_MAX_JOB_SECONDS);
     long quotaBytes = -1;
     int quotaPercent = DEFAULT_DISK_QUOTA_PERCENT;
     final String quota = value(environment, DISK_QUOTA);
@@ -85,7 +96,7 @@ public record JobSettings(
         }
       }
     }
-    return new JobSettings(queue, history, hours, quotaBytes, quotaPercent);
+    return new JobSettings(queue, history, hours, quotaBytes, quotaPercent, jobSeconds);
   }
 
   public long retentionMillis() {

@@ -111,12 +111,31 @@ public record JobRequest(
     if (!check.errors.isEmpty()) {
       throw new Invalid(check.errors);
     }
+    expressible(document);
     return new JobRequest(
         UUID.fromString(document.getString("requestId")),
         Operation.valueOf(document.getString("operation")),
         document,
         dataset,
         digest(document, dataset));
+  }
+
+  /**
+   * A question the schema admits but OWL 2 cannot state, such as an intersection without operands
+   * or a literal statement without its value, is refused with the request rather than failing the
+   * job later.
+   */
+  private static void expressible(final JsonObject document) throws Invalid {
+    try {
+      switch (document.getString("operation")) {
+        case "CHECK" -> FunctionalSyntax.check(document.getObj("check"));
+        case "EXPLAIN" ->
+            FunctionalSyntax.statement(document.getObj("explain").getObj("statement"));
+        default -> {}
+      }
+    } catch (final FunctionalSyntax.Inexpressible e) {
+      throw new Invalid(List.of(e.getMessage()));
+    }
   }
 
   /**

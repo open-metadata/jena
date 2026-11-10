@@ -14,6 +14,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.util.UUID;
 import org.apache.jena.atlas.json.JSON;
+import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
 
@@ -128,6 +129,11 @@ public final class Job {
   void progress(final String stepName, final int completed) {
     step = stepName;
     completedSteps = completed;
+  }
+
+  /** The engine builds that computed the job's answer, as rdfReasoningSnapshot.json's input. */
+  void recordEngines(final JsonArray engines) {
+    input.put("engines", JSON.copy(engines));
   }
 
   void requestCancel() {

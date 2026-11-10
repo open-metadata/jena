@@ -183,6 +183,7 @@ validate_reasoning_settings() {
   require_bounded_integer OPENMETADATA_REASONING_MAX_QUEUED_JOBS 4
   require_bounded_integer OPENMETADATA_REASONING_JOB_HISTORY 4
   require_bounded_integer OPENMETADATA_REASONING_JOB_RETENTION_HOURS 6
+  require_bounded_integer OPENMETADATA_REASONING_MAX_JOB_SECONDS 6
   local quota="${OPENMETADATA_REASONING_DISK_QUOTA:-}"
   if [ -n "$quota" ] && [[ ! "$quota" =~ ^([1-9][0-9]?|100)%$ ]] \
     && ! size_bytes "$quota" > /dev/null; then
