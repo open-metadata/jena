@@ -1,0 +1,34 @@
+#  Copyright 2026 Collate
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# An ontology release as OpenMetadata exports and uploads it: one ontology's members under an
+# owl:Ontology header stating the release's version IRI, each statement's source member kept as an
+# owl:Axiom with dct:source. check-release.rdf-thrift is this file as RDF-Thrift, the bytes the
+# smoke test uploads; ReleaseFixtureTest checks that the two agree and that the release is the
+# one the smoke test names (ontology 3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b, release
+# 8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d). Regenerate it by reading this file as Turtle and writing the
+# model with RDFDataMgr.write(out, model, RDFFormat.RDF_THRIFT).
+PREFIX : <https://open-metadata.org/finance#>
+PREFIX dct: <http://purl.org/dc/terms/>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+<https://open-metadata.org/ontology/finance> a owl:Ontology ;
+    owl:versionIRI <urn:openmetadata:ontology-release:8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d> .
+
+dct:source a owl:AnnotationProperty .
+:Asset a owl:Class .
+:Liability a owl:Class .
+:Hybrid a owl:Class ; rdfs:subClassOf :Asset , :Liability .
+:Asset owl:disjointWith :Liability .
+:loan a owl:NamedIndividual , :Asset .
+
+[] a owl:Axiom ; owl:annotatedSource :Hybrid ; owl:annotatedProperty rdfs:subClassOf ;
+   owl:annotatedTarget :Asset ; dct:source <urn:openmetadata:ontology-member:1> .
+[] a owl:Axiom ; owl:annotatedSource :Hybrid ; owl:annotatedProperty rdfs:subClassOf ;
+   owl:annotatedTarget :Liability ; dct:source <urn:openmetadata:ontology-member:2> .
+[] a owl:Axiom ; owl:annotatedSource :Asset ; owl:annotatedProperty owl:disjointWith ;
+   owl:annotatedTarget :Liability ; dct:source <urn:openmetadata:ontology-member:3> .

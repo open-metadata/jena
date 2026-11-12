@@ -297,7 +297,7 @@ new_uuid() {
 }
 
 refresh_request() {
-  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologySelection": "APPROVED", "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
+  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologyReleases": [], "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
 }
 
 job_state_becomes() {
@@ -525,33 +525,57 @@ check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .st
 response=$(submit_job "$(refresh_request "$request_id")")
 check "and so does its request ID" [ "$(body_of "$response" | jq -r .id)" = "$job_id" ]
 
-echo "== Reasoner: a CHECK and an EXPLAIN over a pinned closure =="
-curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/trig' \
-  --data-binary "@$HERE/check-closure.trig" "$BASE/ds/data"
-closure_digest=$(sed -n 's/^# closure-digest //p' "$HERE/check-closure.trig")
-ontology_request() {
-  printf '{"requestId": "%s", "operation": "%s", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 1}, "ontologySelection": "APPROVED", "ontologyIri": "https://open-metadata.org/ontology/finance", "ontologyDigest": "%s", %s}' \
-    "$(new_uuid)" "$1" "$closure_digest" "$2"
+echo "== Reasoner: a CHECK and an EXPLAIN over an uploaded release =="
+RELEASE="$HERE/check-release.rdf-thrift"
+release_hex=$(shasum -a 256 "$RELEASE" | cut -d' ' -f1)
+release_size=$(wc -c < "$RELEASE" | tr -d ' ')
+upload_status() {
+  curl -s -o /dev/null -w '%{http_code}' "${@:3}" -X PUT -H "Content-Type: ${CONTENT_TYPE:-application/rdf+thrift}" \
+    --data-binary "@$2" "$BASE/reasoning/inputs/sha256:$1"
 }
-job_answer() {
+check "anonymous uploads are refused" [ "$(upload_status "$release_hex" "$RELEASE")" = "401" ]
+check "a release is uploaded with 201" [ "$(upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "201" ]
+check "the same bytes again are held with 200" [ "$(upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "200" ]
+check "bytes that do not hash to the path are refused with 400" \
+  [ "$(upload_status "$release_hex" "$HERE/check-release.ttl" -u "admin:$PASSWORD")" = "400" ]
+check "another content type is refused with 415" \
+  [ "$(CONTENT_TYPE=text/turtle upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "415" ]
+check "the upload is on the data volume" docker exec "$CONTAINER" test -f "/fuseki/reasoning/inputs/$release_hex"
+check "capabilities report the upload limit" \
+  [ "$(reasoning_get capabilities | jq -r .limits.maxUploadBytes)" = "67108864" ]
+ontology_request() {
+  printf '{"requestId": "%s", "operation": "%s", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 1}, "ontologyReleases": [{"ontologyId": "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", "releaseId": "%s", "contentDigest": "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}], "releaseRdf": {"digest": "sha256:%s", "byteSize": %s, "mediaType": "application/rdf+thrift"}, %s}' \
+    "$(new_uuid)" "$1" "${RELEASE_ID:-8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d}" "${UPLOAD_HEX:-$release_hex}" "${UPLOAD_SIZE:-$release_size}" "$2"
+}
+# Submits a job, waits for it to end and prints its id.
+run_job() {
   local id
   id=$(body_of "$(submit_job "$1")" | jq -r .id)
   for _ in $(seq 1 120); do
     case "$(reasoning_get "jobs/$id" | jq -r .state)" in QUEUED|RUNNING) sleep 1 ;; *) break ;; esac
   done
-  reasoning_get "jobs/$id" | jq -r '"\(.state) \(.outcome // .problem.code)"'
+  echo "$id"
 }
-check "the Approved closure is consistent: its Draft graph is not captured" \
-  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "CONSISTENCY"}')")" = "SUCCEEDED NOT_ENTAILED" ]
+job_answer() {
+  reasoning_get "jobs/$(run_job "$1")" | jq -r '"\(.state) \(.outcome // .problem.code)"'
+}
+consistency='"check": {"kind": "CONSISTENCY"}'
+check "the release is consistent" \
+  [ "$(job_answer "$(ontology_request CHECK "$consistency")")" = "SUCCEEDED NOT_ENTAILED" ]
 check "a class it makes unsatisfiable is found" \
   [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "SATISFIABILITY", "classExpression": {"kind": "NAMED_CLASS", "classIri": "https://open-metadata.org/finance#Hybrid"}}')")" = "SUCCEEDED ENTAILED" ]
-check "and explained" \
-  [ "$(job_answer "$(ontology_request EXPLAIN '"explain": {"statement": {"subjectIri": "https://open-metadata.org/finance#Hybrid", "predicateIri": "http://www.w3.org/2000/01/rdf-schema#subClassOf", "objectKind": "IRI", "objectIri": "http://www.w3.org/2002/07/owl#Nothing"}}')")" = "SUCCEEDED ENTAILED" ]
-curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/sparql-update' \
-  --data 'INSERT DATA { GRAPH <https://open-metadata.org/graph/asset/loan> { <https://open-metadata.org/finance#loan> a <https://open-metadata.org/finance#Liability> } }' \
-  "$BASE/ds/update"
-check "a pinned graph that changed fails the job with GENERATION_MISMATCH" \
-  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "CONSISTENCY"}')")" = "FAILED GENERATION_MISMATCH" ]
+explain='"explain": {"statement": {"subjectIri": "https://open-metadata.org/finance#Hybrid", "predicateIri": "http://www.w3.org/2000/01/rdf-schema#subClassOf", "objectKind": "IRI", "objectIri": "http://www.w3.org/2002/07/owl#Nothing"}}'
+explained=$(run_job "$(ontology_request EXPLAIN "$explain")")
+check "and explained" [ "$(reasoning_get "jobs/$explained" | jq -r '"\(.state) \(.outcome)"')" = "SUCCEEDED ENTAILED" ]
+check "the explanation names the source member of each axiom" \
+  [ "$(docker exec "$CONTAINER" cat "$JOBS/$explained/result.json" | jq -c '.justificationSources[0]')" = \
+    '[["urn:openmetadata:ontology-member:3"],["urn:openmetadata:ontology-member:1"],["urn:openmetadata:ontology-member:2"]]' ]
+other_release=$(new_uuid)
+never_hex=$(printf 'never uploaded' | shasum -a 256 | cut -d' ' -f1)
+check "a release that is not the one named fails the job with INPUT_CHANGED" \
+  [ "$(job_answer "$(RELEASE_ID=$other_release ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
+check "an upload that was never made fails the job with INPUT_CHANGED" \
+  [ "$(job_answer "$(UPLOAD_HEX=$never_hex ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
 
 echo "== Reasoner: a worker never disturbs Fuseki =="
 awk 'BEGIN { for (i = 0; i < 1000; i++) printf "<urn:smoke:s%d> <urn:smoke:p> \"%d\" .\n", i, i }' > "/tmp/$CONTAINER.serving.nt"

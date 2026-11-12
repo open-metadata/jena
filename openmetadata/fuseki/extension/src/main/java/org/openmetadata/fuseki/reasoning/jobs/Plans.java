@@ -21,17 +21,16 @@ import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
-import org.apache.jena.sparql.core.DatasetGraph;
 import org.openmetadata.fuseki.reasoning.AtomicFiles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The steps each operation takes. CHECK and EXPLAIN capture the request's import closure from the
- * serving dataset, bulk-load it into a private working dataset in a worker, and classify or explain
- * there; the answer goes to the job's outcome, with its detail in {@code result.json} in the job
- * directory, which the RESULTS operation will serve. REFRESH needs snapshots and the governance
- * rules step, so it still fails at capture with NOT_IMPLEMENTED.
+ * The steps each operation takes. CHECK and EXPLAIN capture the release the request uploaded,
+ * bulk-load it into a private working dataset in a worker, and classify or explain there; the
+ * answer goes to the job's outcome, with its detail in {@code result.json} in the job directory,
+ * which the RESULTS operation will serve. REFRESH needs snapshots and the governance rules step, so
+ * it still fails at capture with NOT_IMPLEMENTED.
  *
  * <p>A job has {@link JobSettings#maxJobSeconds()} from its start: each worker step gets what is
  * left as its deadline. A check that reaches a limit or its time answers INCOMPLETE with the
@@ -40,6 +39,7 @@ import org.slf4j.LoggerFactory;
 final class Plans {
   static final String CAPTURE = "capture";
   static final String SPOOL = "capture.nq.gz";
+  static final String CAPTURE_RESULT = "capture.json";
   static final String RESULT = "result.json";
   static final String WORKING = "working";
   static final String CHECK_FILE = "check.ofn";
@@ -48,7 +48,7 @@ final class Plans {
 
   private Plans() {}
 
-  static Stage.Planner current(final Operations operations, final ServingDatasets datasets) {
+  static Stage.Planner current(final Operations operations) {
     return (job, request) -> {
       final long deadline =
           System.nanoTime() + TimeUnit.SECONDS.toNanos(operations.jobSettings().maxJobSeconds());
@@ -63,60 +63,49 @@ final class Plans {
                 Stage.unavailable("publish", Operations.REFRESH_MISSING));
         case CHECK ->
             List.of(
-                capture(operations, datasets, deadline),
+                capture(operations, deadline),
                 load(operations, deadline),
                 classify(operations, deadline));
         case EXPLAIN ->
             List.of(
-                capture(operations, datasets, deadline),
+                capture(operations, deadline),
                 load(operations, deadline),
                 explain(operations, deadline));
       };
     };
   }
 
-  private static Stage capture(
-      final Operations operations, final ServingDatasets datasets, final long deadline) {
+  private static Stage capture(final Operations operations, final long deadline) {
     return stage(
         CAPTURE,
         context -> {
-          final DatasetGraph dataset = datasets.get(context.job().dataset());
-          if (dataset == null) {
-            return Stage.Result.failed(
-                Problem.of(
-                        Problem.Code.INVALID_REQUEST,
-                        "Dataset '" + context.job().dataset() + "' is no longer served")
-                    .atStep(CAPTURE));
-          }
-          final long left = diskLeft(operations);
+          final JsonObject request = context.request();
+          final JsonObject release =
+              request.get("ontologyReleases").getAsArray().get(0).getAsObject();
+          final JsonObject upload = request.getObj("releaseRdf");
+          final String digest = upload.getString("digest");
+          final Path held = JobInputs.path(operations.settings().reasoningRoot(), digest);
           final Capture.Bounds bounds =
               new Capture.Bounds(
-                  Operations.MAX_IMPORTS,
-                  operations.workerLimits().maxClosureTriples(),
-                  left,
-                  deadline);
-          final JsonObject request = context.request();
+                  operations.workerLimits().maxClosureTriples(), diskLeft(operations), deadline);
           try {
             final Capture.Result captured =
                 Capture.run(
-                    dataset,
-                    new Capture.Selection(
-                        request.getString("ontologyIri"),
-                        request.getString("ontologySelection"),
-                        request.hasKey("ontologyDigest")
-                            ? request.getString("ontologyDigest")
-                            : null),
+                    held,
+                    new Capture.Release(
+                        release.getString("ontologyId"),
+                        release.getString("releaseId"),
+                        digest,
+                        upload.getNumber("byteSize").longValue()),
                     context.directory().resolve(SPOOL),
                     bounds,
                     context.cancelled());
             AtomicFiles.write(
-                context.directory().resolve(CAPTURE + ".json"), JSON.toString(captured.toJson()));
+                context.directory().resolve(CAPTURE_RESULT), JSON.toString(captured.toJson()));
             LOG.info(
-                "Reasoning job {} captured {} manifests and {} graphs, {} triples, {} bytes in {}"
-                    + " ms",
+                "Reasoning job {} captured release {}: {} triples, {} bytes in {} ms",
                 context.job().id(),
-                captured.manifests().size(),
-                captured.graphs().size(),
+                release.getString("releaseId"),
                 captured.triples(),
                 captured.bytes(),
                 captured.millis());
@@ -289,6 +278,7 @@ final class Plans {
         result,
         "target",
         "justifications",
+        "justificationSources",
         "justificationsIncomplete",
         "consistencyChecks",
         "engine",
@@ -334,10 +324,12 @@ final class Plans {
     return step;
   }
 
-  /** The working dataset holds exactly the captured closure, so the closure is all of it. */
+  /** The working dataset holds exactly the captured release, so the closure is all of it. */
   private static JsonObject closure(final Stage.Context context) {
     final JsonObject closure = new JsonObject();
-    closure.put("root", context.request().getString("ontologyIri"));
+    closure.put(
+        "root",
+        JSON.read(context.directory().resolve(CAPTURE_RESULT).toString()).getString("root"));
     closure.put("allGraphs", true);
     return closure;
   }

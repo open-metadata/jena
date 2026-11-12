@@ -12,6 +12,7 @@
  */
 package org.openmetadata.fuseki.reasoning.jobs;
 
+import java.util.Optional;
 import java.util.UUID;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
@@ -98,6 +99,16 @@ public final class Job {
 
   public String dataset() {
     return dataset;
+  }
+
+  /** The hex digest of the uploaded input this job reads, if its request named one. */
+  Optional<String> uploadDigest() {
+    final JsonValue upload = input.get("releaseRdf");
+    if (upload == null || !upload.isObject()) {
+      return Optional.empty();
+    }
+    final String digest = upload.getAsObject().getString("digest");
+    return Optional.of(digest.substring(digest.indexOf(':') + 1));
   }
 
   String requestDigest() {

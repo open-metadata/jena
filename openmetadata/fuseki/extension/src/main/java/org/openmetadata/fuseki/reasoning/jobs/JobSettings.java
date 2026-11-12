@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import org.openmetadata.fuseki.BoundedGraphStore;
 import org.openmetadata.fuseki.reasoning.Sizes;
 
 /**
@@ -34,6 +35,8 @@ import org.openmetadata.fuseki.reasoning.Sizes;
  * @param diskQuotaPercent the quota as a percentage of the data volume's capacity
  * @param maxJobSeconds OPENMETADATA_REASONING_MAX_JOB_SECONDS: how long one job may run, from its
  *     start to its last step's deadline
+ * @param maxUploadBytes OPENMETADATA_REASONING_MAX_UPLOAD_BYTES: the largest job input one upload
+ *     may carry
  */
 public record JobSettings(
     int maxQueuedJobs,
@@ -41,17 +44,22 @@ public record JobSettings(
     int retentionHours,
     long diskQuotaBytes,
     int diskQuotaPercent,
-    int maxJobSeconds) {
+    int maxJobSeconds,
+    long maxUploadBytes) {
 
   public static final String MAX_QUEUED_JOBS = "OPENMETADATA_REASONING_MAX_QUEUED_JOBS";
   public static final String JOB_HISTORY = "OPENMETADATA_REASONING_JOB_HISTORY";
   public static final String RETENTION_HOURS = "OPENMETADATA_REASONING_JOB_RETENTION_HOURS";
   public static final String DISK_QUOTA = "OPENMETADATA_REASONING_DISK_QUOTA";
   public static final String MAX_JOB_SECONDS = "OPENMETADATA_REASONING_MAX_JOB_SECONDS";
+  public static final String MAX_UPLOAD_BYTES = "OPENMETADATA_REASONING_MAX_UPLOAD_BYTES";
 
   public static final int DEFAULT_MAX_QUEUED_JOBS = 16;
   public static final int DEFAULT_JOB_HISTORY = 1000;
   public static final int DEFAULT_RETENTION_HOURS = 168;
+
+  /** The smallest limit that still admits a small release's export. */
+  static final long MIN_UPLOAD_BYTES = Sizes.MIB;
 
   /**
    * An hour, until refresh times are measured: long enough for a catalog-sized closure, which
@@ -77,6 +85,15 @@ public record JobSettings(
     final int history = integer(environment, JOB_HISTORY, FOUR_DIGITS, 4, DEFAULT_JOB_HISTORY);
     final int hours = integer(environment, RETENTION_HOURS, COUNT, 6, DEFAULT_RETENTION_HOURS);
     final int jobSeconds = integer(environment, MAX_JOB_SECONDS, COUNT, 6, DEFAULT_MAX_JOB_SECONDS);
+    final String upload = value(environment, MAX_UPLOAD_BYTES);
+    final long uploadBytes =
+        upload == null
+            ? BoundedGraphStore.DEFAULT_MAX_BYTES
+            : Sizes.parse(MAX_UPLOAD_BYTES, upload);
+    if (uploadBytes < MIN_UPLOAD_BYTES) {
+      throw new IllegalArgumentException(
+          MAX_UPLOAD_BYTES + " must be at least 1m, got '" + upload + "'");
+    }
     long quotaBytes = -1;
     int quotaPercent = DEFAULT_DISK_QUOTA_PERCENT;
     final String quota = value(environment, DISK_QUOTA);
@@ -96,7 +113,8 @@ public record JobSettings(
         }
       }
     }
-    return new JobSettings(queue, history, hours, quotaBytes, quotaPercent, jobSeconds);
+    return new JobSettings(
+        queue, history, hours, quotaBytes, quotaPercent, jobSeconds, uploadBytes);
   }
 
   public long retentionMillis() {

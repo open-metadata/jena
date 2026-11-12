@@ -31,9 +31,11 @@ import org.openmetadata.reasoner.StepFile;
 import org.openmetadata.reasoner.StepResult;
 import org.openmetadata.reasoner.Watchdog;
 import org.openmetadata.reasoner.store.WorkingDataset;
+import org.semanticweb.owlapi.model.OWLAnnotationValue;
 import org.semanticweb.owlapi.model.OWLAxiom;
 import org.semanticweb.owlapi.model.OWLClassExpression;
 import org.semanticweb.owlapi.model.OWLDataFactory;
+import org.semanticweb.owlapi.model.OWLLiteral;
 import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.reasoner.OWLReasoner;
 
@@ -82,13 +84,14 @@ public final class ExplainStep implements Step {
             }
           });
       final boolean consistent = reasoner.isConsistent();
-      final List<List<String>> justifications = new ArrayList<>();
+      final List<Justification> justifications = new ArrayList<>();
       String incomplete = null;
       final String outcome;
       if (!consistent) {
         outcome = axiom == null ? "EXPLAINED" : "INCONSISTENT";
         watchdog.guard(null);
-        justifications.add(render(new MinimalInconsistentSubset(watchdog, budget).find(ontology)));
+        justifications.add(
+            Justification.of(new MinimalInconsistentSubset(watchdog, budget).find(ontology)));
       } else if (axiom == null) {
         return answer("NOT_ENTAILED", target, input);
       } else if (!reasoner.isEntailed(axiom)) {
@@ -108,7 +111,7 @@ public final class ExplainStep implements Step {
                 reasoner);
         try {
           if (step.explain().maxJustifications() == 1) {
-            justifications.add(render(generator.getExplanation(unsatisfiable)));
+            justifications.add(Justification.of(generator.getExplanation(unsatisfiable)));
           } else {
             incomplete =
                 several(
@@ -118,25 +121,33 @@ public final class ExplainStep implements Step {
           generator.dispose();
         }
       }
-      justifications.sort(Comparator.comparing(lines -> String.join("\n", lines)));
+      justifications.sort(Comparator.comparing(Justification::key));
       final List<String> report = new ArrayList<>();
       report.add("OUTCOME " + outcome);
       report.add("TARGET " + target);
       final JsonArray all = new JsonArray();
+      final JsonArray allSources = new JsonArray();
+      boolean sourced = false;
       for (int i = 0; i < justifications.size(); i++) {
         final String label = i == 0 ? "JUSTIFICATION " : "JUSTIFICATION#" + (i + 1) + " ";
-        justifications.get(i).forEach(line -> report.add(label + line));
-        final JsonArray array = new JsonArray();
-        justifications.get(i).forEach(array::add);
-        all.add(array);
+        final Justification justification = justifications.get(i);
+        justification.axioms().forEach(line -> report.add(label + line));
+        all.add(strings(justification.axioms()));
+        final JsonArray sources = new JsonArray();
+        justification.sources().forEach(each -> sources.add(strings(each)));
+        allSources.add(sources);
+        sourced |= justification.sources().stream().anyMatch(each -> !each.isEmpty());
       }
       final StepResult result =
           answer(outcome, target, input)
               .detail("justification", all.get(0))
-              .detail("justificationSize", justifications.get(0).size())
+              .detail("justificationSize", justifications.get(0).axioms().size())
               .detail("justifications", all)
               .detail("consistencyChecks", budget.spent())
               .report(report);
+      if (sourced) {
+        result.detail("justificationSources", allSources);
+      }
       if (incomplete != null) {
         result.detail("justificationsIncomplete", incomplete);
       }
@@ -157,7 +168,7 @@ public final class ExplainStep implements Step {
       final BlackBoxExplanation generator,
       final OWLClassExpression unsatisfiable,
       final int max,
-      final List<List<String>> justifications) {
+      final List<Justification> justifications) {
     // The tree reports its first justification again when it finds it from a new node.
     final Set<Set<OWLAxiom>> found = new LinkedHashSet<>();
     final HSTExplanationGenerator tree = new HSTExplanationGenerator(generator);
@@ -184,15 +195,59 @@ public final class ExplainStep implements Step {
       }
       incomplete = e.getMessage();
     }
-    found.forEach(justification -> justifications.add(render(justification)));
+    found.forEach(justification -> justifications.add(Justification.of(justification)));
     return incomplete;
   }
 
-  private static List<String> render(final Collection<OWLAxiom> justification) {
-    return justification.stream()
-        .map(justified -> justified.getAxiomWithoutAnnotations().toString())
-        .sorted()
-        .toList();
+  private static JsonArray strings(final List<String> values) {
+    final JsonArray array = new JsonArray();
+    values.forEach(array::add);
+    return array;
+  }
+
+  /**
+   * A minimal set of axioms, each as functional syntax without its annotations, and beside each the
+   * members it came from: the {@code dct:source} annotations OpenMetadata's release export puts on
+   * every statement, which are empty for an axiom without one.
+   */
+  private record Justification(List<String> axioms, List<List<String>> sources) {
+    private static final String SOURCE = "http://purl.org/dc/terms/source";
+
+    static Justification of(final Collection<OWLAxiom> justification) {
+      record Entry(String axiom, List<String> sources) {}
+      final List<Entry> entries =
+          justification.stream()
+              .map(
+                  justified ->
+                      new Entry(
+                          justified.getAxiomWithoutAnnotations().toString(), sources(justified)))
+              .sorted(
+                  Comparator.comparing(Entry::axiom)
+                      .thenComparing(entry -> String.join(" ", entry.sources())))
+              .toList();
+      return new Justification(
+          entries.stream().map(Entry::axiom).toList(),
+          entries.stream().map(Entry::sources).toList());
+    }
+
+    String key() {
+      return String.join("\n", axioms);
+    }
+
+    private static List<String> sources(final OWLAxiom axiom) {
+      return axiom
+          .annotations()
+          .filter(annotation -> annotation.getProperty().getIRI().toString().equals(SOURCE))
+          .map(annotation -> annotation.getValue())
+          .map(value -> value.asIRI().map(Object::toString).orElseGet(() -> literal(value)))
+          .sorted()
+          .distinct()
+          .toList();
+    }
+
+    private static String literal(final OWLAnnotationValue value) {
+      return value.asLiteral().map(OWLLiteral::getLiteral).orElse("");
+    }
   }
 
   private static StepResult answer(

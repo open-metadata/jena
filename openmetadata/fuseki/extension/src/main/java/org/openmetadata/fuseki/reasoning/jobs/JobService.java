@@ -13,6 +13,7 @@
 package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -21,9 +22,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonNumber;
 import org.apache.jena.atlas.json.JsonObject;
@@ -60,6 +63,7 @@ public final class JobService implements AutoCloseable {
   private final Operations operations;
   private final LongSupplier clock;
   private final JobStore store;
+  private final JobInputs inputs;
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -106,14 +110,11 @@ public final class JobService implements AutoCloseable {
     this.operations = new Operations(settings, jobSettings);
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
+    this.inputs = new JobInputs(settings.reasoningRoot());
   }
 
-  /**
-   * The service the Fuseki module runs, with the container's memory and this JVM's heap. Jobs read
-   * the datasets {@code datasets} serves, which may answer only once the server has started.
-   */
-  public static JobService create(
-      final ReasoningSettings settings, final JobSettings jobs, final ServingDatasets datasets) {
+  /** The service the Fuseki module runs, with the container's memory and this JVM's heap. */
+  public static JobService create(final ReasoningSettings settings, final JobSettings jobs) {
     final long fusekiHeap = Runtime.getRuntime().maxMemory();
     final ContainerMemory memory = ContainerMemory.system();
     return new JobService(
@@ -121,7 +122,7 @@ public final class JobService implements AutoCloseable {
         jobs,
         new WorkerLauncher(settings, memory, fusekiHeap, false),
         () -> Readiness.evaluate(settings, memory, fusekiHeap, false, false),
-        Plans.current(new Operations(settings, jobs), datasets),
+        Plans.current(new Operations(settings, jobs)),
         System::currentTimeMillis);
   }
 
@@ -148,6 +149,7 @@ public final class JobService implements AutoCloseable {
         byRequest.put(job.requestId(), job);
       }
       retain();
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), true);
     }
     LOG.info(
         "Reasoning jobs: {} kept, {} interrupted by the last shutdown", jobs.size(), interrupted);
@@ -234,6 +236,55 @@ public final class JobService implements AutoCloseable {
     final JsonObject limits = operations.limits(quota);
     json.put("limits", limits);
     return json;
+  }
+
+  /**
+   * Holds an input that a job will name, for {@code PUT /reasoning/inputs/sha256:{hex}}: refused
+   * over {@code maxUploadBytes}, when its bytes do not hash to {@code hex}, or when holding it
+   * would put the reasoning data over its disk quota.
+   */
+  public long maxUploadBytes() {
+    return jobSettings.maxUploadBytes();
+  }
+
+  public JobInputs.Stored upload(final String hex, final InputStream body)
+      throws Refused, IOException {
+    if (!settings.enabled()) {
+      throw new Refused(
+          503,
+          Problem.of(
+              Problem.Code.NOT_READY,
+              "Reasoning is disabled: " + ReasoningSettings.ENABLED + " is not true"));
+    }
+    final Path root = settings.reasoningRoot();
+    final long quota;
+    try {
+      quota = jobSettings.diskQuota(root);
+    } catch (final RuntimeException e) {
+      throw new Refused(
+          503,
+          Problem.of(Problem.Code.NOT_READY, "Disk use cannot be measured: " + e.getMessage()));
+    }
+    synchronized (lock) {
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
+    }
+    return inputs.put(
+        hex,
+        body,
+        jobSettings.maxUploadBytes(),
+        quota,
+        () -> JobStore.sizeOnDisk(root),
+        clock.getAsLong());
+  }
+
+  /**
+   * The digests, as stored, of the uploads that queued and running jobs will read. Under the lock.
+   */
+  private Set<String> uploadsInUse() {
+    return jobs.values().stream()
+        .filter(job -> !job.state().finished())
+        .flatMap(job -> job.uploadDigest().stream())
+        .collect(Collectors.toSet());
   }
 
   public Submission submit(final JobRequest request) throws Refused {
@@ -512,6 +563,7 @@ public final class JobService implements AutoCloseable {
     synchronized (lock) {
       finish(job, state, outcome, problem);
       retain();
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
     }
     LOG.info(
         "Reasoning job {} {}{}",

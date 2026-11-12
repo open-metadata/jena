@@ -15,127 +15,102 @@ package org.openmetadata.fuseki.reasoning.jobs;
 import java.io.BufferedOutputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
+import java.security.NoSuchAlgorithmException;
 import java.util.HashSet;
 import java.util.HexFormat;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.zip.Deflater;
 import java.util.zip.GZIPOutputStream;
-import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.graph.Triple;
-import org.apache.jena.query.TxnType;
+import org.apache.jena.riot.Lang;
 import org.apache.jena.riot.RDFFormat;
+import org.apache.jena.riot.RDFParser;
+import org.apache.jena.riot.RiotException;
 import org.apache.jena.riot.system.StreamRDF;
+import org.apache.jena.riot.system.StreamRDFBase;
 import org.apache.jena.riot.system.StreamRDFWriter;
-import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.core.Quad;
+import org.apache.jena.sys.JenaSystem;
 import org.apache.jena.vocabulary.OWL2;
 import org.apache.jena.vocabulary.RDF;
 
 /**
- * Copies the input of a CHECK or EXPLAIN from a serving dataset to a gzip-compressed N-Quads spool
- * in the job directory, inside one read transaction, so the job sees one version of every graph and
- * writers to the serving dataset are never blocked.
+ * Turns the release a CHECK or EXPLAIN names into the gzip-compressed N-Quads spool the worker
+ * loads. The release is RDF-Thrift that OpenMetadata uploaded first (OpenMetadata's
+ * ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules), so nothing here
+ * reads the serving dataset: a release under review never enters it.
  *
- * <p>The input is the closure OpenMetadata pinned in a version manifest (OpenMetadata's
- * ADR:2026-10-15-reasoning-closures-are-approved-graphs-pinned-by-a-content-manifest): the manifest
- * whose closure digest is the request's {@code ontologyDigest}, or, for an Approved check without
- * one, the manifest the activations graph names for the ontology. The capture copies each
- * manifest's {@code owl:Ontology} header, never its control triples, and every graph it pins, then
- * does the same for each manifest it imports. It recomputes each manifest's closure digest and each
- * pinned graph's digest from what the store holds and refuses the capture when one differs, so a
- * job reasons over exactly the content OpenMetadata pinned or not at all.
+ * <p>The capture accepts the upload only as the release the request named. The bytes must be as
+ * long as {@code releaseRdf.byteSize} says and hash to its digest, and the RDF must hold exactly
+ * one {@code owl:Ontology} whose {@code owl:versionIRI} is {@code
+ * urn:openmetadata:ontology-release:{releaseId}}. Anything else is {@code INPUT_CHANGED}: the input
+ * the request named is not what the store found. Imports between ontologies are deferred, so no
+ * other ontology is in the input and an {@code owl:imports} cannot resolve.
  *
- * <p>Pinned graphs are read one at a time; the server holds one graph, the members of one manifest
- * and the set of captured graph names, never the closure. Every bound is checked while copying, and
- * reaching one stops the copy and removes the partial spool.
+ * <p>The upload is parsed as a stream and written as it is read, so memory does not grow with the
+ * release. Every bound is checked while copying, and reaching one stops the copy and removes the
+ * partial spool.
  */
 public final class Capture {
-  public static final String CLOSURE_ALGORITHM = "om-closure-v2";
-  static final String OMR = "https://open-metadata.org/reasoning/";
+  public static final String RELEASE_IRI_PREFIX = "urn:openmetadata:ontology-release:";
+
+  /** The graph an active release occupies in the serving dataset, which the spool reuses. */
+  static final String ONTOLOGY_GRAPH_PREFIX = "https://open-metadata.org/graph/ontology/";
 
   /** Bound checks run once per this many quads, which keeps them off the copy's hot path. */
   private static final int CHECK_EVERY = 4096;
 
-  private static final String MANIFEST_PATH = "graph/manifest/";
+  private static final int BUFFER_BYTES = 64 * 1024;
+
+  static {
+    // The vocabulary classes below initialise Jena from whichever thread first touches them, and
+    // two threads doing that at once deadlock into a failed class; a job thread is one of them.
+    JenaSystem.init();
+  }
+
   private static final Node TYPE = RDF.type.asNode();
   private static final Node ONTOLOGY = OWL2.Ontology.asNode();
   private static final Node IMPORTS = OWL2.imports.asNode();
   private static final Node VERSION_IRI = OWL2.versionIRI.asNode();
-  private static final Node PINNED = NodeFactory.createURI(OMR + "pinnedDigest");
-  private static final Node IMPORTS_MANIFEST = NodeFactory.createURI(OMR + "importsManifest");
-  private static final Node OMR_ONTOLOGY = NodeFactory.createURI(OMR + "ontology");
-  private static final Node GLOSSARY = NodeFactory.createURI(OMR + "glossary");
-  private static final Node SELECTION = NodeFactory.createURI(OMR + "selection");
-  private static final Node CLOSURE_DIGEST = NodeFactory.createURI(OMR + "closureDigest");
-  private static final Node ALGORITHM = NodeFactory.createURI(OMR + "digestAlgorithm");
-  private static final Node ACTIVE_MANIFEST = NodeFactory.createURI(OMR + "activeManifest");
+
+  /** The release the request names, and the upload that holds it. */
+  public record Release(String ontologyId, String releaseId, String digest, long byteSize) {}
 
   /**
-   * The closure a request names.
-   *
-   * @param closureDigest the request's ontologyDigest; null to use the active Approved manifest
-   */
-  public record Selection(String ontologyIri, String selection, String closureDigest) {}
-
-  /**
-   * @param maxGraphs graphs in one capture, manifests and pinned graphs together: the protocol's
-   *     maxImports
-   * @param maxTriples quads in one capture; the closure is refused before parsing beyond it
+   * @param maxTriples triples in one capture; the release is refused before parsing beyond it
    * @param maxBytes compressed bytes of the spool
    * @param deadlineNanos {@link System#nanoTime()} when the job's time runs out
    */
-  public record Bounds(int maxGraphs, long maxTriples, long maxBytes, long deadlineNanos) {}
+  public record Bounds(long maxTriples, long maxBytes, long deadlineNanos) {}
 
   /** What was captured, as the job directory records it. */
   public record Result(
-      String root,
-      String versionIri,
-      String closureDigest,
-      List<String> manifests,
-      List<String> graphs,
-      long triples,
-      long bytes,
-      long millis) {
+      String root, String versionIri, String graph, long triples, long bytes, long millis) {
     public JsonObject toJson() {
       final JsonObject json = new JsonObject();
       json.put("root", root);
       json.put("versionIri", versionIri);
-      json.put("closureDigest", closureDigest);
-      json.put("manifestCount", manifests.size());
-      json.put("graphCount", graphs.size());
+      json.put("graph", graph);
       json.put("triples", triples);
       json.put("bytes", bytes);
       json.put("millis", millis);
-      final JsonArray manifestNames = new JsonArray();
-      manifests.forEach(manifestNames::add);
-      json.put("manifests", manifestNames);
-      final JsonArray names = new JsonArray();
-      graphs.forEach(names::add);
-      json.put("graphs", names);
       return json;
     }
   }
 
-  /** The capture cannot be used: a manifest is missing, a bound was reached, or content changed. */
+  /** The capture cannot be used: the input is not the release named, or a bound was reached. */
   public static final class Refused extends Exception {
     private final transient Problem problem;
 
@@ -156,97 +131,66 @@ public final class Capture {
     }
   }
 
-  private Capture() {}
-
-  /** The version IRI OpenMetadata gives a closure, from which its manifest is found. */
-  static String versionIri(final String ontologyIri, final String selection, final String digest) {
-    String stem = ontologyIri;
-    while (stem.endsWith("/") || stem.endsWith("#")) {
-      stem = stem.substring(0, stem.length() - 1);
+  /** Carries a refusal or cancellation out of the parser, which only lets unchecked ones pass. */
+  private static final class Abort extends RuntimeException {
+    Abort(final Exception cause) {
+      super(cause);
     }
-    return stem + ("CANDIDATE".equals(selection) ? "/candidate/" : "/version/") + hex(digest);
   }
 
-  /** Captures {@code selection} into {@code spool}, which exists only if the capture succeeds. */
+  private Capture() {}
+
+  /**
+   * Captures the {@code upload} of {@code release} into {@code spool}, which exists only on
+   * success.
+   */
   public static Result run(
-      final DatasetGraph dataset,
-      final Selection selection,
+      final Path upload,
+      final Release release,
       final Path spool,
       final Bounds bounds,
       final BooleanSupplier cancelled)
       throws Refused, Cancelled, IOException {
     final long start = System.nanoTime();
+    checkUpload(upload, release);
     final Path partial = spool.resolveSibling(spool.getFileName() + ".tmp");
+    final Node graph = NodeFactory.createURI(ONTOLOGY_GRAPH_PREFIX + release.ontologyId());
     boolean complete = false;
-    dataset.begin(TxnType.READ);
     try {
       final Copy copy = new Copy(bounds, cancelled);
-      final Node rootManifest = rootManifest(dataset, selection);
-      final Manifest root = Manifest.read(dataset, rootManifest);
-      if (!root.selection().equals(selection.selection())) {
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.INVALID_REQUEST,
-                    "Manifest <"
-                        + rootManifest.getURI()
-                        + "> is a "
-                        + root.selection()
-                        + " closure, not "
-                        + selection.selection())
-                .withSubject(selection.ontologyIri()));
-      }
-      if (!root.ontologyIri().equals(selection.ontologyIri())) {
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.INVALID_REQUEST,
-                    "Manifest <"
-                        + rootManifest.getURI()
-                        + "> is the closure of <"
-                        + root.ontologyIri()
-                        + ">, not of <"
-                        + selection.ontologyIri()
-                        + ">")
-                .withSubject(selection.ontologyIri()));
-      }
-      final List<String> manifests = new ArrayList<>();
-      final Set<String> graphs = new LinkedHashSet<>();
+      final Header header = new Header();
       try (CountingOutputStream file = new CountingOutputStream(Files.newOutputStream(partial));
-          OutputStream out = new BufferedOutputStream(new FastGzip(file), 1 << 16)) {
+          OutputStream out = new BufferedOutputStream(new FastGzip(file), BUFFER_BYTES);
+          InputStream in = Files.newInputStream(upload)) {
         copy.file = file;
         final StreamRDF writer = StreamRDFWriter.getWriterStream(out, RDFFormat.NQUADS_UTF8);
         writer.start();
-        final Deque<Node> pending = new ArrayDeque<>();
-        final Set<Node> seen = new HashSet<>();
-        pending.add(rootManifest);
-        seen.add(rootManifest);
-        while (!pending.isEmpty()) {
-          final Node graph = pending.removeFirst();
-          final Manifest manifest =
-              graph.equals(rootManifest) ? root : Manifest.read(dataset, graph);
-          copyManifest(dataset, manifest, writer, copy, graphs);
-          manifests.add(graph.getURI());
-          for (final Node imported : manifest.imports()) {
-            if (seen.add(imported)) {
-              pending.add(imported);
-            }
-          }
-        }
+        RDFParser.source(in).lang(Lang.RDFTHRIFT).parse(new Spooling(writer, graph, header, copy));
         writer.finish();
+      } catch (final Abort e) {
+        if (e.getCause() instanceof Refused refused) {
+          throw refused;
+        }
+        throw (Cancelled) e.getCause();
+      } catch (final RiotException e) {
+        throw new Refused(
+            Problem.of(
+                    Problem.Code.INVALID_REQUEST,
+                    "The upload is not readable RDF-Thrift: " + e.getMessage())
+                .withSubject(release.digest()));
       }
       copy.checkBytes(copy.file.count());
+      final String versionIri = header.verify(release);
       Files.move(partial, spool, StandardCopyOption.REPLACE_EXISTING);
       complete = true;
       return new Result(
-          root.ontologyIri(),
-          root.versionIri().getURI(),
-          root.closureDigest(),
-          List.copyOf(manifests),
-          List.copyOf(graphs),
+          header.ontology.getURI(),
+          versionIri,
+          graph.getURI(),
           copy.triples,
           Files.size(spool),
           TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
     } finally {
-      dataset.end();
       if (!complete) {
         Files.deleteIfExists(partial);
       }
@@ -254,287 +198,157 @@ public final class Capture {
   }
 
   /**
-   * The manifest graph for the request: found by the version IRI its digest gives, or by the
-   * activation of its ontology. The store does not know OpenMetadata's base IRI, so it never builds
-   * a manifest's name; it checks that the graph it finds has a manifest's name.
+   * The upload must still be what the request described: the store only holds uploads that hashed
+   * right, but a job can wait in the queue past the upload's removal or replacement, and a disk can
+   * corrupt a file, so the job checks its own input once more before relying on it.
    */
-  private static Node rootManifest(final DatasetGraph dataset, final Selection selection)
-      throws Refused {
-    final Node ontology = NodeFactory.createURI(selection.ontologyIri());
-    if (selection.closureDigest() == null) {
-      if (!"APPROVED".equals(selection.selection())) {
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.INVALID_REQUEST,
-                    "A CANDIDATE check names its closure with ontologyDigest")
-                .withSubject(selection.ontologyIri()));
-      }
-      final Set<Node> active = new LinkedHashSet<>();
-      final Iterator<Quad> activations = dataset.find(Node.ANY, Node.ANY, OMR_ONTOLOGY, ontology);
-      while (activations.hasNext() && active.size() < 2) {
-        final Quad quad = activations.next();
-        final Iterator<Quad> manifest =
-            dataset.find(quad.getGraph(), quad.getSubject(), ACTIVE_MANIFEST, Node.ANY);
-        while (manifest.hasNext()) {
-          active.add(manifest.next().getObject());
-        }
-      }
-      if (active.size() != 1) {
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.MISSING_IMPORT,
-                    active.isEmpty()
-                        ? "No closure of <" + selection.ontologyIri() + "> is active"
-                        : "More than one active closure names <" + selection.ontologyIri() + ">")
-                .withSubject(selection.ontologyIri()));
-      }
-      return active.iterator().next();
+  private static void checkUpload(final Path upload, final Release release)
+      throws Refused, IOException {
+    if (!Files.isRegularFile(upload)) {
+      throw changed(
+          release.digest(),
+          "The upload " + release.digest() + " is not held, so upload it again and resubmit");
     }
-    final String version =
-        versionIri(selection.ontologyIri(), selection.selection(), selection.closureDigest());
-    final String suffix = MANIFEST_PATH + hex(selection.closureDigest());
-    final Iterator<Quad> headers =
-        dataset.find(Node.ANY, ontology, VERSION_IRI, NodeFactory.createURI(version));
-    while (headers.hasNext()) {
-      final Node graph = headers.next().getGraph();
-      if (graph.isURI() && graph.getURI().endsWith(suffix)) {
-        return graph;
+    final long size = Files.size(upload);
+    if (size != release.byteSize()) {
+      throw changed(
+          release.digest(),
+          "The upload " + release.digest() + " is " + size + " bytes, not " + release.byteSize());
+    }
+    final MessageDigest sha256 = sha256();
+    try (InputStream in = Files.newInputStream(upload)) {
+      final byte[] buffer = new byte[BUFFER_BYTES];
+      int read;
+      while ((read = in.read(buffer)) != -1) {
+        sha256.update(buffer, 0, read);
       }
     }
-    throw new Refused(
-        Problem.of(
-                Problem.Code.MISSING_IMPORT,
-                "No manifest of <"
-                    + selection.ontologyIri()
-                    + "> has version <"
-                    + version
-                    + ">; it was never published or has been dropped, so publish the closure"
-                    + " again")
-            .withSubject(selection.ontologyIri()));
+    final String actual = "sha256:" + HexFormat.of().formatHex(sha256.digest());
+    if (!actual.equals(release.digest())) {
+      throw changed(
+          release.digest(), "The upload held as " + release.digest() + " now hashes to " + actual);
+    }
   }
 
-  /**
-   * Checks a manifest against its closure digest, then writes its header and every graph it pins
-   * that is not captured yet, each checked against its pinned digest.
-   */
-  private static void copyManifest(
-      final DatasetGraph dataset,
-      final Manifest manifest,
-      final StreamRDF writer,
-      final Copy copy,
-      final Set<String> graphs)
-      throws Refused, Cancelled, IOException {
-    copy.checkTime();
-    final TreeMap<String, String> members = new TreeMap<>();
-    final Iterator<Quad> pinned = dataset.find(manifest.graph(), Node.ANY, PINNED, Node.ANY);
-    while (pinned.hasNext()) {
-      final Quad quad = pinned.next();
-      if (quad.getSubject().isURI() && quad.getObject().isLiteral()) {
-        members.put(quad.getSubject().getURI(), quad.getObject().getLiteralLexicalForm());
-        if (graphs.size() + members.size() >= copy.bounds.maxGraphs()) {
-          throw tooManyGraphs(copy.bounds.maxGraphs());
-        }
+  private static Refused changed(final String subject, final String message) {
+    return new Refused(Problem.of(Problem.Code.INPUT_CHANGED, message).withSubject(subject));
+  }
+
+  private static MessageDigest sha256() {
+    try {
+      return MessageDigest.getInstance("SHA-256");
+    } catch (final NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** The few triples of the ontology header the capture decides on; the rest only pass through. */
+  private static final class Header {
+    private static final int MAX_REMEMBERED = 8;
+
+    private final Set<Node> ontologies = new LinkedHashSet<>();
+    private final Set<Node> versions = new LinkedHashSet<>();
+    private final Set<Node> imports = new LinkedHashSet<>();
+    private final Set<Node> versionSubjects = new HashSet<>();
+    private Node ontology;
+
+    void see(final Triple triple) {
+      final Node predicate = triple.getPredicate();
+      if (predicate.equals(TYPE) && triple.getObject().equals(ONTOLOGY)) {
+        remember(ontologies, triple.getSubject());
+      } else if (predicate.equals(VERSION_IRI)) {
+        remember(versions, triple.getObject());
+        versionSubjects.add(triple.getSubject());
+      } else if (predicate.equals(IMPORTS)) {
+        remember(imports, triple.getObject());
       }
-    }
-    final List<String> importLines = new ArrayList<>();
-    for (final Node imported : manifest.imports()) {
-      final Manifest importedManifest = Manifest.read(dataset, imported);
-      importLines.add(
-          "import <" + importedManifest.ontologyIri() + "> " + importedManifest.closureDigest());
-    }
-    importLines.sort(String::compareTo);
-    final String recomputed = manifest.closureDigest(members, importLines);
-    if (!recomputed.equals(manifest.closureDigest())) {
-      throw new Refused(
-          Problem.of(
-                  Problem.Code.GENERATION_MISMATCH,
-                  "Manifest <"
-                      + manifest.graph().getURI()
-                      + "> pins content whose closure digest is "
-                      + recomputed
-                      + ", not its "
-                      + manifest.closureDigest())
-              .withSubject(manifest.versionIri().getURI()));
     }
 
-    graphs.add(manifest.graph().getURI());
-    for (final Triple header : manifest.header(dataset)) {
-      writer.quad(Quad.create(manifest.graph(), header));
-      copy.count();
+    /** Remembering a bounded number is enough: more than one already fails the check. */
+    private static void remember(final Set<Node> into, final Node node) {
+      if (into.size() < MAX_REMEMBERED) {
+        into.add(node);
+      }
     }
-    for (final Map.Entry<String, String> member : members.entrySet()) {
-      if (!graphs.add(member.getKey())) {
-        continue;
+
+    /** The release's version IRI, once the header is known to be the named release's. */
+    String verify(final Release release) throws Refused {
+      final String expected = RELEASE_IRI_PREFIX + release.releaseId();
+      if (ontologies.size() != 1) {
+        throw changed(
+            release.ontologyId(),
+            "The upload has "
+                + (ontologies.isEmpty() ? "no" : "more than one")
+                + " owl:Ontology, not the one header of release "
+                + release.releaseId());
       }
-      final Node graph = NodeFactory.createURI(member.getKey());
-      final List<Triple> triples = new ArrayList<>();
-      final Iterator<Quad> quads = dataset.find(graph, Node.ANY, Node.ANY, Node.ANY);
-      while (quads.hasNext()) {
-        triples.add(quads.next().asTriple());
-        copy.count();
+      ontology = ontologies.iterator().next();
+      if (!ontology.isURI()) {
+        throw changed(
+            release.ontologyId(),
+            "The owl:Ontology in the upload is a blank node, not a named one");
       }
-      final String digest;
+      if (!versions.contains(NodeFactory.createURI(expected))
+          || versions.size() != 1
+          || versionSubjects.size() != 1
+          || !versionSubjects.contains(ontology)) {
+        throw changed(
+            release.ontologyId(),
+            "The owl:Ontology in the upload does not state owl:versionIRI <"
+                + expected
+                + ">, so it is not release "
+                + release.releaseId()
+                + "; it has "
+                + versions);
+      }
+      for (final Node imported : imports) {
+        if (!imported.equals(ontology) && !imported.equals(NodeFactory.createURI(expected))) {
+          throw new Refused(
+              Problem.of(
+                      Problem.Code.MISSING_IMPORT,
+                      "The release imports <"
+                          + imported
+                          + ">, but no other ontology is in the input: imports between ontologies"
+                          + " are not supported")
+                  .withSubject(imported.isURI() ? imported.getURI() : release.ontologyId()));
+        }
+      }
+      return expected;
+    }
+  }
+
+  /** Writes every triple of the upload into one graph of the spool and notes the header. */
+  private static final class Spooling extends StreamRDFBase {
+    private final StreamRDF writer;
+    private final Node graph;
+    private final Header header;
+    private final Copy copy;
+
+    Spooling(final StreamRDF writer, final Node graph, final Header header, final Copy copy) {
+      this.writer = writer;
+      this.graph = graph;
+      this.header = header;
+      this.copy = copy;
+    }
+
+    @Override
+    public void triple(final Triple triple) {
+      add(triple);
+    }
+
+    @Override
+    public void quad(final Quad quad) {
+      add(quad.asTriple());
+    }
+
+    private void add(final Triple triple) {
       try {
-        digest = GraphDigest.of(triples);
-      } catch (final GraphDigest.TooSymmetricException e) {
-        // OpenMetadata gives such a graph no digest and never pins it, so this manifest was not
-        // written by OpenMetadata from the content the store now holds.
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.GENERATION_MISMATCH,
-                    "Graph <"
-                        + member.getKey()
-                        + "> pinned by manifest <"
-                        + manifest.graph().getURI()
-                        + "> has no digest: "
-                        + e.getMessage())
-                .withSubject(member.getKey()));
+        copy.count();
+      } catch (final Refused | Cancelled e) {
+        throw new Abort(e);
       }
-      if (!digest.equals(member.getValue())) {
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.GENERATION_MISMATCH,
-                    "Graph <"
-                        + member.getKey()
-                        + (triples.isEmpty() ? "> is gone" : "> has changed")
-                        + " since manifest <"
-                        + manifest.graph().getURI()
-                        + "> pinned it: its digest is "
-                        + digest
-                        + ", not "
-                        + member.getValue())
-                .withSubject(member.getKey()));
-      }
-      for (final Triple triple : triples) {
-        writer.quad(Quad.create(graph, triple));
-      }
-    }
-  }
-
-  private static Refused tooManyGraphs(final int maxGraphs) {
-    return new Refused(
-        Problem.of(
-                Problem.Code.LIMIT_EXCEEDED, "The closure pins more than " + maxGraphs + " graphs")
-            .withSubject("maxImports"));
-  }
-
-  private static String hex(final String digest) {
-    return digest.startsWith(GraphDigest.PREFIX)
-        ? digest.substring(GraphDigest.PREFIX.length())
-        : digest;
-  }
-
-  /** One manifest's header, read from its graph; a manifest without one is refused. */
-  private record Manifest(
-      Node graph,
-      String ontologyIri,
-      Node versionIri,
-      String glossary,
-      String selection,
-      String closureDigest,
-      List<Node> imports) {
-
-    static Manifest read(final DatasetGraph dataset, final Node graph) throws Refused {
-      final Quad version = one(dataset, graph, Node.ANY, ALGORITHM, null);
-      final String algorithm = version.getObject().getLiteralLexicalForm();
-      if (!algorithm.equals(CLOSURE_ALGORITHM)) {
-        throw new Refused(
-            Problem.of(
-                    Problem.Code.NOT_IMPLEMENTED,
-                    "Manifest <"
-                        + graph.getURI()
-                        + "> uses the closure digest "
-                        + algorithm
-                        + ", which this build cannot check")
-                .withSubject(graph.getURI()));
-      }
-      final Node versionIri = version.getSubject();
-      final Node ontology = one(dataset, graph, versionIri, OMR_ONTOLOGY, null).getObject();
-      if (!dataset.contains(graph, ontology, TYPE, ONTOLOGY)
-          || !dataset.contains(graph, ontology, VERSION_IRI, versionIri)) {
-        throw incomplete(graph, "has no owl:Ontology header with its version IRI");
-      }
-      final List<Node> imports = new ArrayList<>();
-      final Iterator<Quad> imported = dataset.find(graph, versionIri, IMPORTS_MANIFEST, Node.ANY);
-      while (imported.hasNext()) {
-        imports.add(imported.next().getObject());
-      }
-      return new Manifest(
-          graph,
-          ontology.getURI(),
-          versionIri,
-          one(dataset, graph, versionIri, GLOSSARY, null).getObject().getURI(),
-          one(dataset, graph, versionIri, SELECTION, null).getObject().getLiteralLexicalForm(),
-          one(dataset, graph, versionIri, CLOSURE_DIGEST, null).getObject().getLiteralLexicalForm(),
-          List.copyOf(imports));
-    }
-
-    /** The reasoner's view of the manifest: its owl:Ontology header, never the control triples. */
-    List<Triple> header(final DatasetGraph dataset) {
-      final List<Triple> header = new ArrayList<>();
-      final Node ontology = NodeFactory.createURI(ontologyIri);
-      header.add(Triple.create(ontology, TYPE, ONTOLOGY));
-      header.add(Triple.create(ontology, VERSION_IRI, versionIri));
-      final Iterator<Quad> imports = dataset.find(graph, ontology, IMPORTS, Node.ANY);
-      while (imports.hasNext()) {
-        header.add(imports.next().asTriple());
-      }
-      return header;
-    }
-
-    /**
-     * The closure digest, {@value Capture#CLOSURE_ALGORITHM}, of these members and import lines.
-     * Every line comes from a manifest: OpenMetadata publishes no closure with a missing import or
-     * an import cycle, which no manifest could record.
-     */
-    String closureDigest(final TreeMap<String, String> members, final List<String> importLines) {
-      final MessageDigest sha256 = GraphDigest.sha256();
-      final List<String> lines = new ArrayList<>();
-      lines.add(CLOSURE_ALGORITHM);
-      lines.add("ontology <" + ontologyIri + ">");
-      lines.add("glossary <" + glossary + ">");
-      lines.add("selection " + selection);
-      members.forEach((graph, digest) -> lines.add("member <" + graph + "> " + digest));
-      lines.addAll(importLines);
-      for (final String line : lines) {
-        sha256.update((line + "\n").getBytes(StandardCharsets.UTF_8));
-      }
-      return GraphDigest.PREFIX + HexFormat.of().formatHex(sha256.digest());
-    }
-
-    private static Quad one(
-        final DatasetGraph dataset,
-        final Node graph,
-        final Node subject,
-        final Node predicate,
-        final Node object)
-        throws Refused {
-      final Iterator<Quad> quads =
-          dataset.find(graph, subject, predicate, object == null ? Node.ANY : object);
-      if (!quads.hasNext()) {
-        throw incomplete(graph, "has no " + predicate.getURI());
-      }
-      final Quad quad = quads.next();
-      if (quads.hasNext()) {
-        throw incomplete(graph, "has more than one " + predicate.getURI());
-      }
-      final Node value = quad.getObject();
-      final boolean literal =
-          predicate.equals(SELECTION)
-              || predicate.equals(CLOSURE_DIGEST)
-              || predicate.equals(ALGORITHM);
-      if (literal != value.isLiteral() || (!literal && !value.isURI())) {
-        throw incomplete(graph, "has a malformed " + predicate.getURI());
-      }
-      return quad;
-    }
-
-    private static Refused incomplete(final Node graph, final String what) {
-      return new Refused(
-          Problem.of(
-                  Problem.Code.MISSING_IMPORT,
-                  "Manifest <" + graph.getURI() + "> " + what + ", so it is not a manifest")
-              .withSubject(graph.getURI()));
+      header.see(triple);
+      writer.quad(Quad.create(graph, triple));
     }
   }
 
@@ -555,7 +369,7 @@ public final class Capture {
         throw new Refused(
             Problem.of(
                     Problem.Code.LIMIT_EXCEEDED,
-                    "The closure has more than "
+                    "The release has more than "
                         + bounds.maxTriples()
                         + " triples, more than its axiom limit admits")
                 .withSubject("maxClosureAxioms"));

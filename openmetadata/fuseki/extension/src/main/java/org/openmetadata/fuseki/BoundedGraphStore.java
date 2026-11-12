@@ -45,7 +45,9 @@ public final class BoundedGraphStore extends GSP_RW {
   public static final String QUERY_TIMEOUT_HEADER = "X-OpenMetadata-Query-Timeout-Ms";
   public static final String UPDATE_TIMEOUT_HEADER = "X-OpenMetadata-Update-Timeout-Ms";
   private static final long DEFAULT_TIMEOUT_MS = 50_000;
-  private static final long DEFAULT_MAX_BYTES = 64L * 1024 * 1024;
+
+  /** Also the largest job input a reasoning upload may carry unless its setting says otherwise. */
+  public static final long DEFAULT_MAX_BYTES = 64L * 1024 * 1024;
 
   private final long timeoutMillis;
   private final long maxBytes;

@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.openmetadata.fuseki.BoundedGraphStore;
 
 class JobSettingsTest {
   @TempDir Path directory;
@@ -31,6 +32,13 @@ class JobSettingsTest {
     assertEquals(168L * 3600 * 1000, settings.retentionMillis());
     assertEquals(-1, settings.diskQuotaBytes());
     assertEquals(25, settings.diskQuotaPercent());
+    assertEquals(
+        BoundedGraphStore.DEFAULT_MAX_BYTES,
+        settings.maxUploadBytes(),
+        "the same limit as a Graph Store upload");
+    assertEquals(
+        2L << 20,
+        JobSettings.fromEnvironment(Map.of(JobSettings.MAX_UPLOAD_BYTES, "2m")).maxUploadBytes());
   }
 
   @Test
