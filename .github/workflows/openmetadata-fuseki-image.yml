@@ -11,6 +11,9 @@
 
 # Builds, tests and publishes openmetadata/fuseki. Pull requests build and test only. Publishing
 # happens only for release/<fuseki-version> branches: on push, or on demand with the branch as input.
+# A publish pushes only the immutable <version>-<commit> tag, smoke-tests that pushed digest on amd64
+# and arm64, and only then points <version> at the same digest, so the moving tag never names an
+# image that was not tested as pushed.
 name: OpenMetadata Fuseki image
 
 on:
@@ -45,7 +48,13 @@ env:
 jobs:
   image:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # A publish runs the smoke test twice: on the local build, then on the pushed amd64 digest.
+    timeout-minutes: 90
+    outputs:
+      publish: ${{ steps.target.outputs.publish }}
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+      digest: ${{ steps.publish.outputs.digest }}
     steps:
       # Inputs are passed through env, never interpolated into the script, to avoid injection.
       - name: Decide whether this run publishes
@@ -96,6 +105,7 @@ jobs:
           {
             echo "version=$pinned"
             echo "commit=$(git rev-parse --short=7 HEAD)"
+            echo "sha=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v5
@@ -164,14 +174,91 @@ jobs:
           username: ${{ secrets.DOCKERHUB_OPENMETADATA_USERNAME }}
           password: ${{ secrets.DOCKERHUB_OPENMETADATA_TOKEN }}
 
+      # Only the immutable tag: the promote job moves <version> once both architectures pass.
       - name: Publish
+        id: publish
         if: steps.target.outputs.publish == 'true'
         uses: docker/build-push-action@v7
         with:
           context: ${{ env.CONTEXT }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.commit }}
+          tags: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.commit }}
           cache-from: type=gha
+
+      - name: Pull the pushed amd64 image by digest
+        if: steps.target.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The publish step reported no image digest: '$DIGEST'"
+            exit 1
+          fi
+          docker pull --platform linux/amd64 "$IMAGE@$DIGEST"
+          test "$(docker image inspect -f '{{.Architecture}}' "$IMAGE@$DIGEST")" = "amd64"
+
+      - name: Smoke test the pushed amd64 image
+        if: steps.target.outputs.publish == 'true'
+        working-directory: ${{ env.CONTEXT }}
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: ./test/smoke-test.sh "$IMAGE@$DIGEST"
+
+  # The same pushed digest on a native arm64 runner; QEMU emulation built it but never ran it.
+  smoke-arm64:
+    needs: image
+    if: needs.image.outputs.publish == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      # The smoke test reads the reasoner's conformance fixtures from the commit the image was built from.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.image.outputs.sha }}
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_OPENMETADATA_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_OPENMETADATA_TOKEN }}
+
+      - name: Pull the pushed arm64 image by digest
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          docker pull --platform linux/arm64 "$IMAGE@$DIGEST"
+          test "$(docker image inspect -f '{{.Architecture}}' "$IMAGE@$DIGEST")" = "arm64"
+
+      - name: Smoke test the pushed arm64 image
+        working-directory: ${{ env.CONTEXT }}
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: ./test/smoke-test.sh "$IMAGE@$DIGEST"
+
+  # Retags the tested manifest list without rebuilding: a single-source imagetools create copies it
+  # unchanged, so <version> resolves to exactly the digest both smoke tests ran.
+  promote:
+    needs: [image, smoke-arm64]
+    if: needs.image.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_OPENMETADATA_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_OPENMETADATA_TOKEN }}
+
+      - name: Point the release tag at the tested digest
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$IMAGE@$DIGEST"
+          promoted=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE:$VERSION" | jq -r .digest)
+          if [ "$promoted" != "$DIGEST" ]; then
+            echo "::error::$IMAGE:$VERSION resolves to $promoted, not the tested $DIGEST"
+            exit 1
+          fi
+          echo "$IMAGE:$VERSION -> $DIGEST"

@@ -35,7 +35,7 @@
     <owlapi.version>5.5.1</owlapi.version>
     <hermit.version>1.4.6.519-om.1</hermit.version>
     <elk.version>0.6.0</elk.version>
-    <guava.version>33.2.0-jre</guava.version>
+    <guava.version>33.7.2-jre</guava.version>
     <junit.version>5.11.4</junit.version>
     <surefire.version>3.1.2</surefire.version>
     <reasoner.directory>${project.build.directory}/reasoner</reasoner.directory>
@@ -178,6 +178,10 @@
           <exclusion>
             <groupId>com.google.errorprone</groupId>
             <artifactId>error_prone_annotations</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
           </exclusion>
         </exclusions>
       </dependency>

@@ -31,6 +31,9 @@ import java.util.regex.Pattern;
  * @param cpus OPENMETADATA_REASONER_CPUS: the worker's -XX:ActiveProcessorCount
  * @param fusekiHeap H_f from FUSEKI_HEAP or the last -Xmx in JVM_ARGS; -1 when JVM_ARGS sets none,
  *     and the JVM then defaults to a quarter of the container limit
+ * @param fusekiDirectMemory Fuseki's direct-buffer limit: the last -XX:MaxDirectMemorySize in
+ *     JVM_ARGS, else the {@link #DEFAULT_FUSEKI_DIRECT_MEMORY} the entrypoint appends; 0 when it is
+ *     the JVM's default, the maximum heap
  * @param fusekiBase FUSEKI_BASE, the data volume
  * @param fusekiHome FUSEKI_HOME, the read-only distribution in the image
  */
@@ -42,6 +45,7 @@ public record ReasoningSettings(
     int pageCacheFloorPercent,
     int cpus,
     long fusekiHeap,
+    long fusekiDirectMemory,
     Path fusekiBase,
     Path fusekiHome) {
 
@@ -52,6 +56,15 @@ public record ReasoningSettings(
   public static final String CPUS = "OPENMETADATA_REASONER_CPUS";
 
   public static final long DEFAULT_WORKER_HEAP = 2 * Sizes.GIB;
+
+  /**
+   * The direct-buffer limit the entrypoint gives Fuseki unless JVM_ARGS sets one. Fuseki allocates
+   * about 5 MiB of direct buffers per HTTP request and frees them only when a collection finds
+   * their owners, so under the JVM's default limit (the maximum heap) an idle server with a large
+   * heap held over 1 GiB of them; at the limit the JVM collects instead.
+   */
+  public static final long DEFAULT_FUSEKI_DIRECT_MEMORY = 256 * Sizes.MIB;
+
   public static final long MIN_WORKER_HEAP = 16 * Sizes.MIB;
 
   /**
@@ -137,6 +150,7 @@ public record ReasoningSettings(
     } else {
       fusekiHeap = Sizes.parse("FUSEKI_HEAP", environment.getOrDefault("FUSEKI_HEAP", "4g"));
     }
+    final long direct = Sizes.lastMaxDirectMemory(jvmArgs);
     return new ReasoningSettings(
         enabledValue.equals("true"),
         heap,
@@ -145,6 +159,7 @@ public record ReasoningSettings(
         floorPercent,
         cpus,
         fusekiHeap,
+        direct >= 0 ? direct : DEFAULT_FUSEKI_DIRECT_MEMORY,
         Path.of(environment.getOrDefault("FUSEKI_BASE", "/fuseki")),
         Path.of(environment.getOrDefault("FUSEKI_HOME", "/jena-fuseki")));
   }
@@ -164,10 +179,16 @@ public record ReasoningSettings(
   }
 
   /**
-   * O_f, Fuseki's off-heap budget: 1 GiB, or 1.5 GiB with an 8 GiB heap, until Native Memory
-   * Tracking measures it.
+   * O_f, Fuseki's off-heap budget: its direct-buffer limit plus 768 MiB for metaspace, code cache,
+   * thread stacks, GC structures and the VM, or 1.25 GiB from an 8 GiB heap, whose GC structures
+   * grow with it. Native Memory Tracking measured at most 291 MiB of the latter on a 4 GiB heap
+   * while OpenMetadata rebuilt and queried a 20,000-table catalog. With the default 256 MiB direct
+   * limit that is 1 GiB, or 1.5 GiB from an 8 GiB heap.
+   *
+   * @param fusekiDirectMemory the direct-buffer limit, or 0 when it is the JVM's default, the heap
    */
-  public static long fusekiOffHeap(final long fusekiHeap) {
-    return fusekiHeap >= 8 * Sizes.GIB ? 3 * Sizes.GIB / 2 : Sizes.GIB;
+  public static long fusekiOffHeap(final long fusekiHeap, final long fusekiDirectMemory) {
+    final long rest = fusekiHeap >= 8 * Sizes.GIB ? 5 * Sizes.GIB / 4 : 3 * Sizes.GIB / 4;
+    return rest + (fusekiDirectMemory > 0 ? fusekiDirectMemory : fusekiHeap);
   }
 }

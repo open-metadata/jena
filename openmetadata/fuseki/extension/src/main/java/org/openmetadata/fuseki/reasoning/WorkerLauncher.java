@@ -398,6 +398,10 @@ public final class WorkerLauncher {
           status = StepOutcome.Status.INCOMPLETE;
           reason = "TIME_BUDGET";
         }
+        case WorkerExitCodes.BUDGET -> {
+          status = StepOutcome.Status.INCOMPLETE;
+          reason = manifest == null ? "BUDGET" : string(manifest, "outcome");
+        }
         case WorkerExitCodes.SIGKILL -> {
           // The launcher sends SIGKILL only after its own deadline or a cancellation, both
           // handled above, so this one came from elsewhere: in a container, almost always the

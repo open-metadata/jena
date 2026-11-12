@@ -15,7 +15,7 @@ verified at build time against `dependencies.sha256`. HermiT is built from sourc
 | `axiom-api-1.2.14.jar`, `axiom-impl-1.2.14.jar`, `axiom-dom-1.2.14.jar`, `axiom-c14n-1.2.14.jar` | Apache Axiom 1.2.14 (HermiT: rdf:XMLLiteral canonicalization) | Apache-2.0 | https://ws.apache.org/axiom/ |
 | `geronimo-activation_1.1_spec-1.1.jar` | Apache Geronimo JavaBeans Activation API (Axiom) | Apache-2.0 | https://geronimo.apache.org/ |
 | `automaton-1.11-8.jar` | dk.brics.automaton (HermiT: datatype facets) | BSD-3-Clause (`dk.brics.automaton-BSD.txt`) | https://www.brics.dk/automaton/ |
-| `guava-33.2.0-jre.jar`, `failureaccess-1.0.2.jar` | Guava | Apache-2.0 | https://github.com/google/guava |
+| `guava-33.7.2-jre.jar`, `failureaccess-1.0.3.jar` | Guava | Apache-2.0 | https://github.com/google/guava |
 | `hppcrt-0.7.5.jar` | HPPC-RT collections (OWL API) | Apache-2.0 | https://github.com/vsonnier/hppcrt |
 | `commons-rdf-api-0.5.0.jar` | Apache Commons RDF API (OWL API) | Apache-2.0 | https://commons.apache.org/proper/commons-rdf/ |
 | `javax.inject-1.jar` | JSR-330 annotations (OWL API) | Apache-2.0 | https://github.com/javax-inject/javax-inject |

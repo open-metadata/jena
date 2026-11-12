@@ -43,6 +43,17 @@ class ReadinessTest {
   }
 
   @Test
+  void withoutADirectLimitFusekisWholeHeapCountsAsOffHeap() throws IOException {
+    cgroupV2(Long.toString(64 * GIB), 0);
+    final Map<String, String> environment = new HashMap<>();
+    environment.put("OPENMETADATA_REASONING_ENABLED", "true");
+    environment.put("JVM_ARGS", "-Xms2g -Xmx2g -XX:MaxDirectMemorySize=0");
+    environment.put("FUSEKI_BASE", root.resolve("fuseki").toString());
+    final Readiness readiness = evaluate(ReasoningSettings.fromEnvironment(environment), false);
+    assertEquals(3 * GIB / 4 + 2 * GIB, readiness.terms().get("fusekiOffHeap"));
+  }
+
+  @Test
   void notReadyReportsRequiredAndAvailableBytes() throws IOException {
     cgroupV2(Long.toString(4 * GIB), 0);
     final Readiness readiness = evaluate(settings("2g", "0"), false);

@@ -29,13 +29,15 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `FUSEKI_MANAGE_SHIRO` | `true` | `false` keeps an operator-provided `$FUSEKI_BASE/shiro.ini`; `ADMIN_PASSWORD` is then not required. |
 | `FUSEKI_DATASETS` | unset | Comma-separated dataset names. Each gets a TDB2 dataset config in `$FUSEKI_BASE/configuration/<name>.ttl` if that file does not exist. Existing files are never modified. |
 | `FUSEKI_HEAP` | `4g` | Sets both `-Xms` and `-Xmx`, so the page-cache budget is predictable. Ignored when `JVM_ARGS` is set. |
-| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended. |
+| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended, and so is `-XX:MaxDirectMemorySize=256m` unless `JVM_ARGS` sets that flag. |
 | `FUSEKI_QUERY_TIMEOUT_MS` | unset | Server-wide `arq:queryTimeout`, applied to every dataset including existing ones. |
 | `FUSEKI_UPDATE_TIMEOUT_MS` | unset | Server-wide `arq:updateTimeout`, applied to every dataset. |
 | `FUSEKI_UNION_DEFAULT_GRAPH` | `false` | `true` makes the default graph the union of named graphs for every TDB2 dataset. |
 | `OPENMETADATA_EXTENSION_ENABLED` | `false` | `true` loads the OpenMetadata Graph Store extension. |
 | `OPENMETADATA_WRITE_TIMEOUT_MS` | `50000` | Extension only: deadline for a Graph Store upload, after which it is rolled back. |
 | `OPENMETADATA_MAX_UPLOAD_BYTES` | `67108864` | Extension only: largest accepted upload; larger ones get HTTP 413. |
+| `OPENMETADATA_STORAGE_MIN_FREE` | `10%` | Extension only: free space the data volume keeps. Below it every write gets HTTP 507 Insufficient Storage, nothing is applied, and reads and compaction keep working. A size such as `20g`, or a percentage of the volume. See [Disk space](#disk-space). |
+| `OPENMETADATA_STORAGE_ROOT` | `$FUSEKI_BASE/databases` | Extension only: the directory holding the TDB2 datasets, which the write guard and the storage report measure. |
 | `OPENMETADATA_REASONING_ENABLED` | `false` | `true` lets the extension run reasoner workers once the memory budget fits. Needs `OPENMETADATA_EXTENSION_ENABLED=true`. See [Reasoner](#reasoner). |
 | `OPENMETADATA_REASONER_HEAP` | `2g` | Worker heap `H_w`, its `-Xms` and `-Xmx`. At least `16m`. |
 | `OPENMETADATA_REASONER_OFF_HEAP` | `512m` | Worker off-heap budget `O_w`. At least `512m`, what the worker's flags cap. |
@@ -73,6 +75,28 @@ guarantees are missing.
 
 When `OPENMETADATA_EXTENSION_ENABLED` is not `true`, the server runs with exactly the stock launch
 command: the extension's classes are never loaded.
+
+### Disk space
+
+TDB2 never reuses space on its own: every write transaction copies the index pages it touches, and the
+old pages stay on disk until the dataset is compacted (`POST /$/compact/<dataset>?deleteOld=true`).
+A dataset that only receives updates therefore grows until its volume is full. TDB2 memory-maps its
+files, so a write on a full volume does not fail cleanly: the JVM gets SIGBUS and exits, and keeps
+doing so on every restart. Compaction also needs free space about the size of the live data.
+
+The extension protects both:
+
+- **A write guard.** Below `OPENMETADATA_STORAGE_MIN_FREE`, SPARQL updates and Graph Store uploads and
+  deletes get HTTP 507 Insufficient Storage before they reach TDB2. Reads and compaction are not
+  refused, so the volume can always be compacted back above the reserve.
+- **A storage report.** `GET /$/openmetadata/storage` (admin only) returns the volume's
+  `totalBytes`, `usableBytes` and `reserveBytes`, and `lowOnSpace`, whether writes are refused.
+
+OpenMetadata reads the report to compact before the reserve is reached, and retries a 507 without
+counting it as a failed delivery.
+
+The image also starts the JVM with `-XX:-CreateCoredumpOnCrash`: a crash core dump is as large as
+the heap and lands on the node's disk rather than the data volume.
 
 ## Settings for OpenMetadata
 
@@ -162,6 +186,7 @@ worker on it. Every path a step names must stay inside its job directory.
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
 | `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
 | `COMPACT` | Compacts the dataset before it is published |
+| `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance graph ([Governance rules](#governance-rules)) |
 
 A closure is either the listed `closure.graphs` or, with `"allGraphs": true`, every named graph of
 the working dataset, as when it holds exactly one captured closure. An `owl:imports` target must be
@@ -188,12 +213,37 @@ records the limits a step ran with.
 | `maxExpressionDepth` | 32 | no |
 | `maxChecks` | 1,000 entailment checks per `CLASSIFY` | no |
 | `maxExplainChecks` | 1,000 consistency checks per `EXPLAIN`, each on a fresh reasoner | no |
+| `maxRules` | 256 rules in one `RULES` bundle, enabled or not | no |
+| `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
+| `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
+| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
+| `maxSpoolBytes` | 4 GiB, the file one `RULES` pass spools its solutions to | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
 transitive containment hierarchy with its inverse and three assertions each (297,000 triples,
 247,000 logical axioms) wrote 581,000 triples in 44 s and peaked at 0.67 GiB of a 2 GiB heap after
 collection. The axiom limit is lower than that, because terminological axioms cost the engines more
 than assertions.
+
+Measured again on the published `6.2.0-600514c` image (Apple M4 Max, `linux/arm64`, two worker
+processors), the same shape needs:
+
+| Individuals | Closure triples | Logical axioms | Peak after collection | Classifies in |
+|---:|---:|---:|---:|---|
+| 10,000 | 59,434 | 49,384 | 0.16–0.23 GiB | 512 MiB, in 9–10 s |
+| 20,000 | 118,823 | 98,773 | 0.27–0.36 GiB | 512 MiB, in 16–26 s |
+| 50,000 | 296,997 | 246,947 | 0.57–0.65 GiB | 1 GiB, in 46–88 s; a 512 MiB heap runs out |
+
+The 200,000-axiom limit of the default heap therefore admits about 40,000 individuals of this shape;
+the 50,000-individual closure needs `OPENMETADATA_REASONER_HEAP=2560m` or a `maxLogicalAxioms` in
+its step file.
+
+The `RULES` limits do not grow with the heap: the step keeps its solutions, facts and witnesses on
+disk, and its heap does not grow with them. The starter rules over a 551,735-triple lineage catalog
+derived 317,365 facts in 45 s and peaked at 43 MiB after collection in a 256 MiB heap; half that
+catalog peaked at 27 MiB. `maxNewFacts` and `maxSpoolBytes` bound the disk and time one refresh
+may take; `maxRules` and `maxPasses` match OpenMetadata's bundle size and its materializer's pass
+budget.
 
 Each step writes `<step>.result.json`, and the launcher writes `<step>.status.json` and
 `<step>.log`. A step file with `"report": true` also gets `<step>.report.txt`, a sorted listing of
@@ -207,7 +257,7 @@ one of:
 |---|---|
 | `SUCCEEDED` | The step completed; `reason` is its outcome, which may be `INCONSISTENT` |
 | `FAILED` | The step or its input was rejected (`INVALID_STEP`, `INVALID_INPUT`, `NOT_OWL2_DL`, `LIMIT_EXCEEDED`), or the worker failed |
-| `INCOMPLETE` | A budget ran out: `MEMORY_BUDGET` (the worker exhausted its heap, exit status 3, or was killed by a `SIGKILL` the launcher did not send, exit status 137, almost always the cgroup out-of-memory killer) or `TIME_BUDGET` (it passed its deadline); nothing it produced is complete |
+| `INCOMPLETE` | A budget ran out: `MEMORY_BUDGET` (the worker exhausted its heap, exit status 3, or was killed by a `SIGKILL` the launcher did not send, exit status 137, almost always the cgroup out-of-memory killer), `TIME_BUDGET` (it passed its deadline), or a `RULES` budget named by the manifest's outcome and `limit`, exit status 6: `PASS_BUDGET` (`maxPasses`), `FACT_BUDGET` (`maxNewFacts`) or `SPOOL_BUDGET` (`maxSpoolBytes`); nothing it produced is complete |
 | `INTERRUPTED` | The step was cancelled, or the worker was killed by another signal |
 | `NOT_READY` | The memory budget does not fit; no worker was started |
 | `BUSY` | Another worker is running; at most one runs per container. No status file is written, since the running step may be the same file |
@@ -228,6 +278,75 @@ After a step that did not succeed, it removes the step's exported closure and an
 `*.tmp` files from the job directory. A step's log keeps the first and the last 512 KiB of the
 worker's output. The worker inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `HOME` from
 the server's environment, so `ADMIN_PASSWORD` and JVM options meant for Fuseki never reach it.
+
+### Governance rules
+
+A `RULES` step runs OpenMetadata's governance rules, positive SPARQL `CONSTRUCT` rules such as PII
+propagation through column lineage, tag inheritance through containment and domain membership,
+over a working dataset that `LOAD` (and `CLASSIFY`, for ontology conclusions) filled:
+
+```json
+{"protocol": 1, "stepId": "rules", "kind": "RULES", "dataset": "working", "timeoutMillis": 600000,
+ "read": ["urn:capture:asserted", "urn:capture:context"],
+ "provenance": "urn:capture:provenance",
+ "rules": [{"name": "pii-propagation-via-lineage", "ruleBody": "PREFIX om: <...> CONSTRUCT {...} WHERE {...}",
+            "enabled": true, "priority": 200, "output": "urn:capture:inferred:pii-propagation-via-lineage"}],
+ "limits": {"maxPasses": 64}}
+```
+
+- `read` lists the graphs the rules read; they read the union of these and the output graphs, never
+  the provenance graph or any other graph. `urn:x-arq:DefaultGraph` names the default graph.
+- `rules` is OpenMetadata's rule shape (`name`, `ruleBody`, `ruleType`, `enabled`, `priority`,
+  `displayName`, `description`, `tags`) plus `output`, the graph a rule's conclusions go to, which
+  every enabled rule needs. Rules may share an output graph. Order and `priority` do not change the
+  result.
+- No output graph nor the provenance graph may be read, and no graph under
+  `urn:openmetadata:reasoner:` may be named: the step keeps its delta graphs there.
+
+**Admission.** Every rule, enabled or not, is checked on its SPARQL algebra before anything runs, and
+one invalid rule rejects the bundle (`INVALID_RULES`, every problem listed with its rule). The step
+accepts what OpenMetadata's own check accepts, a positive, finite `CONSTRUCT` that SPARQL 1.1 parses:
+no `OPTIONAL`, `MINUS`, `NOT EXISTS`, `BOUND`, or `EXISTS` other than as a condition the whole
+`FILTER` requires; no nondeterministic functions (`RAND`, `NOW`, `UUID`, `STRUUID`, `BNODE`,
+`fn:current-*`); no subqueries, aggregates, `LIMIT`, `OFFSET`, `ORDER BY` or `SERVICE`; no blank
+nodes in the template, and every template variable bound by a triple pattern, a property path or
+`VALUES`, never only by `BIND`. It is stricter in three places: `GRAPH`, `FROM` and `FROM NAMED` are
+refused, since rules read the selected union; only SPARQL's own functions, `fn:` functions and XSD
+casts may be called, never extension functions, and property functions are off, since both run code
+named by an IRI; and a rule has at most 16,384 characters, 32 template triples, `maxRulePatterns`
+patterns and 32 levels of nesting.
+
+**Evaluation.** The step first empties its output and provenance graphs, so it always recomputes from
+what it reads: a premise deleted since the last run takes every conclusion that only it supported
+with it, including conclusions around a cycle, and a conclusion with another support stays. It then
+runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later pass evaluates, for every
+triple pattern that can match the previous pass's new facts, the rule with that one pattern matching
+only them (a delta graph) and the rest matching everything, and with UNION branches that do not hold
+the pattern dropped. A solution that uses a new fact is found that way; one that does not was found
+before. A rule whose property path or EXISTS condition reads a predicate the delta holds is
+evaluated in full in that pass instead. A pass evaluates inside one read transaction and spools its
+solutions to a file in the job directory, bounded by `maxSpoolBytes`; it then reads the file back
+and applies the conclusions in write transactions of up to 500,000 solutions, never upgrading a read
+transaction. A conclusion already in a graph the rules read is not stored; one already in its rule's
+graph is a duplicate; any other goes into its rule's graph with a witness and, if no output graph
+had it, into the next delta. The step converges when a pass adds no new fact, and reports
+`CONVERGED` with per-pass and per-rule counts. Running out of passes, new facts or spool ends it
+`INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a step that does not converge leaves its
+output graphs partial and writes no run record, so its dataset must not be published.
+
+The starter rules ship with `transitive-lineage-closure` disabled: it stores every
+ancestor/descendant pair, which grows quadratically with lineage depth.
+
+**Witnesses and explanations.** For every fact it derives, the step records in the provenance graph
+the solution that first derived it: the rule, the pass and the values of the rule's variables. Those
+values are terms the dataset already holds, so a witness costs index entries, not node data. A
+converged run also records the graphs it read and every enabled rule's body and SHA-256 digest. The
+worker's `Explanations` API (used by a later `EXPLAIN` for governance facts) rebuilds a fact's
+premises from its witness, explains each premise in turn down to facts the rules read, reconstructs a
+property-path premise as one shortest chain of triples and an EXISTS condition as one match, and
+marks where it stopped at its depth, size and path bounds. A derived fact's premises were all present
+before the pass that derived it, so an explanation always ends at asserted facts. The provenance
+graph is never part of the serving union.
 
 ### Job operations
 
@@ -277,6 +396,9 @@ worker and interrupts its job. A request ID keeps returning its job as long as t
 run by hand, and refuses work at or over `OPENMETADATA_REASONING_DISK_QUOTA`. Finished jobs beyond
 `OPENMETADATA_REASONING_JOB_HISTORY` or older than `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` are
 removed, oldest first. Directories without a `job.json` are never removed.
+
+A job's worker steps report a `RULES` budget as `LIMIT_EXCEEDED` with the limit as its subject, and
+an invalid bundle as `RULE_FAILED`; no plan runs `RULES` yet.
 
 **What a job does in this release.** A `CHECK` runs `capture`, `load` and `classify`; an
 `EXPLAIN` runs `capture`, `load` and `explain`. The job's `outcome` is the protocol's answer:
@@ -425,13 +547,25 @@ container memory limit >= (H_f + O_f + H_w + O_w + C_min) / 0.9
 | Term | Meaning | Value |
 |---|---|---|
 | `H_f` | Fuseki heap | `FUSEKI_HEAP`, or the last `-Xmx` in `JVM_ARGS` |
-| `O_f` | Fuseki off-heap | 1 GiB, 1.5 GiB from an 8 GiB heap |
+| `O_f` | Fuseki off-heap | Its direct-buffer limit (`-XX:MaxDirectMemorySize`, 256 MiB unless `JVM_ARGS` sets it; 0 means the heap) plus 768 MiB, or 1.25 GiB from an 8 GiB heap: 1 GiB and 1.5 GiB by default |
 | `H_w` | Worker heap | `OPENMETADATA_REASONER_HEAP` |
 | `O_w` | Worker off-heap: metaspace, code cache and direct memory are capped at 256, 128 and 64 MiB | `OPENMETADATA_REASONER_OFF_HEAP` |
 | `C_min` | Page cache kept for serving | `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR`; 50% of `/fuseki/databases` by default |
 
 The limit is read from cgroup v2 `memory.max`, else cgroup v1, else physical memory when the
-container has no limit. The values of `O_f` and `O_w` are starting values until they are measured.
+container has no limit.
+
+`O_f` and `O_w` were measured with Native Memory Tracking (committed memory outside the heap) on
+Apple M4 Max hardware, in a `linux/arm64` container limited to 4 CPUs and 16 GiB:
+
+- **Fuseki**, 4 GiB heap, while OpenMetadata rebuilt a 20,000-table, 200,000-edge catalog (2.8
+  million triples) twice and queried it: direct buffers reached 1.5 GiB without a limit, because
+  Fuseki allocates about 5 MiB of them per HTTP request and frees them only when a collection finds
+  their owners; everything else outside the heap stayed under 300 MiB. The entrypoint therefore caps
+  direct buffers, and the JVM collects when it reaches the cap.
+- **Worker**, 2 GiB heap: at most 200 MiB outside the heap, on every conformance fixture and on
+  catalog-shaped closures of 10,000 to 50,000 individuals. The 512 MiB default leaves room for the
+  capped regions it was sized from.
 
 For example, `FUSEKI_HEAP=512m`, `OPENMETADATA_REASONER_HEAP=1g` and
 `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR=64m` need `(512 + 1024 + 1024 + 512 + 64) MiB / 0.9`, so
@@ -464,7 +598,7 @@ docker exec <container> /jena-fuseki/reasoner/bin/reasoner run /fuseki/reasoning
 docker exec <container> /jena-fuseki/reasoner/bin/reasoner command /fuseki/reasoning/jobs/<job>/<step>.json
 ```
 
-`readiness` prints the budget as JSON, with `status` (`READY`, `NOT_READY` or `DISABLED`),
+Any step file runs this way, a `RULES` step included. `readiness` prints the budget as JSON, with `status` (`READY`, `NOT_READY` or `DISABLED`),
 `requiredBytes`, `availableBytes`, `limitSource`, each term, Fuseki's current anonymous memory and
 the reasons. `command` prints the worker's launch command:
 
@@ -537,6 +671,13 @@ The image build downloads the release from Apache's CDN, falling back to the arc
 published SHA-512. The extension is compiled against the exact `fuseki-server.jar` it runs with, so an
 incompatible Fuseki fails the build. The smoke test needs `docker`, `curl`, `awk` and `jq`.
 
+Fuseki 6.2.0 bundles Apache Shiro 2.2.1 and Micrometer 1.17.0 inside `fuseki-server.jar`, and both
+carry published CVEs. The `server` stage of the Dockerfile replaces them with the releases listed in
+`server-jar/replacements.sha256`, downloaded from Maven Central and checked by SHA-256; the rest of
+Apache's jar is unchanged. Fuseki's own classes call the same Shiro and Micrometer methods when
+compiled against the new releases, and Fuseki's test suite gives the same results on them. Drop the
+stage when a Fuseki release ships fixed versions of both.
+
 The reasoner depends on OpenMetadata's HermiT build, which has no release yet. Install it once from
 the commit the Dockerfile pins, as the image build and the workflow do:
 
@@ -573,5 +714,24 @@ Images are published only from `release/<fuseki-version>` branches, never from `
 is cut from the matching upstream tag (`jena-6.2.0` for `release/6.2.0`), and its name must match the
 `FUSEKI_VERSION` in the Dockerfile.
 
+A publish (a push to the release branch, or a manual run of the workflow with the branch as input)
+runs in three jobs of `.github/workflows/openmetadata-fuseki-image.yml`:
+
+1. **Build and push.** After the extension, reasoner and local smoke tests pass, it pushes one
+   multi-architecture image (`linux/amd64`, `linux/arm64`) under the immutable tag
+   `<version>-<commit>` only, then pulls the pushed amd64 image by its digest and runs
+   `test/smoke-test.sh <image>@<digest>` against it.
+2. **arm64.** A native arm64 runner pulls the same digest for `linux/arm64` and runs the same smoke
+   test. The build ran arm64 only under emulation; this is the first time it starts natively.
+3. **Promote.** Once both pass, `docker buildx imagetools create` points `<version>` at that digest
+   without rebuilding, and the job fails unless `<version>` then resolves to exactly the tested digest.
+
+So `<version>` moves only to a digest that passed the smoke test on both architectures as pushed.
+A `<version>-<commit>` tag whose run failed after the push stays in the registry but is never
+promoted; do not use it. Pull requests build and smoke-test the image and publish nothing. Pin
+`<version>-<commit>`, or `<version>@<digest>`, in tests and deployments; `<version>` moves with
+each release build.
 Each publish pushes two tags for `linux/amd64` and `linux/arm64`: `<version>`, which moves to the latest
-build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in tests.
+build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in deployments
+and tests: with `imagePullPolicy: IfNotPresent`, a node that already has `<version>` never pulls a
+rebuild of it.
