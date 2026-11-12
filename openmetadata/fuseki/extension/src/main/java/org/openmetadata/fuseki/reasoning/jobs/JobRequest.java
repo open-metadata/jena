@@ -39,10 +39,9 @@ import org.apache.jena.atlas.json.JsonValue;
 /**
  * A job request, validated against OpenMetadata's rdfReasoningJobRequest.json and the schemas it
  * references (ontologyExpression, rdfStatement, inferenceRule), including the per-operation and
- * per-check requirements of OpenMetadata pull request 35199. The store implements the protocol from
- * those schemas without OpenMetadata's classes, so every rule is checked here and pinned by tests
- * that load OpenMetadata's own examples. One rule the schema states only in prose is enforced too:
- * a REFRESH accepts only the APPROVED ontology selection.
+ * per-check requirements. The store implements the protocol from those schemas without
+ * OpenMetadata's classes, so every rule is checked here and pinned by tests that load
+ * OpenMetadata's own examples.
  *
  * @param digest SHA-256 of the request in a canonical form, to tell a retry from a different
  *     request that reuses its ID
@@ -71,7 +70,10 @@ public record JobRequest(
           "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
   private static final Pattern DIGEST = Pattern.compile("sha256:[0-9a-f]{64}");
   private static final Pattern RULE_NAME = Pattern.compile("[a-z][a-z0-9-]{1,62}[a-z0-9]");
-  private static final Set<String> SELECTIONS = Set.of("APPROVED", "CANDIDATE");
+  private static final Pattern CONTENT_DIGEST = Pattern.compile("[a-f0-9]{64}");
+
+  /** The only encoding of a job input the store reads. */
+  public static final String RELEASE_MEDIA_TYPE = "application/rdf+thrift";
 
   /** Thrown with every violation found, up to a bound; the message lists them. */
   public static final class Invalid extends Exception {
@@ -145,12 +147,7 @@ public record JobRequest(
   public JsonObject input() {
     final JsonObject input = new JsonObject();
     for (final String key :
-        List.of(
-            "sourceRevision",
-            "ontologySelection",
-            "ontologyIri",
-            "ontologyDigest",
-            "ruleBundleDigest")) {
+        List.of("sourceRevision", "ontologyReleases", "releaseRdf", "ruleBundleDigest")) {
       if (document.hasKey(key)) {
         input.put(key, JSON.copy(document.get(key)));
       }
@@ -236,22 +233,19 @@ public record JobRequest(
               "requestId",
               "operation",
               "sourceRevision",
-              "ontologySelection",
-              "ontologyIri",
-              "ontologyDigest",
+              "ontologyReleases",
+              "releaseRdf",
               "ruleBundleDigest",
               "rules",
               "check",
               "explain"),
-          List.of("requestId", "operation", "sourceRevision", "ontologySelection"));
+          List.of("requestId", "operation", "sourceRevision", "ontologyReleases"));
       uuid(json.get("requestId"), "requestId");
       final String operation =
           choice(json.get("operation"), "operation", Set.of("REFRESH", "CHECK", "EXPLAIN"));
       sourceRevision(json.get("sourceRevision"));
-      final String selection =
-          choice(json.get("ontologySelection"), "ontologySelection", SELECTIONS);
-      optional(json, "ontologyIri", value -> uri(value, "ontologyIri"));
-      optional(json, "ontologyDigest", value -> digest(value, "ontologyDigest"));
+      final int releases = ontologyReleases(json.get("ontologyReleases"));
+      optional(json, "releaseRdf", this::releaseRdf);
       optional(json, "ruleBundleDigest", value -> digest(value, "ruleBundleDigest"));
       optional(json, "rules", this::rules);
       optional(json, "check", this::check);
@@ -261,13 +255,66 @@ public record JobRequest(
       }
       switch (operation) {
         case "REFRESH" -> {
-          requireFor(json, operation, "ruleBundleDigest");
-          if ("CANDIDATE".equals(selection)) {
-            error("ontologySelection: a REFRESH accepts only APPROVED");
+          requireFor(json, operation, "ruleBundleDigest", "rules");
+          if (json.hasKey("releaseRdf")) {
+            error("releaseRdf: is not accepted for REFRESH");
           }
         }
-        case "CHECK" -> requireFor(json, operation, "ontologyIri", "check");
-        default -> requireFor(json, operation, "ontologyIri", "explain");
+        default -> {
+          requireFor(
+              json, operation, "releaseRdf", operation.equals("CHECK") ? "check" : "explain");
+          if (releases >= 0 && releases != 1) {
+            error("ontologyReleases: must have exactly 1 item for " + operation);
+          }
+        }
+      }
+    }
+
+    /** The number of releases, or -1 when the field is absent or not an array. */
+    private int ontologyReleases(final JsonValue value) {
+      if (value == null) {
+        return -1;
+      }
+      final JsonArray releases = array(value, "ontologyReleases", 1000);
+      if (releases == null) {
+        return -1;
+      }
+      final Set<String> seen = new HashSet<>();
+      for (int i = 0; i < releases.size(); i++) {
+        final String path = "ontologyReleases[" + i + "]";
+        final JsonObject release =
+            object(
+                releases.get(i),
+                path,
+                Set.of("ontologyId", "releaseId", "contentDigest"),
+                List.of("ontologyId", "releaseId", "contentDigest"));
+        if (release == null) {
+          continue;
+        }
+        uuid(release.get("ontologyId"), path + ".ontologyId");
+        uuid(release.get("releaseId"), path + ".releaseId");
+        final String content = string(release.get("contentDigest"), path + ".contentDigest");
+        if (content != null && !CONTENT_DIGEST.matcher(content).matches()) {
+          error(path + ".contentDigest: must be 64 lowercase hexadecimal digits");
+        }
+        if (!seen.add(JSON.toStringFlat(release))) {
+          error("ontologyReleases: items must be unique");
+        }
+      }
+      return releases.size();
+    }
+
+    private void releaseRdf(final JsonValue value) {
+      final JsonObject json =
+          object(
+              value,
+              "releaseRdf",
+              Set.of("digest", "byteSize", "mediaType"),
+              List.of("digest", "byteSize", "mediaType"));
+      if (json != null) {
+        digest(json.get("digest"), "releaseRdf.digest");
+        integer(json.get("byteSize"), "releaseRdf.byteSize", 1L, null);
+        choice(json.get("mediaType"), "releaseRdf.mediaType", Set.of(RELEASE_MEDIA_TYPE));
       }
     }
 
