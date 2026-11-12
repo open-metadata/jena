@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.jena.atlas.json.JSON;
+import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.dboe.base.file.Location;
 import org.apache.jena.graph.NodeFactory;
@@ -52,9 +53,9 @@ import org.openmetadata.fuseki.reasoning.ReasoningSettings;
  * Measures a REFRESH of a catalog-sized serving dataset: 5,000 tables (or {@code
  * -Dreasoning.performance.tables}) of 10 columns with lineage from each table to the next, tags on
  * schemas, tables and source columns, and a description on every column that no rule reads; and one
- * activated closure of 1,000 term graphs. A reader and a writer use the serving dataset for ten
- * seconds before the refresh and all through it; their slowest operations in each period are
- * recorded. Run with {@code -Dreasoning.performance=true}; it writes
+ * active release of 1,000 classes in its ontology's graph. A reader and a writer use the serving
+ * dataset for ten seconds before the refresh and all through it; their slowest operations in each
+ * period are recorded. Run with {@code -Dreasoning.performance=true}; it writes
  * target/refresh-performance.json.
  */
 @EnabledIfSystemProperty(named = "reasoning.performance", matches = "true")
@@ -65,8 +66,9 @@ class RefreshPerformanceIT {
   private static final String OM = "https://open-metadata.org/ontology/";
   private static final String C = "https://open-metadata.org/catalog/";
   private static final String KNOWLEDGE = BASE + "graph/knowledge";
-  private static final String ROOT = BASE + "ontology/business";
-  private static final String GLOSSARY = BASE + "glossary/business";
+  private static final String ONTOLOGY_IRI = BASE + "ontology/business";
+  private static final String ONTOLOGY_ID = "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b";
+  private static final String RELEASE_ID = "8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d";
   private static final int TABLES = Integer.getInteger("reasoning.performance.tables", 5_000);
   private static final long BASELINE_MILLIS = 10_000;
   private static final int COLUMNS = 10;
@@ -79,22 +81,14 @@ class RefreshPerformanceIT {
     final Path location = root.resolve("serving");
     final long loaded = load(location);
     final DatasetGraph serving = DatabaseMgr.connectDatasetGraph(Location.create(location));
-    final List<String> members = new ArrayList<>();
-    for (int t = 0; t < TERMS; t++) {
-      members.add(BASE + "graph/glossaryTerm/" + t);
+    final JsonArray rules = new JsonArray();
+    for (final String name :
+        List.of(
+            "pii-propagation-via-lineage",
+            "schema-tag-inheritance",
+            "domain-membership-inheritance")) {
+      rules.add(Bundles.starter(name).toJson());
     }
-    Bundles.members(serving, BASE, members);
-    final Manifests.Published closure =
-        Manifests.publish(serving, BASE, ROOT, GLOSSARY, "APPROVED", members, List.of());
-    Bundles.activate(serving, BASE, Map.of(GLOSSARY, closure));
-    final String bundle =
-        Bundles.publish(
-            serving,
-            BASE,
-            List.of(
-                Bundles.starter("pii-propagation-via-lineage"),
-                Bundles.starter("schema-tag-inheritance"),
-                Bundles.starter("domain-membership-inheritance")));
 
     final ImageLayout image = ImageLayout.create(root.resolve("image"), FUSEKI_SERVER, REASONER);
     final ReasoningSettings settings = image.settings("1g");
@@ -174,8 +168,18 @@ class RefreshPerformanceIT {
           JSON.parse(
               "{\"datasetGeneration\": \"9d72cf3b-3657-4ee3-809c-5bc70b9308bd\","
                   + " \"liveWriteWatermark\": 1}"));
-      request.put("ontologySelection", "APPROVED");
-      request.put("ruleBundleDigest", bundle);
+      request.put(
+          "ontologyReleases",
+          JSON.parseAny(
+              "[{\"ontologyId\": \""
+                  + ONTOLOGY_ID
+                  + "\", \"releaseId\": \""
+                  + RELEASE_ID
+                  + "\", \"contentDigest\": \""
+                  + "0".repeat(64)
+                  + "\"}]"));
+      request.put("rules", rules);
+      request.put("ruleBundleDigest", Bundles.digest(rules));
       final long start = System.nanoTime();
       final UUID id =
           UUID.fromString(
@@ -333,8 +337,23 @@ class RefreshPerformanceIT {
           }
         }
       }
+      final String graph = " <" + Capture.ONTOLOGY_GRAPH_PREFIX + ONTOLOGY_ID + "> .\n";
+      out.write(
+          "<"
+              + ONTOLOGY_IRI
+              + "> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
+              + " <http://www.w3.org/2002/07/owl#Ontology>"
+              + graph);
+      out.write(
+          "<"
+              + ONTOLOGY_IRI
+              + "> <http://www.w3.org/2002/07/owl#versionIRI> <"
+              + Capture.RELEASE_IRI_PREFIX
+              + RELEASE_ID
+              + ">"
+              + graph);
+      triples += 2;
       for (int t = 0; t < TERMS; t++) {
-        final String graph = " <" + BASE + "graph/glossaryTerm/" + t + "> .\n";
         final String term = "<" + BASE + "business#Term" + t + ">";
         out.write(
             term

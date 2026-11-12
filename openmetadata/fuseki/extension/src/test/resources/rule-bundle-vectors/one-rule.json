@@ -1,7 +1,0 @@
-[
-  {
-    "name": "copy-p-to-q",
-    "ruleType": "CONSTRUCT",
-    "ruleBody": "PREFIX : <http://example.org/>\nCONSTRUCT { ?x :q ?y } WHERE { ?x :p ?y }\n"
-  }
-]

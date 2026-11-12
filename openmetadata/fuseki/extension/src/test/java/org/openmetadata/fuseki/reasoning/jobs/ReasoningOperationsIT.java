@@ -12,9 +12,12 @@
  */
 package org.openmetadata.fuseki.reasoning.jobs;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
@@ -49,6 +52,7 @@ import org.openmetadata.fuseki.reasoning.ReasoningSettings;
  * README.md documents for a non-admin service account. Jobs run a stand-in worker process.
  */
 class ReasoningOperationsIT {
+  private static final String RDF = "application/rdf+thrift";
   private static final Path IMAGE_SHIRO = Path.of("..", "shiro.ini");
   private static final String SLOW_TO_STOP =
       "trap 'sleep 1; touch stopped; exit 143' TERM; touch started;"
@@ -180,12 +184,71 @@ class ReasoningOperationsIT {
         "INVALID_REQUEST");
   }
 
+  @Test
+  void inputsAreHeldByTheirDigestWithTheStatusesTheReadmeDocuments() throws Exception {
+    start(
+        resource("shiro/reasoning-service-account.ini"),
+        worker("exit 0"),
+        Map.of(JobSettings.MAX_UPLOAD_BYTES, "1m"));
+    final byte[] release = Releases.of("").rdf();
+    final String hex = Releases.hash(release);
+    final String path = "/reasoning/inputs/sha256:" + hex;
+
+    assertEquals(401, put(path, null, null, RDF, release).statusCode());
+    assertEquals(403, put(path, "reader", "reader-pw", RDF, release).statusCode());
+    final HttpResponse<String> created = put(path, "openmetadata", "service-pw", RDF, release);
+    assertEquals(201, created.statusCode(), created.body());
+    final JsonObject stored = JSON.parse(created.body());
+    assertEquals("sha256:" + hex, stored.getString("digest"));
+    assertEquals(release.length, stored.getNumber("byteSize").intValue());
+    assertArrayEquals(
+        release, Files.readAllBytes(settings().reasoningRoot().resolve("inputs").resolve(hex)));
+    assertEquals(200, put(path, "openmetadata", "service-pw", RDF, release).statusCode());
+
+    assertProblem(put(path, "admin", "admin-pw", RDF, bytes("other")), 400, "INVALID_REQUEST");
+    assertProblem(put(path, "admin", "admin-pw", "text/turtle", release), 415, "INVALID_REQUEST");
+    final byte[] large = new byte[(1 << 20) + 1];
+    final String largePath = "/reasoning/inputs/sha256:" + Releases.hash(large);
+    final HttpResponse<String> declared = put(largePath, "admin", "admin-pw", RDF, large);
+    assertProblem(declared, 413, "LIMIT_EXCEEDED");
+    assertEquals("maxUploadBytes", JSON.parse(declared.body()).getString("subject"));
+    final HttpResponse<String> streamed =
+        client.send(
+            authorized(HttpRequest.newBuilder(uri(largePath)), "admin", "admin-pw")
+                .header("Content-Type", RDF)
+                .PUT(
+                    HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(large)))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    assertProblem(streamed, 413, "LIMIT_EXCEEDED");
+    assertFalse(
+        Files.exists(settings().reasoningRoot().resolve("inputs").resolve(Releases.hash(large))));
+
+    assertProblem(
+        put("/reasoning/inputs/sha256:abc", "admin", "admin-pw", RDF, release),
+        404,
+        "INVALID_REQUEST");
+    assertProblem(
+        put("/reasoning/inputs/md5:" + hex, "admin", "admin-pw", RDF, release),
+        404,
+        "INVALID_REQUEST");
+    final HttpResponse<String> read = get(path, "admin", "admin-pw");
+    assertProblem(read, 405, "INVALID_REQUEST");
+    assertEquals("PUT", read.headers().firstValue("Allow").orElseThrow());
+  }
+
   private void start(final Path shiro, final Stage.Planner planner) throws IOException {
+    start(shiro, planner, Map.of());
+  }
+
+  private void start(
+      final Path shiro, final Stage.Planner planner, final Map<String, String> jobEnvironment)
+      throws IOException {
     final FakeWorkers workers = workers();
     final ReasoningSettings settings = workers.settings(Map.of());
     service =
         new JobService(
-            new Operations(settings, JobSettings.fromEnvironment(Map.of())),
+            new Operations(settings, JobSettings.fromEnvironment(jobEnvironment)),
             workers.launcher(settings),
             () -> workers.readiness(settings),
             planner,
@@ -274,6 +337,25 @@ class ReasoningOperationsIT {
 
   private HttpResponse<String> post(final String path, final String body) throws Exception {
     return post(path, "admin", "admin-pw", body);
+  }
+
+  private HttpResponse<String> put(
+      final String path,
+      final String user,
+      final String password,
+      final String contentType,
+      final byte[] body)
+      throws Exception {
+    return client.send(
+        authorized(HttpRequest.newBuilder(uri(path)), user, password)
+            .header("Content-Type", contentType)
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(body))
+            .build(),
+        HttpResponse.BodyHandlers.ofString());
+  }
+
+  private static byte[] bytes(final String text) {
+    return text.getBytes(StandardCharsets.UTF_8);
   }
 
   private HttpResponse<String> delete(final String path) throws Exception {

@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 import org.apache.jena.atlas.json.JSON;
@@ -43,35 +44,24 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * A REFRESH capture from a real TDB2 dataset laid out as OpenMetadata writes it: the active
- * closures, verified, and the catalog triples the rules read, without Draft, control or derived
- * graphs.
+ * A REFRESH capture from a real TDB2 dataset laid out as OpenMetadata writes it: the listed
+ * releases, each in its ontology's graph, and the catalog triples the rules read, without any other
+ * ontology, staging or derived graph.
  */
 class RefreshCaptureTest {
   private static final String BASE = "https://open-metadata.org/";
   private static final String GRAPH = BASE + "graph/";
-  private static final String OM = "https://open-metadata.org/ontology/";
-  private static final String ROOT = BASE + "ontology/finance";
-  private static final String GLOSSARY = BASE + "glossary/finance";
+  private static final String OM = BASE + "ontology/";
   private static final String RULE =
       "PREFIX om: <"
           + OM
           + "> CONSTRUCT { ?d om:hasTag ?t } WHERE { ?u om:hasTag ?t ."
           + " ?l om:fromColumn ?u ; om:toColumn ?d }";
+  private static final String SECOND_ONTOLOGY_IRI = BASE + "ontology/risk";
 
   private static final String LAYOUT =
       """
-PREFIX owl: <http://www.w3.org/2002/07/owl#>
 PREFIX om: <https://open-metadata.org/ontology/>
-PREFIX omr: <https://open-metadata.org/reasoning/>
-GRAPH <https://open-metadata.org/graph/glossaryTerm/asset> {
-  <https://open-metadata.org/finance#Asset> a owl:Class .
-}
-GRAPH <https://open-metadata.org/graph/axiom/draft> { <urn:c:x> om:hasTag <urn:t:draft> . }
-GRAPH <https://open-metadata.org/graph/ontology/members> {
-  <https://open-metadata.org/graph/glossaryTerm/asset> a omr:OntologyGraph .
-  <https://open-metadata.org/graph/axiom/draft> a omr:OntologyGraph .
-}
 GRAPH <https://open-metadata.org/graph/knowledge> {
   <urn:c:a> om:hasTag <urn:t:pii> ; om:description "not read by the rules" .
   <urn:l:1> om:fromColumn <urn:c:a> ; om:toColumn <urn:c:b> .
@@ -79,42 +69,22 @@ GRAPH <https://open-metadata.org/graph/knowledge> {
 GRAPH <https://open-metadata.org/graph/lineage> { <urn:l:2> om:fromColumn <urn:c:b> . }
 GRAPH <https://open-metadata.org/graph/inferred/old-rule> { <urn:c:z> om:hasTag <urn:t:pii> . }
 GRAPH <urn:openmetadata:inferred:old-rule> { <urn:c:y> om:hasTag <urn:t:pii> . }
+GRAPH <https://open-metadata.org/graph/staging/knowledge-7> { <urn:c:s> om:hasTag <urn:t:staged> . }
+GRAPH <https://open-metadata.org/graph/ontology/00000000-0000-4000-8000-00000000dead> {
+  <urn:c:u> om:hasTag <urn:t:unlisted> .
+}
 """;
 
   @TempDir Path root;
   private DatasetGraph serving;
-  private Manifests.Published closure;
-  private String bundle;
+  private Releases.Release finance;
 
   @BeforeEach
   void layOut() {
     serving = DatabaseMgr.connectDatasetGraph(Location.create(root.resolve("serving")));
     Txn.executeWrite(serving, () -> RDFParser.fromString(LAYOUT, Lang.TRIG).parse(serving));
-    closure =
-        Manifests.publish(
-            serving,
-            BASE,
-            ROOT,
-            GLOSSARY,
-            "APPROVED",
-            List.of(GRAPH + "glossaryTerm/asset"),
-            List.of());
-    activate(closure.digest());
-    final List<RuleBundle.Rule> rules = List.of(new RuleBundle.Rule("pii", "CONSTRUCT", RULE));
-    bundle = RuleBundle.digest(rules);
-    final Node graph = NodeFactory.createURI(GRAPH + "rules/bundle/" + bundle.substring(7));
-    final Node rule = NodeFactory.createURI(graph.getURI() + "/rule/pii");
-    Txn.executeWrite(
-        serving,
-        () -> {
-          serving.add(graph, graph, omr("bundleDigest"), NodeFactory.createLiteralString(bundle));
-          serving.add(
-              graph, graph, omr("digestAlgorithm"), NodeFactory.createLiteralString("om-rules-v1"));
-          serving.add(graph, graph, omr("rule"), rule);
-          serving.add(graph, rule, omr("ruleName"), NodeFactory.createLiteralString("pii"));
-          serving.add(graph, rule, omr("ruleType"), NodeFactory.createLiteralString("CONSTRUCT"));
-          serving.add(graph, rule, omr("ruleBody"), NodeFactory.createLiteralString(RULE));
-        });
+    finance = Releases.of(":Asset a owl:Class .\n");
+    activate(finance);
   }
 
   @AfterEach
@@ -123,10 +93,13 @@ GRAPH <urn:openmetadata:inferred:old-rule> { <urn:c:y> om:hasTag <urn:t:pii> . }
   }
 
   @Test
-  void capturesTheClosuresAndOnlyTheCatalogTriplesTheRulesRead() throws Exception {
-    final RefreshCapture.Result result = capture(null, Long.MAX_VALUE);
+  void capturesTheListedReleasesAndOnlyTheCatalogTriplesTheRulesRead() throws Exception {
+    final RefreshCapture.Result result = capture(List.of(release(finance)), Long.MAX_VALUE);
     assertEquals(1, result.closures().size());
-    assertEquals(closure.digest(), result.closures().get(0).closureDigest());
+    final RefreshCapture.Closure closure = result.closures().get(0);
+    assertEquals(finance.releaseId().toString(), closure.releaseId());
+    assertEquals(Releases.ONTOLOGY_IRI, closure.ontologyIri());
+    assertEquals(Capture.RELEASE_IRI_PREFIX + finance.releaseId(), closure.versionIri());
     assertEquals(Set.of(OM + "fromColumn", OM + "hasTag", OM + "toColumn"), result.predicates());
     assertEquals(List.of(GRAPH + "knowledge", GRAPH + "lineage"), sorted(result.catalogGraphs()));
     assertEquals(4, result.catalogTriples());
@@ -135,10 +108,9 @@ GRAPH <urn:openmetadata:inferred:old-rule> { <urn:c:y> om:hasTag <urn:t:pii> . }
     final Set<String> graphs = new TreeSet<>();
     spool.listGraphNodes().forEachRemaining(graph -> graphs.add(graph.getURI()));
     assertEquals(
-        Set.of(
-            closure.graph(), GRAPH + "glossaryTerm/asset", GRAPH + "knowledge", GRAPH + "lineage"),
+        Set.of(releaseGraph(finance), GRAPH + "knowledge", GRAPH + "lineage"),
         graphs,
-        "no Draft, member, activation, bundle or derived graph");
+        "neither the unlisted ontology, a staging nor a derived graph");
     assertFalse(
         spool.contains(Node.ANY, Node.ANY, NodeFactory.createURI(OM + "description"), Node.ANY),
         "a predicate no rule reads");
@@ -146,79 +118,128 @@ GRAPH <urn:openmetadata:inferred:old-rule> { <urn:c:y> om:hasTag <urn:t:pii> . }
     final List<String> read =
         Files.readAllLines(root.resolve("job").resolve(RefreshCapture.READ_FILE));
     assertTrue(read.contains(GRAPH + "knowledge"));
-    assertTrue(read.contains(GRAPH + "glossaryTerm/asset"));
-    assertTrue(read.contains(RefreshCapture.entailmentGraph(closure.digest())));
+    assertTrue(read.contains(releaseGraph(finance)));
+    assertTrue(read.contains(RefreshCapture.entailmentGraph(closure.releaseId())));
     final JsonArray rules =
         JSON.parseAny(Files.readString(root.resolve("job").resolve(RefreshCapture.RULES_FILE)))
             .getAsArray();
     assertEquals("pii", rules.get(0).getAsObject().getString("name"));
     assertEquals(
-        List.of(GRAPH + "glossaryTerm/asset", closure.graph()),
-        sorted(
-            Files.readAllLines(
-                root.resolve("job").resolve(result.closures().get(0).graphsFile()))));
+        List.of(releaseGraph(finance)),
+        Files.readAllLines(root.resolve("job").resolve(closure.graphsFile())));
   }
 
   @Test
-  void theActivationDigestPinsTheActiveClosures() throws Exception {
-    final String digest = RefreshCapture.activationDigest(RefreshCapture.activations(readOnly()));
-    assertEquals(digest, capture(digest, Long.MAX_VALUE).activationDigest());
+  void everyListedReleaseIsItsOwnClosure() throws Exception {
+    final UUID releaseId = UUID.randomUUID();
+    final Releases.Release second =
+        Releases.raw(
+            UUID.randomUUID(),
+            releaseId,
+            "<%s> a owl:Ontology ; owl:versionIRI <%s%s> .\n:Risk a owl:Class .\n"
+                .formatted(SECOND_ONTOLOGY_IRI, Capture.RELEASE_IRI_PREFIX, releaseId));
+    activate(second);
+    final RefreshCapture.Result result =
+        capture(List.of(release(finance), release(second)), Long.MAX_VALUE);
+    assertEquals(
+        List.of(Releases.ONTOLOGY_IRI, SECOND_ONTOLOGY_IRI),
+        result.closures().stream().map(RefreshCapture.Closure::ontologyIri).toList());
+    assertEquals(
+        List.of(
+            RefreshCapture.entailmentGraph(finance.releaseId().toString()),
+            RefreshCapture.entailmentGraph(second.releaseId().toString())),
+        result.closures().stream().map(RefreshCapture.Closure::entailments).toList());
+    assertEquals(
+        List.of(releaseGraph(second)),
+        Files.readAllLines(root.resolve("job").resolve(result.closures().get(1).graphsFile())));
+  }
+
+  @Test
+  void aRefreshWithoutActiveReleasesStillRunsTheRulesOverTheCatalog() throws Exception {
+    final RefreshCapture.Result result = capture(List.of(), Long.MAX_VALUE);
+    assertEquals(List.of(), result.closures());
+    assertEquals(4, result.catalogTriples());
+    assertEquals(
+        List.of(GRAPH + "knowledge", GRAPH + "lineage"),
+        Files.readAllLines(root.resolve("job").resolve(RefreshCapture.READ_FILE)).stream()
+            .sorted()
+            .toList());
+  }
+
+  @Test
+  void aGraphThatStatesAnotherReleaseIsInputChanged() {
+    final RefreshCapture.Release newer =
+        new RefreshCapture.Release(
+            finance.ontologyId().toString(), UUID.randomUUID().toString(), "0".repeat(64));
+    final Capture.Refused refused =
+        assertThrows(Capture.Refused.class, () -> capture(List.of(newer), Long.MAX_VALUE));
+    assertEquals(Problem.Code.INPUT_CHANGED, refused.problem().code());
+    assertEquals(finance.ontologyId().toString(), refused.problem().subject());
+    assertFalse(Files.exists(root.resolve("job").resolve(Plans.SPOOL)));
+  }
+
+  @Test
+  void aListedReleaseWhoseGraphIsMissingIsInputChanged() {
+    final RefreshCapture.Release gone =
+        new RefreshCapture.Release(
+            UUID.randomUUID().toString(), UUID.randomUUID().toString(), "0".repeat(64));
+    final Capture.Refused refused =
+        assertThrows(Capture.Refused.class, () -> capture(List.of(gone), Long.MAX_VALUE));
+    assertEquals(Problem.Code.INPUT_CHANGED, refused.problem().code());
+    assertEquals(gone.ontologyId(), refused.problem().subject());
+  }
+
+  @Test
+  void anImportIsMissingBecauseNoOtherOntologyIsInTheInput() {
+    final UUID release = UUID.randomUUID();
+    final Releases.Release importing =
+        Releases.raw(
+            UUID.randomUUID(),
+            release,
+            Releases.header(release)
+                + "<%s> owl:imports <urn:other> .\n".formatted(Releases.ONTOLOGY_IRI));
+    activate(importing);
     final Capture.Refused refused =
         assertThrows(
-            Capture.Refused.class, () -> capture("sha256:" + "1".repeat(64), Long.MAX_VALUE));
-    assertEquals(Problem.Code.GENERATION_MISMATCH, refused.problem().code());
-
-    activate("sha256:" + "2".repeat(64));
-    final Capture.Refused stale =
-        assertThrows(Capture.Refused.class, () -> capture(null, Long.MAX_VALUE));
-    assertEquals(
-        Problem.Code.GENERATION_MISMATCH,
-        stale.problem().code(),
-        "activation and manifest disagree");
+            Capture.Refused.class, () -> capture(List.of(release(importing)), Long.MAX_VALUE));
+    assertEquals(Problem.Code.MISSING_IMPORT, refused.problem().code());
+    assertEquals("urn:other", refused.problem().subject());
   }
 
   @Test
   void theDiskQuotaBoundsTheSpool() {
-    final Capture.Refused refused = assertThrows(Capture.Refused.class, () -> capture(null, 10));
+    final Capture.Refused refused =
+        assertThrows(Capture.Refused.class, () -> capture(List.of(release(finance)), 10));
     assertEquals("maxDiskBytes", refused.problem().subject());
     assertFalse(Files.exists(root.resolve("job").resolve(Plans.SPOOL)));
     assertFalse(Files.exists(root.resolve("job").resolve(Plans.SPOOL + ".tmp")));
   }
 
-  private RefreshCapture.Result capture(final String ontologyDigest, final long maxBytes)
-      throws Exception {
+  private RefreshCapture.Result capture(
+      final List<RefreshCapture.Release> releases, final long maxBytes) throws Exception {
     return RefreshCapture.run(
         serving,
-        bundle,
-        null,
-        ontologyDigest,
+        releases,
+        RuleBundle.of(
+            JSON.parseAny(
+                    "[{\"name\": \"pii\", \"ruleBody\": \"" + RULE.replace("\"", "\\\"") + "\"}]")
+                .getAsArray()),
         Files.createDirectories(root.resolve("job")),
-        new Capture.Bounds(
-            Operations.MAX_IMPORTS,
-            1_000_000,
-            maxBytes,
-            System.nanoTime() + TimeUnit.MINUTES.toNanos(1)),
+        new Capture.Bounds(1_000_000, maxBytes, System.nanoTime() + TimeUnit.MINUTES.toNanos(1)),
         () -> false);
   }
 
-  private DatasetGraph readOnly() {
-    final DatasetGraph copy = DatasetGraphFactory.createTxnMem();
-    Txn.executeRead(serving, () -> serving.find().forEachRemaining(copy::add));
-    return copy;
+  private static RefreshCapture.Release release(final Releases.Release release) {
+    return new RefreshCapture.Release(
+        release.ontologyId().toString(), release.releaseId().toString(), "0".repeat(64));
   }
 
-  private void activate(final String digest) {
-    final Node graph = NodeFactory.createURI(GRAPH + "ontology/activations");
-    final Node glossary = NodeFactory.createURI(GLOSSARY);
-    Txn.executeWrite(
-        serving,
-        () -> {
-          serving.deleteAny(graph, Node.ANY, Node.ANY, Node.ANY);
-          serving.add(
-              graph, glossary, omr("activeManifest"), NodeFactory.createURI(closure.graph()));
-          serving.add(
-              graph, glossary, omr("closureDigest"), NodeFactory.createLiteralString(digest));
-        });
+  private static String releaseGraph(final Releases.Release release) {
+    return Capture.ONTOLOGY_GRAPH_PREFIX + release.ontologyId();
+  }
+
+  private void activate(final Releases.Release release) {
+    Releases.activate(serving, release);
   }
 
   private DatasetGraph spool() throws Exception {
@@ -232,9 +253,5 @@ GRAPH <urn:openmetadata:inferred:old-rule> { <urn:c:y> om:hasTag <urn:t:pii> . }
 
   private static List<String> sorted(final List<String> values) {
     return values.stream().sorted().toList();
-  }
-
-  private static Node omr(final String name) {
-    return NodeFactory.createURI(Capture.OMR + name);
   }
 }

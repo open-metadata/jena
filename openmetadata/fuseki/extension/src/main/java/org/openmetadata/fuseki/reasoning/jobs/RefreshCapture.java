@@ -20,16 +20,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import org.apache.jena.atlas.json.JSON;
@@ -43,38 +40,37 @@ import org.apache.jena.riot.system.StreamRDF;
 import org.apache.jena.riot.system.StreamRDFWriter;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.core.Quad;
-import org.apache.jena.vocabulary.RDF;
 
 /**
  * Captures what a REFRESH reasons over, inside one read transaction of the serving dataset, into
  * one gzip-compressed N-Quads spool in the job directory (the plan's refresh lifecycle, step 2):
  *
  * <ol>
- *   <li>the rule bundle the request names, verified against its digest ({@link RuleBundle});
- *   <li>every active Approved closure that {@code graph/ontology/activations} names, each manifest
- *       and pinned graph verified as a CHECK's capture verifies them, with the request's
- *       ontologyDigest checked against the activations ({@code om-activations-v1});
+ *   <li>every release the request lists, from the graph an active release occupies ({@code
+ *       graph/ontology/{ontologyId}}). The graph must state the listed release in its {@code
+ *       owl:versionIRI}, or the ontology was activated again after the request was made and the job
+ *       fails with INPUT_CHANGED; each release is one closure, since imports between ontologies are
+ *       deferred (OpenMetadata's
+ *       ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules);
  *   <li>the catalog: every triple whose predicate a rule can match, from every graph that is not an
- *       ontology graph, a control graph or a derived graph, so a Draft axiom, a manifest or a
- *       previous run's conclusions never reach the rules.
+ *       ontology graph, a staging graph or a derived graph, so a release that is not listed, a
+ *       half-replaced graph or a previous run's conclusions never reach the rules.
  * </ol>
  *
- * <p>Everything is streamed: the server holds one pinned graph, one closure's graph names, the
+ * <p>Everything is streamed: the server holds one graph's header, one closure's graph name, the
  * catalog's graph names (at most {@value #MAX_CATALOG_GRAPHS}) and a bounded cache of graph
  * decisions, never the catalog. Every 4,096 quads the copy checks the disk the quota leaves, the
  * job's deadline and cancellation. A read transaction never blocks Fuseki's writer.
  */
 public final class RefreshCapture {
-  public static final String ACTIVATIONS_ALGORITHM = "om-activations-v1";
-
-  /** Closures one refresh classifies, each in a worker step of its own. */
+  /** Releases one refresh classifies, each in a worker step of its own. */
   public static final int MAX_CLOSURES = 1_000;
 
   /** Graphs the catalog part of a capture may span; OpenMetadata writes it into a few. */
   public static final int MAX_CATALOG_GRAPHS = 10_000;
 
   /**
-   * Graphs the rules may read in all, closures and catalog together: the worker's limit on a RULES
+   * Graphs the rules may read in all, releases and catalog together: the worker's limit on a RULES
    * step's read file, and so the bound on the graph names the capture holds.
    */
   public static final int MAX_READ_GRAPHS = 100_000;
@@ -90,45 +86,38 @@ public final class RefreshCapture {
   static final String STORE_GRAPHS = "urn:openmetadata:";
 
   /**
-   * Graphs of OpenMetadata's that are never rule input, by the path OpenMetadata gives them under
-   * its base IRI: control graphs (manifests, activations, member records, rule bundles) and the
-   * phase 0 materializer's derived graphs.
+   * Graphs that are never rule input, by the path OpenMetadata gives them under its base IRI: every
+   * ontology graph (the listed releases are read on their own, any other is not input at all),
+   * graphs OpenMetadata stages a chunked replacement in, and the phase 0 materializer's output.
    */
   static final List<String> EXCLUDED_PATHS =
-      List.of(
-          "/graph/inferred/",
-          "/graph/manifest/",
-          "/graph/manifestStaging/",
-          "/graph/ontology/",
-          "/graph/rules/");
+      List.of("/graph/inferred/", "/graph/ontology/", "/graph/staging/");
 
   private static final int CHECK_EVERY = 4096;
-  private static final String ACTIVATIONS_PATH = "graph/ontology/activations";
-  private static final Node TYPE = RDF.type.asNode();
-  private static final Node ONTOLOGY_GRAPH = NodeFactory.createURI(Capture.OMR + "OntologyGraph");
-  private static final Node ACTIVE_MANIFEST = NodeFactory.createURI(Capture.OMR + "activeManifest");
-  private static final Node CLOSURE_DIGEST = NodeFactory.createURI(Capture.OMR + "closureDigest");
 
-  /** One captured closure: what its classify step reads and where its entailments go. */
+  /** One release the request lists. */
+  public record Release(String ontologyId, String releaseId, String contentDigest) {}
+
+  /** One captured release: what its classify step reads and where its entailments go. */
   public record Closure(
       int index,
-      String glossary,
+      String ontologyId,
+      String releaseId,
+      String contentDigest,
       String ontologyIri,
       String versionIri,
-      String closureDigest,
-      int manifests,
-      int graphs,
+      long triples,
       String graphsFile,
       String entailments) {
     JsonObject toJson() {
       final JsonObject json = new JsonObject();
       json.put("index", index);
-      json.put("glossary", glossary);
+      json.put("ontologyId", ontologyId);
+      json.put("releaseId", releaseId);
+      json.put("contentDigest", contentDigest);
       json.put("ontologyIri", ontologyIri);
       json.put("versionIri", versionIri);
-      json.put("closureDigest", closureDigest);
-      json.put("manifests", manifests);
-      json.put("graphs", graphs);
+      json.put("triples", triples);
       json.put("graphsFile", graphsFile);
       json.put("entailmentGraph", entailments);
       return json;
@@ -137,12 +126,12 @@ public final class RefreshCapture {
     static Closure fromJson(final JsonObject json) {
       return new Closure(
           json.getNumber("index").intValue(),
-          json.getString("glossary"),
+          json.getString("ontologyId"),
+          json.getString("releaseId"),
+          json.getString("contentDigest"),
           json.getString("ontologyIri"),
           json.getString("versionIri"),
-          json.getString("closureDigest"),
-          json.getNumber("manifests").intValue(),
-          json.getNumber("graphs").intValue(),
+          json.getNumber("triples").longValue(),
           json.getString("graphsFile"),
           json.getString("entailmentGraph"));
     }
@@ -150,8 +139,7 @@ public final class RefreshCapture {
 
   /** What was captured, as capture.json records it. */
   public record Result(
-      RuleBundle bundle,
-      String activationDigest,
+      int rules,
       List<Closure> closures,
       List<String> catalogGraphs,
       long catalogTriples,
@@ -162,14 +150,7 @@ public final class RefreshCapture {
       long millis) {
     public JsonObject toJson() {
       final JsonObject json = new JsonObject();
-      final JsonObject rules = new JsonObject();
-      rules.put("digest", bundle.digest());
-      if (bundle.graph() != null) {
-        rules.put("graph", bundle.graph());
-      }
-      rules.put("count", bundle.rules().size());
       json.put("rules", rules);
-      json.put("activationDigest", activationDigest);
       final JsonArray closureArray = new JsonArray();
       closures.forEach(closure -> closureArray.add(closure.toJson()));
       json.put("closures", closureArray);
@@ -192,9 +173,9 @@ public final class RefreshCapture {
 
   private RefreshCapture() {}
 
-  /** The graph a closure's entailments are written to in the working dataset and the snapshot. */
-  public static String entailmentGraph(final String closureDigest) {
-    return STORE_GRAPHS + "entailments:" + closureDigest.substring(GraphDigest.PREFIX.length());
+  /** The graph a release's entailments are written to in the working dataset and the snapshot. */
+  public static String entailmentGraph(final String releaseId) {
+    return STORE_GRAPHS + "entailments:" + releaseId;
   }
 
   /** The graph a rule's conclusions are written to. */
@@ -206,56 +187,34 @@ public final class RefreshCapture {
   public static final String PROVENANCE = STORE_GRAPHS + "provenance";
 
   /**
-   * Captures the input of a REFRESH into {@code directory}: the spool, one graphs file per closure,
+   * Captures the input of a REFRESH into {@code directory}: the spool, one graphs file per release,
    * the rules' read list and the rules. The spool exists only if the capture succeeds.
    *
-   * @param ruleBundleDigest the request's digest
-   * @param inlineRules the request's rules, or null to read the published bundle
-   * @param ontologyDigest the request's activation digest, or null to accept the activations as
-   *     they are
+   * @param releases the request's {@code ontologyReleases}, possibly none
+   * @param bundle the request's enabled rules
    */
   public static Result run(
       final DatasetGraph dataset,
-      final String ruleBundleDigest,
-      final JsonArray inlineRules,
-      final String ontologyDigest,
+      final List<Release> releases,
+      final RuleBundle bundle,
       final Path directory,
       final Capture.Bounds bounds,
       final BooleanSupplier cancelled)
       throws Capture.Refused, Capture.Cancelled, IOException {
     final long start = System.nanoTime();
+    if (releases.size() > MAX_CLOSURES) {
+      throw new Capture.Refused(
+          Problem.of(
+                  Problem.Code.LIMIT_EXCEEDED,
+                  releases.size() + " releases are active, more than " + MAX_CLOSURES)
+              .withSubject("maxImports"));
+    }
     final Path spool = directory.resolve(Plans.SPOOL);
     final Path partial = spool.resolveSibling(spool.getFileName() + ".tmp");
     final Path closureDirectory = Files.createDirectories(directory.resolve(CLOSURES));
     boolean complete = false;
     dataset.begin(TxnType.READ);
     try {
-      final RuleBundle bundle =
-          inlineRules == null
-              ? RuleBundle.published(dataset, ruleBundleDigest)
-              : RuleBundle.inline(inlineRules, ruleBundleDigest);
-      final TreeMap<String, Activation> activations = activations(dataset);
-      final String activationDigest = activationDigest(activations);
-      if (ontologyDigest != null && !ontologyDigest.equals(activationDigest)) {
-        throw new Capture.Refused(
-            Problem.of(
-                    Problem.Code.GENERATION_MISMATCH,
-                    "The active closures digest to "
-                        + activationDigest
-                        + " ("
-                        + ACTIVATIONS_ALGORITHM
-                        + "), not the request's ontologyDigest "
-                        + ontologyDigest
-                        + "; an ontology was activated since the request was made")
-                .withSubject(ACTIVATIONS_PATH));
-      }
-      if (activations.size() > MAX_CLOSURES) {
-        throw new Capture.Refused(
-            Problem.of(
-                    Problem.Code.LIMIT_EXCEEDED,
-                    activations.size() + " closures are active, more than " + MAX_CLOSURES)
-                .withSubject("maxImports"));
-      }
       final Set<String> read = new LinkedHashSet<>();
       final List<Closure> closures = new ArrayList<>();
       final List<String> catalogGraphs;
@@ -268,26 +227,31 @@ public final class RefreshCapture {
           OutputStream out = new BufferedOutputStream(new Capture.FastGzip(file), 1 << 16)) {
         final StreamRDF writer = StreamRDFWriter.getWriterStream(out, RDFFormat.NQUADS_UTF8);
         writer.start();
-        for (final Activation activation : activations.values()) {
+        for (final Release release : releases) {
           final Capture.Copy copy = new Capture.Copy(bounds, cancelled);
           copy.file = file;
-          final Closure closure =
-              closure(dataset, activation, closures.size(), writer, copy, closureDirectory, read);
-          closures.add(closure);
+          closures.add(closure(dataset, release, closures.size(), writer, copy, closureDirectory));
           triples += copy.triples;
         }
         final Capture.Copy catalogCopy =
             new Capture.Copy(
-                new Capture.Bounds(
-                    bounds.maxGraphs(), Long.MAX_VALUE, bounds.maxBytes(), bounds.deadlineNanos()),
+                new Capture.Bounds(Long.MAX_VALUE, bounds.maxBytes(), bounds.deadlineNanos()),
                 cancelled);
         catalogCopy.file = file;
         final Set<String> catalog = new LinkedHashSet<>();
         catalogTriples = catalog(dataset, predicates, writer, catalogCopy, catalog);
         catalogGraphs = List.copyOf(catalog);
         triples += catalogTriples;
-        read.addAll(catalog);
         writer.finish();
+        closures.forEach(closure -> read.add(Capture.ONTOLOGY_GRAPH_PREFIX + closure.ontologyId()));
+        read.addAll(catalog);
+      }
+      if (read.size() > MAX_READ_GRAPHS) {
+        throw new Capture.Refused(
+            Problem.of(
+                    Problem.Code.LIMIT_EXCEEDED,
+                    "The releases and the catalog span more than " + MAX_READ_GRAPHS + " graphs")
+                .withSubject("maxImports"));
       }
       closures.forEach(closure -> read.add(closure.entailments()));
       writeLines(directory.resolve(READ_FILE), read);
@@ -305,8 +269,7 @@ public final class RefreshCapture {
       Files.move(partial, spool, StandardCopyOption.REPLACE_EXISTING);
       complete = true;
       return new Result(
-          bundle,
-          activationDigest,
+          bundle.rules().size(),
           List.copyOf(closures),
           catalogGraphs,
           catalogTriples,
@@ -323,114 +286,50 @@ public final class RefreshCapture {
     }
   }
 
-  /** One glossary's activation: the manifest it names and the closure digest it records. */
-  record Activation(String glossary, Node manifest, String closureDigest) {}
-
   /**
-   * The activations, by glossary IRI, from every graph named {@code graph/ontology/activations}
-   * under some base; a glossary with more than one active manifest is refused.
+   * Copies one release's graph into the spool, checking as it goes that the graph is the release
+   * the request listed.
    */
-  static TreeMap<String, Activation> activations(final DatasetGraph dataset)
-      throws Capture.Refused {
-    final TreeMap<String, Activation> activations = new TreeMap<>();
-    final Iterator<Quad> quads = dataset.find(Node.ANY, Node.ANY, ACTIVE_MANIFEST, Node.ANY);
-    while (quads.hasNext()) {
-      final Quad quad = quads.next();
-      if (!quad.getGraph().isURI()
-          || !quad.getGraph().getURI().endsWith(ACTIVATIONS_PATH)
-          || !quad.getSubject().isURI()
-          || !quad.getObject().isURI()) {
-        continue;
-      }
-      final Iterator<Quad> digests =
-          dataset.find(quad.getGraph(), quad.getSubject(), CLOSURE_DIGEST, Node.ANY);
-      final String digest =
-          digests.hasNext() ? digests.next().getObject().getLiteralLexicalForm() : null;
-      final String glossary = quad.getSubject().getURI();
-      if (digest == null || activations.containsKey(glossary)) {
-        throw new Capture.Refused(
-            Problem.of(
-                    Problem.Code.GENERATION_MISMATCH,
-                    "The activation of <"
-                        + glossary
-                        + "> "
-                        + (digest == null
-                            ? "has no closure digest"
-                            : "names more than one manifest"))
-                .withSubject(quad.getGraph().getURI()));
-      }
-      activations.put(glossary, new Activation(glossary, quad.getObject(), digest));
-    }
-    return activations;
-  }
-
-  /**
-   * The {@value #ACTIVATIONS_ALGORITHM} digest: SHA-256 over the line {@code om-activations-v1} and
-   * one line {@code active <glossary IRI> <closure digest>} per activation in glossary-IRI order,
-   * each ending in a newline (OpenMetadata's
-   * ADR:2026-10-15-inference-runs-record-the-input-they-captured).
-   */
-  static String activationDigest(final Map<String, Activation> activations) {
-    final MessageDigest sha256 = GraphDigest.sha256();
-    sha256.update((ACTIVATIONS_ALGORITHM + "\n").getBytes(StandardCharsets.UTF_8));
-    for (final Activation activation : new TreeMap<>(activations).values()) {
-      sha256.update(
-          ("active <" + activation.glossary() + "> " + activation.closureDigest() + "\n")
-              .getBytes(StandardCharsets.UTF_8));
-    }
-    return GraphDigest.PREFIX + HexFormat.of().formatHex(sha256.digest());
-  }
-
   private static Closure closure(
       final DatasetGraph dataset,
-      final Activation activation,
+      final Release release,
       final int index,
       final StreamRDF writer,
       final Capture.Copy copy,
-      final Path closureDirectory,
-      final Set<String> read)
+      final Path closureDirectory)
       throws Capture.Refused, Capture.Cancelled, IOException {
-    final Capture.Manifest root = Capture.Manifest.read(dataset, activation.manifest());
-    if (!root.closureDigest().equals(activation.closureDigest())
-        || !"APPROVED".equals(root.selection())) {
-      throw new Capture.Refused(
-          Problem.of(
-                  Problem.Code.GENERATION_MISMATCH,
-                  "The activation of <"
-                      + activation.glossary()
-                      + "> names manifest <"
-                      + activation.manifest().getURI()
-                      + ">, which is a "
-                      + root.selection()
-                      + " closure with digest "
-                      + root.closureDigest()
-                      + ", not the APPROVED closure "
-                      + activation.closureDigest())
-              .withSubject(root.versionIri().getURI()));
+    final Node graph = NodeFactory.createURI(Capture.ONTOLOGY_GRAPH_PREFIX + release.ontologyId());
+    final Iterator<Quad> quads = dataset.find(graph, Node.ANY, Node.ANY, Node.ANY);
+    if (!quads.hasNext()) {
+      throw Capture.changed(
+          release.ontologyId(),
+          "The serving graph holds no graph for ontology "
+              + release.ontologyId()
+              + ", so release "
+              + release.releaseId()
+              + " is no longer active");
     }
-    final List<String> manifests = new ArrayList<>();
-    final Set<String> graphs = new LinkedHashSet<>();
-    Capture.copyClosure(dataset, activation.manifest(), root, writer, copy, manifests, graphs);
+    final Capture.Header header = new Capture.Header("graph <" + graph.getURI() + ">");
+    while (quads.hasNext()) {
+      final Quad quad = quads.next();
+      copy.count();
+      header.see(quad.asTriple());
+      writer.quad(quad);
+    }
+    copy.checkBytes(copy.file.count());
+    final String versionIri = header.verify(release.ontologyId(), release.releaseId());
     final String file = CLOSURES + "/" + index + ".graphs";
-    writeLines(closureDirectory.resolve(index + ".graphs"), graphs);
-    read.addAll(graphs);
-    if (read.size() > MAX_READ_GRAPHS) {
-      throw new Capture.Refused(
-          Problem.of(
-                  Problem.Code.LIMIT_EXCEEDED,
-                  "The active closures span more than " + MAX_READ_GRAPHS + " graphs")
-              .withSubject("maxImports"));
-    }
+    writeLines(closureDirectory.resolve(index + ".graphs"), List.of(graph.getURI()));
     return new Closure(
         index,
-        activation.glossary(),
-        root.ontologyIri(),
-        root.versionIri().getURI(),
-        root.closureDigest(),
-        manifests.size(),
-        graphs.size(),
+        release.ontologyId(),
+        release.releaseId(),
+        release.contentDigest(),
+        header.ontology.getURI(),
+        versionIri,
+        copy.triples,
         file,
-        entailmentGraph(root.closureDigest()));
+        entailmentGraph(release.releaseId()));
   }
 
   /**
@@ -444,7 +343,7 @@ public final class RefreshCapture {
       final Capture.Copy copy,
       final Set<String> graphs)
       throws Capture.Refused, Capture.Cancelled {
-    final GraphDecisions decisions = new GraphDecisions(dataset);
+    final GraphDecisions decisions = new GraphDecisions();
     final List<Node> scans = new ArrayList<>();
     if (predicates.any()) {
       scans.add(Node.ANY);
@@ -486,7 +385,6 @@ public final class RefreshCapture {
 
   /** Whether a graph's triples are catalog input, decided once per graph within a bounded cache. */
   static final class GraphDecisions {
-    private final DatasetGraph dataset;
     private final Map<Node, Boolean> decided =
         new LinkedHashMap<>(16, 0.75f, true) {
           @Override
@@ -495,15 +393,11 @@ public final class RefreshCapture {
           }
         };
 
-    GraphDecisions(final DatasetGraph dataset) {
-      this.dataset = dataset;
-    }
-
     boolean include(final Node graph) {
-      return decided.computeIfAbsent(graph, this::decide);
+      return decided.computeIfAbsent(graph, GraphDecisions::decide);
     }
 
-    private boolean decide(final Node graph) {
+    private static boolean decide(final Node graph) {
       if (Quad.isDefaultGraph(graph)) {
         return true;
       }
@@ -519,9 +413,7 @@ public final class RefreshCapture {
           return false;
         }
       }
-      // An ontology graph is read only as part of a closure some activation pins; any other, such
-      // as a Draft axiom's, is no input at all.
-      return !dataset.find(Node.ANY, graph, TYPE, ONTOLOGY_GRAPH).hasNext();
+      return true;
     }
   }
 

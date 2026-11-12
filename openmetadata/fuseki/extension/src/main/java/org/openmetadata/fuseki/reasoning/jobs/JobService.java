@@ -13,6 +13,7 @@
 package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -21,9 +22,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonNumber;
@@ -61,6 +64,7 @@ public final class JobService implements AutoCloseable {
   private final Operations operations;
   private final LongSupplier clock;
   private final JobStore store;
+  private final JobInputs inputs;
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -111,11 +115,12 @@ public final class JobService implements AutoCloseable {
     this.operations = operations;
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
+    this.inputs = new JobInputs(settings.reasoningRoot());
   }
 
   /**
-   * The service the Fuseki module runs, with the container's memory and this JVM's heap. Jobs read
-   * the datasets {@code datasets} serves, which may answer only once the server has started.
+   * The service the Fuseki module runs, with the container's memory and this JVM's heap. A REFRESH
+   * reads the dataset {@code datasets} serves, which may answer only once the server has started.
    */
   public static JobService create(
       final ReasoningSettings settings, final JobSettings jobs, final ServingDatasets datasets) {
@@ -155,6 +160,7 @@ public final class JobService implements AutoCloseable {
         byRequest.put(job.requestId(), job);
       }
       retain();
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), true);
     }
     LOG.info(
         "Reasoning jobs: {} kept, {} interrupted by the last shutdown", jobs.size(), interrupted);
@@ -244,6 +250,55 @@ public final class JobService implements AutoCloseable {
     return json;
   }
 
+  /**
+   * Holds an input that a job will name, for {@code PUT /reasoning/inputs/sha256:{hex}}: refused
+   * over {@code maxUploadBytes}, when its bytes do not hash to {@code hex}, or when holding it
+   * would put the reasoning data over its disk quota.
+   */
+  public long maxUploadBytes() {
+    return jobSettings.maxUploadBytes();
+  }
+
+  public JobInputs.Stored upload(final String hex, final InputStream body)
+      throws Refused, IOException {
+    if (!settings.enabled()) {
+      throw new Refused(
+          503,
+          Problem.of(
+              Problem.Code.NOT_READY,
+              "Reasoning is disabled: " + ReasoningSettings.ENABLED + " is not true"));
+    }
+    final Path root = settings.reasoningRoot();
+    final long quota;
+    try {
+      quota = jobSettings.diskQuota(root);
+    } catch (final RuntimeException e) {
+      throw new Refused(
+          503,
+          Problem.of(Problem.Code.NOT_READY, "Disk use cannot be measured: " + e.getMessage()));
+    }
+    synchronized (lock) {
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
+    }
+    return inputs.put(
+        hex,
+        body,
+        jobSettings.maxUploadBytes(),
+        quota,
+        () -> JobStore.sizeOnDisk(root),
+        clock.getAsLong());
+  }
+
+  /**
+   * The digests, as stored, of the uploads that queued and running jobs will read. Under the lock.
+   */
+  private Set<String> uploadsInUse() {
+    return jobs.values().stream()
+        .filter(job -> !job.state().finished())
+        .flatMap(job -> job.uploadDigest().stream())
+        .collect(Collectors.toSet());
+  }
+
   public Submission submit(final JobRequest request) throws Refused {
     if (!settings.enabled()) {
       throw new Refused(
@@ -272,7 +327,7 @@ public final class JobService implements AutoCloseable {
           503, Problem.of(Problem.Code.NOT_READY, String.join(" ", budget.reasons())));
     }
     if (request.operation() == JobRequest.Operation.REFRESH) {
-      admitInlineRules(request);
+      admitRules(request);
     }
     synchronized (lock) {
       final Optional<Submission> existing = existing(request);
@@ -315,20 +370,13 @@ public final class JobService implements AutoCloseable {
   }
 
   /**
-   * A REFRESH that carries its rules is admitted only if they are the bundle it names and every one
-   * compiles with the RULES step's compiler; a bundle named by digest alone is checked when it is
-   * captured.
+   * A REFRESH is admitted only if every rule it carries compiles with the RULES step's compiler, so
+   * an invalid rule is refused here rather than after the capture.
    */
-  private void admitInlineRules(final JobRequest request) throws Refused {
-    final JsonObject document = request.document();
-    if (!Plans.carriesRules(document)) {
-      return;
-    }
+  private void admitRules(final JobRequest request) throws Refused {
     final RuleBundle bundle;
     try {
-      bundle =
-          RuleBundle.inline(
-              document.get("rules").getAsArray(), document.getString("ruleBundleDigest"));
+      bundle = RuleBundle.of(request.document().get("rules").getAsArray());
     } catch (final Capture.Refused e) {
       throw new Refused(400, e.problem());
     }
@@ -588,6 +636,7 @@ public final class JobService implements AutoCloseable {
     synchronized (lock) {
       finish(job, state, outcome, problem);
       retain();
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
     }
     LOG.info(
         "Reasoning job {} {}{}",

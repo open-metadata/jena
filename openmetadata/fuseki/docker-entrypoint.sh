@@ -187,6 +187,9 @@ validate_reasoning_settings() {
   require_bounded_integer OPENMETADATA_REASONING_MAX_QUERY_SECONDS 4
   require_bounded_integer OPENMETADATA_REASONING_MAX_RESULT_ROWS 6
   require_bounded_integer OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES 3
+  if [ -n "${OPENMETADATA_REASONING_MAX_UPLOAD_BYTES:-}" ]; then
+    require_size OPENMETADATA_REASONING_MAX_UPLOAD_BYTES "$OPENMETADATA_REASONING_MAX_UPLOAD_BYTES" 1
+  fi
   local quota="${OPENMETADATA_REASONING_DISK_QUOTA:-}"
   if [ -n "$quota" ] && [[ ! "$quota" =~ ^([1-9][0-9]?|100)%$ ]] \
     && ! size_bytes "$quota" > /dev/null; then
@@ -219,6 +222,16 @@ compose_jvm_args() {
   if [ -z "${JVM_ARGS:-}" ]; then
     JVM_ARGS="-Xms$FUSEKI_HEAP -Xmx$FUSEKI_HEAP"
   fi
+  # Fuseki allocates direct buffers per request and frees them only when a collection finds their
+  # owners; under the JVM default limit, the whole heap, they pile up outside the heap between
+  # collections. At this limit the JVM collects instead. The extension's memory budget assumes the
+  # same value (ReasoningSettings.DEFAULT_FUSEKI_DIRECT_MEMORY); JVM_ARGS can set another.
+  if [[ "$JVM_ARGS" != *-XX:MaxDirectMemorySize=* ]]; then
+    JVM_ARGS="$JVM_ARGS -XX:MaxDirectMemorySize=256m"
+  fi
+  # A crash core dump is as large as the heap and lands on the node's disk, not the data volume:
+  # in production it filled the node and got the pod evicted. The hs_err report is enough.
+  JVM_ARGS="$JVM_ARGS -XX:-CreateCoredumpOnCrash"
   require_boolean FUSEKI_UNION_DEFAULT_GRAPH "$FUSEKI_UNION_DEFAULT_GRAPH"
   if [ "$FUSEKI_UNION_DEFAULT_GRAPH" = "true" ]; then
     JVM_ARGS="$JVM_ARGS -Dtdb2:unionDefaultGraph=true"

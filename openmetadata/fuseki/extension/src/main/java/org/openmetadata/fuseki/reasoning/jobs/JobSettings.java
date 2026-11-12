@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import org.openmetadata.fuseki.BoundedGraphStore;
 import org.openmetadata.fuseki.reasoning.Sizes;
 
 /**
@@ -34,6 +35,8 @@ import org.openmetadata.fuseki.reasoning.Sizes;
  * @param diskQuotaPercent the quota as a percentage of the data volume's capacity
  * @param maxJobSeconds OPENMETADATA_REASONING_MAX_JOB_SECONDS: how long one job may run, from its
  *     start to its last step's deadline
+ * @param maxUploadBytes OPENMETADATA_REASONING_MAX_UPLOAD_BYTES: the largest job input one upload
+ *     may carry
  * @param maxQuerySeconds OPENMETADATA_REASONING_MAX_QUERY_SECONDS: the deadline of one snapshot
  *     query, and so how long a query can keep a replaced snapshot on disk
  * @param maxResultRows OPENMETADATA_REASONING_MAX_RESULT_ROWS: rows one snapshot query or one page
@@ -48,6 +51,7 @@ public record JobSettings(
     long diskQuotaBytes,
     int diskQuotaPercent,
     int maxJobSeconds,
+    long maxUploadBytes,
     int maxQuerySeconds,
     int maxResultRows,
     int maxConcurrentQueries) {
@@ -57,6 +61,7 @@ public record JobSettings(
   public static final String RETENTION_HOURS = "OPENMETADATA_REASONING_JOB_RETENTION_HOURS";
   public static final String DISK_QUOTA = "OPENMETADATA_REASONING_DISK_QUOTA";
   public static final String MAX_JOB_SECONDS = "OPENMETADATA_REASONING_MAX_JOB_SECONDS";
+  public static final String MAX_UPLOAD_BYTES = "OPENMETADATA_REASONING_MAX_UPLOAD_BYTES";
   public static final String MAX_QUERY_SECONDS = "OPENMETADATA_REASONING_MAX_QUERY_SECONDS";
   public static final String MAX_RESULT_ROWS = "OPENMETADATA_REASONING_MAX_RESULT_ROWS";
   public static final String MAX_CONCURRENT_QUERIES =
@@ -65,6 +70,9 @@ public record JobSettings(
   public static final int DEFAULT_MAX_QUEUED_JOBS = 16;
   public static final int DEFAULT_JOB_HISTORY = 1000;
   public static final int DEFAULT_RETENTION_HOURS = 168;
+
+  /** The smallest limit that still admits a small release's export. */
+  static final long MIN_UPLOAD_BYTES = Sizes.MIB;
 
   /**
    * An hour, until refresh times are measured: long enough for a catalog-sized closure, which
@@ -106,6 +114,15 @@ public record JobSettings(
     final int history = integer(environment, JOB_HISTORY, FOUR_DIGITS, 4, DEFAULT_JOB_HISTORY);
     final int hours = integer(environment, RETENTION_HOURS, COUNT, 6, DEFAULT_RETENTION_HOURS);
     final int jobSeconds = integer(environment, MAX_JOB_SECONDS, COUNT, 6, DEFAULT_MAX_JOB_SECONDS);
+    final String upload = value(environment, MAX_UPLOAD_BYTES);
+    final long uploadBytes =
+        upload == null
+            ? BoundedGraphStore.DEFAULT_MAX_BYTES
+            : Sizes.parse(MAX_UPLOAD_BYTES, upload);
+    if (uploadBytes < MIN_UPLOAD_BYTES) {
+      throw new IllegalArgumentException(
+          MAX_UPLOAD_BYTES + " must be at least 1m, got '" + upload + "'");
+    }
     final int querySeconds =
         integer(environment, MAX_QUERY_SECONDS, FOUR_DIGITS, 4, DEFAULT_MAX_QUERY_SECONDS);
     final int resultRows = integer(environment, MAX_RESULT_ROWS, COUNT, 6, DEFAULT_MAX_RESULT_ROWS);
@@ -138,6 +155,7 @@ public record JobSettings(
         quotaBytes,
         quotaPercent,
         jobSeconds,
+        uploadBytes,
         querySeconds,
         resultRows,
         queries);

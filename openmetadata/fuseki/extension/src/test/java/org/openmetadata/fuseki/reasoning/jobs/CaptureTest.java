@@ -17,433 +17,262 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-import org.apache.jena.dboe.base.file.Location;
+import java.util.zip.GZIPInputStream;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.riot.Lang;
-import org.apache.jena.riot.RDFDataMgr;
 import org.apache.jena.riot.RDFParser;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.core.DatasetGraphFactory;
-import org.apache.jena.system.Txn;
-import org.apache.jena.tdb2.DatabaseMgr;
-import org.apache.jena.tdb2.sys.TDBInternal;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.openmetadata.fuseki.reasoning.jobs.Releases.Release;
 
 /**
- * Capture from a real TDB2 dataset laid out as OpenMetadata writes it: one graph per term, axiom
- * and relationship type, and version manifests that pin them. What is copied, every check of the
- * pinned content, and every bound.
+ * Capture of an uploaded release: what the spool holds, that the upload is accepted only as the
+ * release the request named, and every bound. The uploads are real RDF-Thrift files.
  */
 class CaptureTest {
-  private static final String BASE = "https://open-metadata.org/";
-  private static final String ROOT = BASE + "ontology/finance";
-  private static final String SHARED = BASE + "ontology/shared";
-  private static final String TYPE = BASE + "graph/relationshipType/reportedIn";
-
-  private static final String LAYOUT =
+  /** An axiom with its source member, as the release export keeps it. */
+  private static final String MEMBERS =
       """
-      PREFIX owl: <http://www.w3.org/2002/07/owl#>
-      PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-      PREFIX : <https://open-metadata.org/finance#>
-      GRAPH <https://open-metadata.org/graph/glossaryTerm/1> { :Revenue a owl:Class . }
-      GRAPH <https://open-metadata.org/graph/axiom/2> {
-        :Revenue rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :reportedIn ;
-                                   owl:someValuesFrom :Currency ] .
-      }
-      GRAPH <https://open-metadata.org/graph/relationshipType/reportedIn> {
-        :reportedIn a owl:ObjectProperty .
-      }
-      GRAPH <https://open-metadata.org/graph/glossaryTerm/7> { :Currency a owl:Class . }
-      GRAPH <https://open-metadata.org/graph/glossaryTerm/99> { :Unrelated a owl:Class . }
+      dct:source a owl:AnnotationProperty .
+      :Asset a owl:Class .
+      :Liability a owl:Class .
+      :Asset owl:disjointWith :Liability .
+      [] a owl:Axiom ; owl:annotatedSource :Asset ; owl:annotatedProperty owl:disjointWith ;
+         owl:annotatedTarget :Liability ; dct:source <urn:openmetadata:ontology-member:7> .
       """;
 
   @TempDir Path directory;
-  private DatasetGraph dataset;
   private Path spool;
-  private Manifests.Published shared;
-  private Manifests.Published finance;
+  private Path uploads;
 
   @BeforeEach
-  void open() {
-    dataset = DatabaseMgr.connectDatasetGraph(Location.create(directory.resolve("serving")));
-    Txn.executeWrite(dataset, () -> RDFParser.fromString(LAYOUT, Lang.TRIG).parse(dataset));
-    shared =
-        Manifests.publish(
-            dataset,
-            BASE,
-            SHARED,
-            BASE + "glossary/shared",
-            "APPROVED",
-            List.of(BASE + "graph/glossaryTerm/7", TYPE),
-            List.of());
-    finance =
-        Manifests.publish(
-            dataset,
-            BASE,
-            ROOT,
-            BASE + "glossary/finance",
-            "APPROVED",
-            List.of(BASE + "graph/glossaryTerm/1", BASE + "graph/axiom/2", TYPE),
-            List.of(shared));
+  void open() throws IOException {
     spool = directory.resolve("capture.nq.gz");
-  }
-
-  @AfterEach
-  void close() {
-    TDBInternal.expel(dataset);
+    uploads = Files.createDirectories(directory.resolve("inputs"));
   }
 
   @Test
-  void theClosureDigestIsTheDocumentedOne() {
-    assertEquals(
-        "sha256:14a01107832a95295a2b152ff2d607b774c892caad6b3d0ff642a3b772263eb3",
-        Manifests.closureDigest(
-            List.of(
-                "om-closure-v2",
-                "ontology <https://ex.org/o>",
-                "glossary <https://ex.org/g>",
-                "selection APPROVED",
-                "member <https://ex.org/graph/a> sha256:"
-                    + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                "import <https://ex.org/i> sha256:" + "0".repeat(64))),
-        "computed from the line format alone, in another language");
-  }
+  void aReleaseIsSpooledIntoOneGraphWithItsAxiomSourcesAndItsHeader() throws Exception {
+    final Release release = Releases.of(MEMBERS);
+    final Capture.Result captured = capture(release);
 
-  @Test
-  void thePinnedGraphsAndManifestHeadersAreCopiedAndNothingElse() throws Exception {
-    final Capture.Result result = capture(selection(finance), bounds());
-    assertEquals(List.of(finance.graph(), shared.graph()), result.manifests());
-    assertEquals(
-        List.of(
-            finance.graph(),
-            BASE + "graph/axiom/2",
-            BASE + "graph/glossaryTerm/1",
-            TYPE,
-            shared.graph(),
-            BASE + "graph/glossaryTerm/7"),
-        result.graphs());
-    assertEquals(finance.versionIri(), result.versionIri());
-    final DatasetGraph copied = DatasetGraphFactory.create();
-    RDFDataMgr.read(copied, spool.toString());
-    final Set<String> graphs = new TreeSet<>();
-    copied.listGraphNodes().forEachRemaining(graph -> graphs.add(graph.getURI()));
-    assertEquals(new TreeSet<>(result.graphs()), graphs);
-    assertEquals(result.triples(), copied.stream().count());
-    assertFalse(
-        copied.stream().anyMatch(quad -> quad.getPredicate().getURI().startsWith(Manifests.OMR)),
-        "control triples never reach the reasoner");
+    assertEquals(Releases.ONTOLOGY_IRI, captured.root());
+    assertEquals(Capture.RELEASE_IRI_PREFIX + release.releaseId(), captured.versionIri());
+    final Node graph = NodeFactory.createURI(captured.graph());
+    assertEquals(Capture.ONTOLOGY_GRAPH_PREFIX + release.ontologyId(), captured.graph());
+    final DatasetGraph spooled = read(spool);
+    assertEquals(11, captured.triples(), "header, members, and the axiom with its source");
+    assertEquals(captured.triples(), spooled.getGraph(graph).size());
+    assertEquals(1, spooled.stream().map(quad -> quad.getGraph()).distinct().count());
     assertTrue(
-        copied.contains(
-            NodeFactory.createURI(finance.graph()),
-            NodeFactory.createURI(ROOT),
-            NodeFactory.createURI("http://www.w3.org/2002/07/owl#imports"),
-            NodeFactory.createURI(shared.versionIri())));
-    final Node axiom = NodeFactory.createURI(BASE + "graph/axiom/2");
-    assertEquals(
-        Txn.calculateRead(dataset, () -> dataset.getGraph(axiom).size()),
-        copied.getGraph(axiom).size(),
-        "blank nodes survive the copy");
-    assertEquals(Files.size(spool), result.bytes());
-
-    Files.delete(spool);
-    Txn.executeWrite(
-        dataset,
-        () ->
-            RDFParser.fromString(
-                    """
-                    PREFIX omr: <https://open-metadata.org/reasoning/>
-                    GRAPH <https://open-metadata.org/graph/ontology/activations> {
-                      <https://open-metadata.org/glossary/finance>
-                        omr:activeManifest <%s> ;
-                        omr:ontology <https://open-metadata.org/ontology/finance> .
-                    }
-                    """
-                        .formatted(finance.graph()),
-                    Lang.TRIG)
-                .parse(dataset));
-    assertEquals(
-        result.graphs(),
-        capture(new Capture.Selection(ROOT, "APPROVED", null), bounds()).graphs(),
-        "an Approved check without a digest uses the active manifest");
+        spooled.contains(
+            graph,
+            Node.ANY,
+            NodeFactory.createURI("http://purl.org/dc/terms/source"),
+            NodeFactory.createURI("urn:openmetadata:ontology-member:7")),
+        "an axiom's source member survives into the spool");
+    assertEquals(Files.size(spool), captured.bytes());
+    assertFalse(Files.exists(Path.of(spool + ".tmp")));
   }
 
   @Test
-  void contentThatChangedSinceItWasPinnedIsRefused() throws Exception {
-    final String term = BASE + "graph/glossaryTerm/7";
-    Txn.executeWrite(
-        dataset,
-        () ->
-            dataset.add(
-                NodeFactory.createURI(term),
-                NodeFactory.createURI(BASE + "finance#Currency"),
-                NodeFactory.createURI("http://www.w3.org/2000/01/rdf-schema#label"),
-                NodeFactory.createLiteralString("Currency")));
-    assertRefused(selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, term);
-
-    Txn.executeWrite(
-        dataset, () -> dataset.removeGraph(NodeFactory.createURI(BASE + "graph/axiom/2")));
-    assertRefused(
-        selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, BASE + "graph/axiom/2");
+  void anUploadThatIsNotHeldFailsAsInputChangedNamingTheDigest() {
+    final Release release = Releases.of(MEMBERS);
+    final Capture.Refused refused = refused(release, release.byteSize());
+    assertEquals(Problem.Code.INPUT_CHANGED, refused.problem().code());
+    assertEquals(release.digest(), refused.problem().subject());
+    assertNoSpool();
   }
 
   @Test
-  void aPinnedGraphTooSymmetricToDigestIsRefused() {
-    final String term = BASE + "graph/glossaryTerm/7";
-    final StringBuilder triangles = new StringBuilder("GRAPH <" + term + "> {\n");
-    for (int cycle = 0; cycle < 8; cycle++) {
-      for (int node = 0; node < 3; node++) {
-        triangles
-            .append("_:c")
-            .append(cycle)
-            .append('n')
-            .append(node)
-            .append(" <http://ex.org/p> _:c")
-            .append(cycle)
-            .append('n')
-            .append((node + 1) % 3)
-            .append(" .\n");
-      }
+  void anUploadOfAnotherSizeOrWithOtherBytesFailsAsInputChanged() throws Exception {
+    final Release release = Releases.of(MEMBERS);
+    hold(release);
+    final Capture.Refused size = refused(release, release.byteSize() + 1);
+    assertEquals(Problem.Code.INPUT_CHANGED, size.problem().code());
+    assertEquals(release.digest(), size.problem().subject());
+    assertTrue(size.problem().message().contains("bytes"), size.problem().message());
+
+    final byte[] corrupted = release.rdf().clone();
+    corrupted[corrupted.length / 2] ^= 1;
+    Files.write(path(release), corrupted);
+    final Capture.Refused hash = refused(release, release.byteSize());
+    assertEquals(Problem.Code.INPUT_CHANGED, hash.problem().code());
+    assertEquals(release.digest(), hash.problem().subject());
+    assertTrue(hash.problem().message().contains("now hashes to"), hash.problem().message());
+    assertNoSpool();
+  }
+
+  @Test
+  void aHeaderThatIsNotTheNamedReleasesFailsAsInputChangedNamingTheOntology() throws Exception {
+    final UUID ontology = UUID.randomUUID();
+    final UUID release = UUID.randomUUID();
+    final String other = Releases.header(UUID.randomUUID());
+    final String twice =
+        Releases.header(release) + "<https://example.org/second> a owl:Ontology .\n";
+    final String unversioned = "<" + Releases.ONTOLOGY_IRI + "> a owl:Ontology .\n";
+    final String anonymous =
+        "[] a owl:Ontology ; owl:versionIRI <" + Capture.RELEASE_IRI_PREFIX + release + "> .\n";
+    final String versionedElsewhere =
+        Releases.header(release)
+            + "<https://example.org/second> owl:versionIRI <"
+            + Capture.RELEASE_IRI_PREFIX
+            + release
+            + "> .\n";
+    final String headerless = ":Asset a owl:Class .\n";
+    for (final String header :
+        new String[] {other, twice, unversioned, anonymous, versionedElsewhere, headerless}) {
+      final Release upload = Releases.raw(ontology, release, header + MEMBERS);
+      hold(upload);
+      final Capture.Refused refused = refused(upload, upload.byteSize());
+      assertEquals(Problem.Code.INPUT_CHANGED, refused.problem().code(), header);
+      assertEquals(ontology.toString(), refused.problem().subject(), header);
+      assertNoSpool();
     }
-    Txn.executeWrite(
-        dataset,
-        () -> RDFParser.fromString(triangles.append("}\n").toString(), Lang.TRIG).parse(dataset));
-    assertRefused(selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, term);
-  }
-
-  /**
-   * OpenMetadata publishes no closure whose imports are missing or form a cycle, and its digest has
-   * no line for either. A manifest that names a missing manifest is not a manifest the store can
-   * check; one that imports itself cannot match its own digest.
-   */
-  @Test
-  void anImportCycleCannotMatchItsDigest() {
-    Txn.executeWrite(
-        dataset,
-        () ->
-            dataset.add(
-                NodeFactory.createURI(finance.graph()),
-                NodeFactory.createURI(finance.versionIri()),
-                NodeFactory.createURI(Manifests.OMR + "importsManifest"),
-                NodeFactory.createURI(finance.graph())));
-    assertRefused(
-        selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, finance.versionIri());
   }
 
   @Test
-  void aManifestOfAnEarlierDigestAlgorithmIsNotChecked() {
-    Txn.executeWrite(
-        dataset,
-        () -> {
-          final Node graph = NodeFactory.createURI(finance.graph());
-          final Node version = NodeFactory.createURI(finance.versionIri());
-          final Node algorithm = NodeFactory.createURI(Manifests.OMR + "digestAlgorithm");
-          dataset.delete(
-              graph, version, algorithm, NodeFactory.createLiteralString("om-closure-v2"));
-          dataset.add(graph, version, algorithm, NodeFactory.createLiteralString("om-closure-v1"));
-        });
-    assertRefused(selection(finance), bounds(), Problem.Code.NOT_IMPLEMENTED, finance.graph());
+  void anImportCannotResolveBecauseNoOtherOntologyIsInTheInput() throws Exception {
+    final Release release =
+        Releases.of(MEMBERS + "<" + Releases.ONTOLOGY_IRI + "> owl:imports <urn:other> .\n");
+    hold(release);
+    final Capture.Refused refused = refused(release, release.byteSize());
+    assertEquals(Problem.Code.MISSING_IMPORT, refused.problem().code());
+    assertEquals("urn:other", refused.problem().subject());
+    assertNoSpool();
   }
 
   @Test
-  void aManifestWhoseMembersDoNotMatchItsDigestIsRefused() {
-    Txn.executeWrite(
-        dataset,
-        () ->
-            dataset.add(
-                NodeFactory.createURI(finance.graph()),
-                NodeFactory.createURI(BASE + "graph/glossaryTerm/99"),
-                NodeFactory.createURI(Manifests.OMR + "pinnedDigest"),
-                NodeFactory.createLiteralString("sha256:" + "0".repeat(64))));
-    assertRefused(
-        selection(finance), bounds(), Problem.Code.GENERATION_MISMATCH, finance.versionIri());
+  void bytesThatAreNotRdfThriftFailAsAnInvalidRequestNamingTheUpload() throws Exception {
+    final byte[] text = "this is not RDF-Thrift".getBytes(StandardCharsets.UTF_8);
+    final Release release = new Release(UUID.randomUUID(), UUID.randomUUID(), text);
+    hold(release);
+    final Capture.Refused refused = refused(release, release.byteSize());
+    assertEquals(Problem.Code.INVALID_REQUEST, refused.problem().code());
+    assertEquals(release.digest(), refused.problem().subject());
+    assertNoSpool();
   }
 
   @Test
-  void aClosureTheStoreDoesNotHoldIsMissing() {
-    assertRefused(
-        new Capture.Selection(ROOT, "APPROVED", "sha256:" + "1".repeat(64)),
-        bounds(),
-        Problem.Code.MISSING_IMPORT,
-        ROOT);
-    assertRefused(
-        new Capture.Selection(ROOT, "CANDIDATE", finance.digest()),
-        bounds(),
-        Problem.Code.MISSING_IMPORT,
-        ROOT);
-    assertRefused(
-        new Capture.Selection(ROOT, "CANDIDATE", null),
-        bounds(),
-        Problem.Code.INVALID_REQUEST,
-        ROOT);
-    assertRefused(
-        new Capture.Selection(ROOT, "APPROVED", null), bounds(), Problem.Code.MISSING_IMPORT, ROOT);
-    Txn.executeWrite(dataset, () -> dataset.removeGraph(NodeFactory.createURI(shared.graph())));
-    assertRefused(selection(finance), bounds(), Problem.Code.MISSING_IMPORT, shared.graph());
+  void aReleaseOverItsTripleBoundIsRefusedAndLeavesNoSpool() throws Exception {
+    final Release release = Releases.of(MEMBERS);
+    hold(release);
+    final Capture.Refused refused =
+        assertThrows(
+            Capture.Refused.class,
+            () -> capture(release, new Capture.Bounds(5, 1 << 30, deadline()), () -> false));
+    assertEquals(Problem.Code.LIMIT_EXCEEDED, refused.problem().code());
+    assertEquals("maxClosureAxioms", refused.problem().subject());
+    assertNoSpool();
   }
 
   @Test
-  void everyBoundStopsTheCopyAndLeavesNoSpool() throws Exception {
-    final long later = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
-    assertRefused(
-        selection(finance),
-        new Capture.Bounds(3, 1_000, 1 << 20, later),
-        Problem.Code.LIMIT_EXCEEDED,
-        "maxImports");
-    assertRefused(
-        selection(finance),
-        new Capture.Bounds(100, 8, 1 << 20, later),
-        Problem.Code.LIMIT_EXCEEDED,
-        "maxClosureAxioms");
-    assertRefused(
-        selection(finance),
-        new Capture.Bounds(100, 1_000, 10, later),
-        Problem.Code.LIMIT_EXCEEDED,
-        "maxDiskBytes");
-    assertRefused(
-        selection(finance),
-        new Capture.Bounds(100, 1_000, 1 << 20, System.nanoTime() - 1),
-        Problem.Code.LIMIT_EXCEEDED,
-        "maxJobSeconds");
+  void aSpoolOverItsByteBoundIsRefusedAndLeavesNoSpool() throws Exception {
+    final StringBuilder many = new StringBuilder();
+    for (int i = 0; i < 40_000; i++) {
+      many.append(":i").append(i).append(" a :Asset ; rdfs:label \"individual ").append(i);
+      many.append("\" .\n");
+    }
+    final Release release = Releases.of(MEMBERS + many);
+    hold(release);
+    final Capture.Refused refused =
+        assertThrows(
+            Capture.Refused.class,
+            () -> capture(release, new Capture.Bounds(1 << 30, 1_000, deadline()), () -> false));
+    assertEquals("maxDiskBytes", refused.problem().subject());
+    assertNoSpool();
+  }
+
+  @Test
+  void aJobThatRunsOutOfTimeOrIsCancelledStopsTheCopy() throws Exception {
+    final StringBuilder many = new StringBuilder();
+    for (int i = 0; i < 20_000; i++) {
+      many.append(":i").append(i).append(" a :Asset .\n");
+    }
+    final Release release = Releases.of(MEMBERS + many);
+    hold(release);
+    final Capture.Refused late =
+        assertThrows(
+            Capture.Refused.class,
+            () ->
+                capture(
+                    release,
+                    new Capture.Bounds(1 << 30, 1 << 30, System.nanoTime() - 1),
+                    () -> false));
+    assertEquals("maxJobSeconds", late.problem().subject());
+    assertNoSpool();
     assertThrows(
         Capture.Cancelled.class,
-        () -> Capture.run(dataset, selection(finance), spool, bounds(), () -> true));
+        () -> capture(release, new Capture.Bounds(1 << 30, 1 << 30, deadline()), () -> true));
     assertNoSpool();
   }
 
-  /**
-   * The capture holds one read transaction, never the writer: a write to the serving dataset
-   * commits while the capture is in the middle of its copy, and the capture still sees the dataset
-   * as it was when it began, so the content it verified is the content it copied.
-   */
-  @Test
-  void writersAreNotBlockedAndTheCaptureSeesOneVersion() throws Exception {
-    final StringBuilder big = new StringBuilder("GRAPH <" + BASE + "graph/glossaryTerm/big> {\n");
-    for (int i = 0; i < 20_000; i++) {
-      big.append("<https://open-metadata.org/finance#c")
-          .append(i)
-          .append("> a <http://www.w3.org/2002/07/owl#Class> .\n");
-    }
-    Txn.executeWrite(
-        dataset,
-        () -> RDFParser.fromString(big.append("}\n").toString(), Lang.TRIG).parse(dataset));
-    final Manifests.Published large =
-        Manifests.publish(
-            dataset,
-            BASE,
-            BASE + "ontology/large",
-            BASE + "glossary/large",
-            "APPROVED",
-            List.of(BASE + "graph/glossaryTerm/big"),
-            List.of());
-    final AtomicBoolean wrote = new AtomicBoolean();
-    final AtomicLong writeMillis = new AtomicLong(-1);
-    final Capture.Result result =
-        Capture.run(
-            dataset,
-            selection(large),
-            spool,
-            bounds(),
-            () -> {
-              if (wrote.compareAndSet(false, true)) {
-                final Thread writer =
-                    new Thread(
-                        () -> {
-                          final long start = System.nanoTime();
-                          Txn.executeWrite(
-                              dataset,
-                              () ->
-                                  dataset.add(
-                                      NodeFactory.createURI(BASE + "graph/glossaryTerm/big"),
-                                      NodeFactory.createURI(BASE + "finance#Late"),
-                                      NodeFactory.createURI(
-                                          "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
-                                      NodeFactory.createURI(
-                                          "http://www.w3.org/2002/07/owl#Class")));
-                          writeMillis.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
-                        });
-                writer.start();
-                try {
-                  writer.join(10_000);
-                } catch (final InterruptedException e) {
-                  Thread.currentThread().interrupt();
-                }
-              }
-              return false;
-            });
-    assertTrue(writeMillis.get() >= 0, "the write did not commit during the capture");
-    assertTrue(writeMillis.get() < 5_000, writeMillis.get() + " ms");
-    assertEquals(20_002, result.triples(), "two header triples; the write is not in it");
-    final DatasetGraph copied = DatasetGraphFactory.create();
-    RDFDataMgr.read(copied, spool.toString());
-    assertFalse(
-        copied.contains(
-            Node.ANY, NodeFactory.createURI(BASE + "finance#Late"), Node.ANY, Node.ANY));
+  private Capture.Result capture(final Release release) throws Exception {
+    hold(release);
+    return capture(release, new Capture.Bounds(1 << 30, 1 << 30, deadline()), () -> false);
   }
 
-  /** The image smoke test checks this closure; its manifest must keep matching its graphs. */
-  @Test
-  void theSmokeTestsClosureStillMatchesItsManifest() throws Exception {
-    final Path fixture = Path.of("..", "test", "check-closure.trig");
-    final String digest =
-        Files.readAllLines(fixture).stream()
-            .filter(line -> line.startsWith("# closure-digest "))
-            .findFirst()
-            .orElseThrow()
-            .substring("# closure-digest ".length());
-    final DatasetGraph smoke =
-        DatabaseMgr.connectDatasetGraph(Location.create(directory.resolve("smoke")));
-    try {
-      Txn.executeWrite(smoke, () -> RDFDataMgr.read(smoke, fixture.toString()));
-      final Capture.Result result =
-          Capture.run(
-              smoke, new Capture.Selection(ROOT, "APPROVED", digest), spool, bounds(), () -> false);
-      assertEquals(6, result.graphs().size());
-      assertFalse(result.graphs().contains(BASE + "graph/draft/loan"));
-    } finally {
-      TDBInternal.expel(smoke);
-    }
-  }
-
-  private static Capture.Selection selection(final Manifests.Published published) {
-    return new Capture.Selection(published.ontologyIri(), "APPROVED", published.digest());
-  }
-
-  private Capture.Bounds bounds() {
-    return new Capture.Bounds(
-        100, 1_000_000, 1L << 30, System.nanoTime() + TimeUnit.MINUTES.toNanos(1));
-  }
-
-  private Capture.Result capture(final Capture.Selection selection, final Capture.Bounds bounds)
-      throws Exception {
-    return Capture.run(dataset, selection, spool, bounds, () -> false);
-  }
-
-  private void assertRefused(
-      final Capture.Selection selection,
+  private Capture.Result capture(
+      final Release release,
       final Capture.Bounds bounds,
-      final Problem.Code code,
-      final String subject) {
-    final Capture.Refused refused =
-        assertThrows(Capture.Refused.class, () -> capture(selection, bounds));
-    assertEquals(code, refused.problem().code(), refused.getMessage());
-    assertEquals(subject, refused.problem().subject(), refused.getMessage());
-    assertNoSpool();
+      final java.util.function.BooleanSupplier cancelled)
+      throws Exception {
+    return Capture.run(path(release), named(release, release.byteSize()), spool, bounds, cancelled);
+  }
+
+  private Capture.Refused refused(final Release release, final long byteSize) {
+    return assertThrows(
+        Capture.Refused.class,
+        () ->
+            Capture.run(
+                path(release),
+                named(release, byteSize),
+                spool,
+                new Capture.Bounds(1 << 30, 1 << 30, deadline()),
+                () -> false));
+  }
+
+  private static Capture.Release named(final Release release, final long byteSize) {
+    return new Capture.Release(
+        release.ontologyId().toString(),
+        release.releaseId().toString(),
+        release.digest(),
+        byteSize);
+  }
+
+  private void hold(final Release release) throws IOException {
+    Files.write(path(release), release.rdf());
+  }
+
+  private Path path(final Release release) {
+    return uploads.resolve(release.digest().substring("sha256:".length()));
   }
 
   private void assertNoSpool() {
-    assertFalse(Files.exists(spool));
-    assertFalse(Files.exists(spool.resolveSibling("capture.nq.gz.tmp")));
+    assertFalse(Files.exists(spool), "no spool unless the capture succeeded");
+    assertFalse(Files.exists(Path.of(spool + ".tmp")), "no partial spool");
+  }
+
+  private static long deadline() {
+    return System.nanoTime() + TimeUnit.MINUTES.toNanos(5);
+  }
+
+  private static DatasetGraph read(final Path file) throws IOException {
+    final DatasetGraph dataset = DatasetGraphFactory.createTxnMem();
+    try (InputStream in = new GZIPInputStream(Files.newInputStream(file))) {
+      RDFParser.source(in).lang(Lang.NQUADS).parse(dataset);
+    }
+    return dataset;
   }
 }

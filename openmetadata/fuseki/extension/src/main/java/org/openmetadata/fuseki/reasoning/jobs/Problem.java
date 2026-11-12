@@ -36,6 +36,7 @@ public record Problem(Code code, String message, String subject, String step) {
     NOT_IMPLEMENTED,
     GENERATION_MISMATCH,
     SUPERSEDED,
+    INPUT_CHANGED,
     MISSING_IMPORT,
     PROFILE_VIOLATION,
     INCONSISTENT_ONTOLOGY,

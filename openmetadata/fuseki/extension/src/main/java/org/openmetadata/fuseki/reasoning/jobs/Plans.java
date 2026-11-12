@@ -15,6 +15,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -38,18 +39,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The steps each operation takes. CHECK and EXPLAIN capture the request's import closure from the
- * serving dataset, bulk-load it into a private working dataset in a worker, and classify or explain
- * there; the answer goes to the job's outcome, with its detail in {@code result.json} in the job
- * directory, which the RESULTS operation serves. An EXPLAIN of a fact the dataset's current
- * snapshot derived with a governance rule is answered from that snapshot's witnesses instead.
+ * The steps each operation takes. CHECK and EXPLAIN capture the release the request uploaded,
+ * bulk-load it into a private working dataset in a worker, and classify or explain there; the
+ * answer goes to the job's outcome, with its detail in {@code result.json} in the job directory,
+ * which the RESULTS operation serves. An EXPLAIN of a fact the dataset's current snapshot derived
+ * with a governance rule is answered from that snapshot's witnesses instead.
  *
- * <p>A REFRESH captures every active closure, the rule bundle and the catalog triples the rules
- * read; loads them; classifies each closure into its entailment graph; runs the rules to a fixed
- * point; compacts; and publishes the working dataset as the dataset's new snapshot ({@link
- * SnapshotStore}). Every step is bounded by the job's deadline and the disk quota, the classify and
- * rules steps together by maxDerivedTriples, and the rules by maxRulePasses; a refresh that reaches
- * any of them, or meets an inconsistent closure, fails and publishes nothing.
+ * <p>A REFRESH captures every active release from the serving dataset and the catalog triples the
+ * rules read; loads them; classifies each release into its entailment graph; runs the request's
+ * rules to a fixed point; compacts; and publishes the working dataset as the dataset's new snapshot
+ * ({@link SnapshotStore}). Every step is bounded by the job's deadline and the disk quota, the
+ * classify and rules steps together by maxDerivedTriples, and the rules by maxRulePasses; a refresh
+ * that reaches any of them, or meets an inconsistent release, fails and publishes nothing.
  *
  * <p>A job has {@link JobSettings#maxJobSeconds()} from its start: each worker step gets what is
  * left as its deadline. A check that reaches a limit or its time answers INCOMPLETE with the
@@ -58,10 +59,10 @@ import org.slf4j.LoggerFactory;
 final class Plans {
   static final String CAPTURE = "capture";
   static final String SPOOL = "capture.nq.gz";
+  static final String CAPTURE_RESULT = "capture.json";
   static final String RESULT = "result.json";
   static final String WORKING = "working";
   static final String CHECK_FILE = "check.ofn";
-  static final String REFRESH_CAPTURE = "capture.json";
 
   /** Rule problems a refused bundle reports in its message, the first in bundle order. */
   static final int MAX_REPORTED_RULE_PROBLEMS = 10;
@@ -94,61 +95,50 @@ final class Plans {
                     publish(operations));
         case CHECK ->
             List.of(
-                capture(operations, datasets, deadline),
+                capture(operations, deadline),
                 load(operations, deadline),
                 classify(operations, deadline));
         case EXPLAIN ->
             List.of(
                 governance(operations),
-                capture(operations, datasets, deadline),
+                capture(operations, deadline),
                 load(operations, deadline),
                 explain(operations, deadline));
       };
     };
   }
 
-  private static Stage capture(
-      final Operations operations, final ServingDatasets datasets, final long deadline) {
+  private static Stage capture(final Operations operations, final long deadline) {
     return stage(
         CAPTURE,
         context -> {
-          final DatasetGraph dataset = datasets.get(context.job().dataset());
-          if (dataset == null) {
-            return Stage.Result.failed(
-                Problem.of(
-                        Problem.Code.INVALID_REQUEST,
-                        "Dataset '" + context.job().dataset() + "' is no longer served")
-                    .atStep(CAPTURE));
-          }
-          final long left = diskLeft(operations);
+          final JsonObject request = context.request();
+          final JsonObject release =
+              request.get("ontologyReleases").getAsArray().get(0).getAsObject();
+          final JsonObject upload = request.getObj("releaseRdf");
+          final String digest = upload.getString("digest");
+          final Path held = JobInputs.path(operations.settings().reasoningRoot(), digest);
           final Capture.Bounds bounds =
               new Capture.Bounds(
-                  Operations.MAX_IMPORTS,
-                  operations.workerLimits().maxClosureTriples(),
-                  left,
-                  deadline);
-          final JsonObject request = context.request();
+                  operations.workerLimits().maxClosureTriples(), diskLeft(operations), deadline);
           try {
             final Capture.Result captured =
                 Capture.run(
-                    dataset,
-                    new Capture.Selection(
-                        request.getString("ontologyIri"),
-                        request.getString("ontologySelection"),
-                        request.hasKey("ontologyDigest")
-                            ? request.getString("ontologyDigest")
-                            : null),
+                    held,
+                    new Capture.Release(
+                        release.getString("ontologyId"),
+                        release.getString("releaseId"),
+                        digest,
+                        upload.getNumber("byteSize").longValue()),
                     context.directory().resolve(SPOOL),
                     bounds,
                     context.cancelled());
             AtomicFiles.write(
-                context.directory().resolve(CAPTURE + ".json"), JSON.toString(captured.toJson()));
+                context.directory().resolve(CAPTURE_RESULT), JSON.toString(captured.toJson()));
             LOG.info(
-                "Reasoning job {} captured {} manifests and {} graphs, {} triples, {} bytes in {}"
-                    + " ms",
+                "Reasoning job {} captured release {}: {} triples, {} bytes in {} ms",
                 context.job().id(),
-                captured.manifests().size(),
-                captured.graphs().size(),
+                release.getString("releaseId"),
                 captured.triples(),
                 captured.bytes(),
                 captured.millis());
@@ -313,33 +303,34 @@ final class Plans {
           }
           final Capture.Bounds bounds =
               new Capture.Bounds(
-                  Operations.MAX_IMPORTS,
-                  operations.workerLimits().maxClosureTriples(),
-                  diskLeft(operations),
-                  deadline);
+                  operations.workerLimits().maxClosureTriples(), diskLeft(operations), deadline);
           try {
+            final List<RefreshCapture.Release> releases = new ArrayList<>();
+            for (final JsonValue value : request.get("ontologyReleases").getAsArray()) {
+              final JsonObject release = value.getAsObject();
+              releases.add(
+                  new RefreshCapture.Release(
+                      release.getString("ontologyId"),
+                      release.getString("releaseId"),
+                      release.getString("contentDigest")));
+            }
             final RefreshCapture.Result captured =
                 RefreshCapture.run(
                     dataset,
-                    request.getString("ruleBundleDigest"),
-                    carriesRules(request) ? request.get("rules").getAsArray() : null,
-                    request.hasKey("ontologyDigest") ? request.getString("ontologyDigest") : null,
+                    releases,
+                    RuleBundle.of(request.get("rules").getAsArray()),
                     context.directory(),
                     bounds,
                     context.cancelled());
-            final Optional<Problem> refused = admit(operations, captured.bundle());
-            if (refused.isPresent()) {
-              return Stage.Result.failed(refused.get().atStep(CAPTURE));
-            }
             final JsonObject json = captured.toJson();
             json.put("baseGeneration", base);
-            AtomicFiles.write(context.directory().resolve(REFRESH_CAPTURE), JSON.toString(json));
+            AtomicFiles.write(context.directory().resolve(CAPTURE_RESULT), JSON.toString(json));
             LOG.info(
-                "Reasoning job {} captured {} closures, {} rules and {} catalog triples in {}"
+                "Reasoning job {} captured {} releases, {} rules and {} catalog triples in {}"
                     + " graphs: {} triples, {} bytes in {} ms",
                 context.job().id(),
                 captured.closures().size(),
-                captured.bundle().rules().size(),
+                captured.rules(),
                 captured.catalogTriples(),
                 captured.catalogGraphs().size(),
                 captured.triples(),
@@ -355,16 +346,8 @@ final class Plans {
   }
 
   /**
-   * Whether a refresh carries its rules. OpenMetadata names its bundle by digest and sends no rules
-   * (its docs/rdf-rule-bundle-contract.md); an empty list, as older requests send, says the same.
-   */
-  static boolean carriesRules(final JsonObject request) {
-    return request.hasKey("rules") && !request.get("rules").getAsArray().isEmpty();
-  }
-
-  /**
    * Compiles every rule of a bundle with the RULES step's compiler, so an invalid bundle is refused
-   * before anything runs, naming its first refused rule.
+   * at submission, before anything runs, naming its first refused rule.
    */
   static Optional<Problem> admit(final Operations operations, final RuleBundle bundle) {
     if (bundle.rules().isEmpty()) {
@@ -379,7 +362,7 @@ final class Plans {
     if (problems.isEmpty()) {
       return Optional.empty();
     }
-    final StringBuilder message = new StringBuilder("The rule bundle is refused: ");
+    final StringBuilder message = new StringBuilder("The rules are refused: ");
     for (int i = 0; i < Math.min(problems.size(), MAX_REPORTED_RULE_PROBLEMS); i++) {
       message
           .append(i == 0 ? "" : "; ")
@@ -408,7 +391,7 @@ final class Plans {
     return stage(
         "classify",
         context -> {
-          final JsonObject capture = json(context, REFRESH_CAPTURE);
+          final JsonObject capture = json(context, CAPTURE_RESULT);
           final long maxDerived = operations.workerLimits().maxNewFacts();
           long derived = 0;
           final JsonArray outcomes = new JsonArray();
@@ -461,7 +444,7 @@ final class Plans {
               return Stage.Result.failed(
                   Problem.of(
                           Problem.Code.INCONSISTENT_ONTOLOGY,
-                          "The active closure of <"
+                          "The active release of <"
                               + closure.ontologyIri()
                               + "> (version <"
                               + closure.versionIri()
@@ -579,12 +562,10 @@ final class Plans {
     return stage(
         "publish",
         context -> {
-          final JsonObject capture = json(context, REFRESH_CAPTURE);
+          final JsonObject capture = json(context, CAPTURE_RESULT);
           final JsonObject classified = json(context, "classify.json");
           final Revision revision = Revision.of(context.request());
           final JsonObject detail = new JsonObject();
-          detail.put("activationDigest", capture.get("activationDigest"));
-          detail.put("ruleBundle", capture.get("rules"));
           detail.put("closures", classified.get("closures"));
           detail.put("rules", ruleSummary(context));
           final JsonObject catalog = new JsonObject();
@@ -620,8 +601,6 @@ final class Plans {
           result.put("operation", "REFRESH");
           result.put("snapshot", snapshot);
           result.put("generation", operations.snapshots().generation(context.job().dataset()));
-          result.put("activationDigest", capture.get("activationDigest"));
-          result.put("ruleBundle", capture.get("rules"));
           result.put("catalog", catalog);
           result.put("closures", classified.get("closures"));
           result.put("rules", ruleSummary(context));
@@ -848,6 +827,7 @@ final class Plans {
         result,
         "target",
         "justifications",
+        "justificationSources",
         "justificationsIncomplete",
         "consistencyChecks",
         "engine",
@@ -893,10 +873,12 @@ final class Plans {
     return step;
   }
 
-  /** The working dataset holds exactly the captured closure, so the closure is all of it. */
+  /** The working dataset holds exactly the captured release, so the closure is all of it. */
   private static JsonObject closure(final Stage.Context context) {
     final JsonObject closure = new JsonObject();
-    closure.put("root", context.request().getString("ontologyIri"));
+    closure.put(
+        "root",
+        JSON.read(context.directory().resolve(CAPTURE_RESULT).toString()).getString("root"));
     closure.put("allGraphs", true);
     return closure;
   }

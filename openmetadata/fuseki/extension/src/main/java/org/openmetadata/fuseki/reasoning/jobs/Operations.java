@@ -38,11 +38,11 @@ import org.openmetadata.fuseki.reasoning.WorkerLimits;
  */
 public final class Operations implements AutoCloseable {
   /**
-   * Graphs in one import closure. OpenMetadata keeps each axiom, relationship type and glossary
-   * term in its own graph, so a closure is many small graphs; the bound keeps the set of graph
-   * names the capture holds in memory, and the worker's step file, small.
+   * Ontologies in one import closure: one, since imports between ontologies are deferred and a
+   * release that imports another is refused (OpenMetadata's
+   * ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules).
    */
-  public static final int MAX_IMPORTS = 10_000;
+  public static final int MAX_IMPORTS = 1;
 
   static final String RULE_CODE_MISSING =
       "The worker's rule compiler is not installed, so a refresh cannot admit its rules.";
@@ -213,6 +213,7 @@ public final class Operations implements AutoCloseable {
     limits.put("maxQuerySeconds", jobSettings.maxQuerySeconds());
     limits.put("maxDerivedTriples", workerLimits.maxNewFacts());
     limits.put("maxRulePasses", workerLimits.maxPasses());
+    limits.put("maxUploadBytes", jobSettings.maxUploadBytes());
     if (diskQuota > 0) {
       limits.put("maxDiskBytes", diskQuota);
     }

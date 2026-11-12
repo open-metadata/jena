@@ -1,7 +1,7 @@
 # Rule admission outcomes from the store's RuleCompiler (jena openmetadata/governance-rules-step
 # 6cc5de56dd, Jena 6.2.0, maxRulePatterns 64), each file compiled as a CONSTRUCT rule named
 # vector-rule. OpenMetadata's RuleAdmissionCheck must give the same outcome and the same sorted,
-# distinct problem codes; see docs/rdf-rule-bundle-contract.md.
+# distinct problem codes.
 accept-bind-not-in-template.rq accepted
 accept-exactly-32-template-triples.rq accepted
 accept-exactly-64-patterns.rq accepted

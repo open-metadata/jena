@@ -12,6 +12,8 @@
  */
 package org.openmetadata.reasoner;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
+import java.lang.management.ManagementFactory;
 import java.util.List;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
@@ -100,9 +102,26 @@ public record Limits(
         4L << 30);
   }
 
-  /** The defaults for this JVM's heap. */
+  /** The defaults for this JVM's configured heap. */
   public static Limits defaults() {
-    return forHeap(Runtime.getRuntime().maxMemory());
+    return forHeap(configuredHeap());
+  }
+
+  /**
+   * The heap the worker was launched with ({@code -Xmx}, OPENMETADATA_REASONER_HEAP). Not {@link
+   * Runtime#maxMemory()}: under the launcher's parallel collector that excludes one survivor space,
+   * so a 2 GiB heap reported 1.92 GiB and admitted 47,925 individuals instead of 50,000.
+   */
+  static long configuredHeap() {
+    try {
+      final String value =
+          ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class)
+              .getVMOption("MaxHeapSize")
+              .getValue();
+      return Math.max(Long.parseLong(value), Runtime.getRuntime().maxMemory());
+    } catch (final RuntimeException e) {
+      return Runtime.getRuntime().maxMemory();
+    }
   }
 
   private static long scaled(final long perGib, final double gib) {

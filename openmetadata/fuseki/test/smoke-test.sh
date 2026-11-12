@@ -112,6 +112,11 @@ status_is() {
 }
 
 # Fuseki 6.2 labels the sample with application="fuseki" and prints it in scientific notation.
+server_flag_set() {
+  docker exec "$CONTAINER" sh -c 'tr "\0" " " < /proc/$(pgrep -f fuseki-server.jar | head -1)/cmdline' \
+    | grep -q -- "$1"
+}
+
 heap_max_bytes_is() {
   local actual
   actual=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics" \
@@ -292,7 +297,7 @@ new_uuid() {
 }
 
 refresh_request() {
-  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologySelection": "APPROVED", "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
+  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologyReleases": [{"ontologyId": "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", "releaseId": "8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d", "contentDigest": "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}], "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
 }
 
 job_state_becomes() {
@@ -301,6 +306,38 @@ job_state_becomes() {
     sleep 0.1
   done
   return 1
+}
+
+# Status of a SPARQL update inserting $2 into $1's default graph.
+update_status() {
+  curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" -X POST \
+    -H 'Content-Type: application/sparql-update' \
+    --data "INSERT DATA { <$2> <urn:smoke:p> \"v\" }" "$BASE/$1"
+}
+
+update_applied() {
+  [[ "$(update_status "$1" "$2")" == 2* ]]
+}
+
+storage_report() {
+  curl -fs -u "admin:$PASSWORD" "$BASE/\$/openmetadata/storage"
+}
+
+dataset_ask() {
+  curl -fs -u "admin:$PASSWORD" -H 'Accept: application/sparql-results+json' -G \
+    --data-urlencode "query=$2" "$BASE/$1/sparql" | jq -r .boolean
+}
+
+# A file of the Fuseki JVM's /proc entry, seen from inside the container: docker top lists host
+# pids. The [S] keeps the probe's own command line from matching.
+fuseki_proc() {
+  docker exec "$CONTAINER" sh -c "for p in /proc/[0-9]*; do
+    if grep -q 'Fuseki[S]erver' \$p/cmdline 2> /dev/null; then tr '\0' ' ' < \$p/$1; break; fi
+  done"
+}
+
+fuseki_jvm_has() {
+  fuseki_proc cmdline | grep -q -- "$1"
 }
 
 echo "== Defaults: stock Fuseki, extension off =="
@@ -312,6 +349,7 @@ check "union default graph is off by default" union_is ds false
 check "health ping is anonymous" status_is 200 "$BASE/\$/ping"
 check "queries require the admin account" status_is 401 -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
 check "heap follows FUSEKI_HEAP" heap_max_bytes_is 536870912
+check "direct buffers are capped" server_flag_set "-XX:MaxDirectMemorySize=256m"
 check "reasoning is off by default" [ "$(reasoner readiness 2> /dev/null | jq -r .status)" = "DISABLED" ]
 check "no reasoning directory without reasoning" docker exec "$CONTAINER" test ! -e /fuseki/reasoning
 
@@ -367,6 +405,24 @@ fresh_volume
 start --user 123456:0 -e FUSEKI_DATASETS=arbitrary
 check "a random uid in group 0 can create datasets" dataset_exists arbitrary
 
+echo "== Disk space =="
+fresh_volume
+STORAGE=(-e FUSEKI_DATASETS=openmetadata -e OPENMETADATA_EXTENSION_ENABLED=true)
+start "${STORAGE[@]}"
+check "the storage report requires the admin account" status_is 401 "$BASE/\$/openmetadata/storage"
+check "it reports the volume" [ "$(storage_report | jq '.totalBytes > 0 and .usableBytes > 0 and .reserveBytes > 0')" = "true" ]
+check "writes are open above the reserve" [ "$(storage_report | jq .lowOnSpace)" = "false" ]
+check "an update is applied above the reserve" update_applied openmetadata/update urn:smoke:kept
+check "the JVM is told not to dump core" fuseki_jvm_has -XX:-CreateCoredumpOnCrash
+start "${STORAGE[@]}" -e OPENMETADATA_STORAGE_MIN_FREE=999t
+check "below the reserve the report says writes are refused" [ "$(storage_report | jq .lowOnSpace)" = "true" ]
+check "an update gets 507 Insufficient Storage" [ "$(update_status openmetadata/update urn:smoke:refused)" = "507" ]
+check "so does an update sent to the dataset URL" [ "$(update_status openmetadata urn:smoke:refused)" = "507" ]
+check "and a Graph Store upload" [ "$(upload_status openmetadata 1024)" = "507" ]
+check "nothing refused was applied" [ "$(dataset_ask openmetadata 'ASK { <urn:smoke:refused> ?p ?o }')" = "false" ]
+check "queries still work" [ "$(dataset_ask openmetadata 'ASK { <urn:smoke:kept> ?p ?o }')" = "true" ]
+check "compaction is not refused" status_is 200 -u "admin:$PASSWORD" -X POST "$BASE/\$/compact/openmetadata"
+
 echo "== Invalid settings fail fast =="
 check "missing ADMIN_PASSWORD" exits_with_error
 check "non-numeric FUSEKI_QUERY_TIMEOUT_MS" exits_with_error -e ADMIN_PASSWORD=x -e FUSEKI_QUERY_TIMEOUT_MS=abc
@@ -380,6 +436,7 @@ check "invalid OPENMETADATA_REASONER_PAGE_CACHE_FLOOR" exits_with_error -e ADMIN
 check "non-numeric OPENMETADATA_REASONER_CPUS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_CPUS=two
 check "a zero OPENMETADATA_REASONING_MAX_QUEUED_JOBS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_MAX_QUEUED_JOBS=0
 check "invalid OPENMETADATA_REASONING_DISK_QUOTA" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_DISK_QUOTA=0%
+check "invalid OPENMETADATA_STORAGE_MIN_FREE" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=true -e OPENMETADATA_STORAGE_MIN_FREE=lots
 
 echo "== Reasoner: readiness refuses an undersized container =="
 fresh_volume
@@ -453,51 +510,95 @@ response=$(submit_job "$(refresh_request "$request_id")")
 check "its request ID returns the same job with 200" \
   [ "$(tail -1 <<< "$response") $(body_of "$response" | jq -r .id)" = "200 $job_id" ]
 check "an invalid request is refused with 400" [ "$(submit_job '{"operation": "REFRESH"}' | tail -1)" = "400" ]
-check "the job fails at capture: no rule bundle has its digest" job_state_becomes "$job_id" FAILED
-check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "RULE_FAILED capture" ]
+check "the job fails at capture: the serving graph holds no graph for the release" job_state_becomes "$job_id" FAILED
+check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "INPUT_CHANGED capture" ]
 check "its manifest is on the data volume" docker exec "$CONTAINER" test -f "$JOBS/$job_id/job.json"
 check "cancelling a finished job leaves it unchanged" [ "$(curl -s -u "admin:$PASSWORD" -X DELETE \
   "$BASE/reasoning/jobs/$job_id" | jq -r .state)" = "FAILED" ]
 check "cancelling an unknown job answers 404" [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" \
   -X DELETE "$BASE/reasoning/jobs/$(new_uuid)")" = "404" ]
 check "a failed job has no results" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "404" ]
-check "and answers with its problem" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "RULE_FAILED" ]
+check "and answers with its problem" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "INPUT_CHANGED" ]
 docker restart "$CONTAINER" > /dev/null
 for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
 check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]
 response=$(submit_job "$(refresh_request "$request_id")")
 check "and so does its request ID" [ "$(body_of "$response" | jq -r .id)" = "$job_id" ]
 
-echo "== Reasoner: a CHECK and an EXPLAIN over a pinned closure =="
-curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/trig' \
-  --data-binary "@$HERE/check-closure.trig" "$BASE/ds/data"
-closure_digest=$(sed -n 's/^# closure-digest //p' "$HERE/check-closure.trig")
-ontology_request() {
-  printf '{"requestId": "%s", "operation": "%s", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 1}, "ontologySelection": "APPROVED", "ontologyIri": "https://open-metadata.org/ontology/finance", "ontologyDigest": "%s", %s}' \
-    "$(new_uuid)" "$1" "$closure_digest" "$2"
+echo "== Reasoner: a CHECK and an EXPLAIN over an uploaded release =="
+RELEASE="$HERE/check-release.rdf-thrift"
+release_hex=$(shasum -a 256 "$RELEASE" | cut -d' ' -f1)
+release_size=$(wc -c < "$RELEASE" | tr -d ' ')
+upload_status() {
+  curl -s -o /dev/null -w '%{http_code}' "${@:3}" -X PUT -H "Content-Type: ${CONTENT_TYPE:-application/rdf+thrift}" \
+    --data-binary "@$2" "$BASE/reasoning/inputs/sha256:$1"
 }
-job_answer() {
+check "anonymous uploads are refused" [ "$(upload_status "$release_hex" "$RELEASE")" = "401" ]
+check "a release is uploaded with 201" [ "$(upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "201" ]
+check "the same bytes again are held with 200" [ "$(upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "200" ]
+check "bytes that do not hash to the path are refused with 400" \
+  [ "$(upload_status "$release_hex" "$HERE/check-release.ttl" -u "admin:$PASSWORD")" = "400" ]
+check "another content type is refused with 415" \
+  [ "$(CONTENT_TYPE=text/turtle upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "415" ]
+check "the upload is on the data volume" docker exec "$CONTAINER" test -f "/fuseki/reasoning/inputs/$release_hex"
+check "capabilities report the upload limit" \
+  [ "$(reasoning_get capabilities | jq -r .limits.maxUploadBytes)" = "67108864" ]
+ontology_request() {
+  printf '{"requestId": "%s", "operation": "%s", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 1}, "ontologyReleases": [{"ontologyId": "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", "releaseId": "%s", "contentDigest": "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}], "releaseRdf": {"digest": "sha256:%s", "byteSize": %s, "mediaType": "application/rdf+thrift"}, %s}' \
+    "$(new_uuid)" "$1" "${RELEASE_ID:-8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d}" "${UPLOAD_HEX:-$release_hex}" "${UPLOAD_SIZE:-$release_size}" "$2"
+}
+# Submits a job, waits for it to end and prints its id.
+run_job() {
   local id
   id=$(body_of "$(submit_job "$1")" | jq -r .id)
   for _ in $(seq 1 120); do
     case "$(reasoning_get "jobs/$id" | jq -r .state)" in QUEUED|RUNNING) sleep 1 ;; *) break ;; esac
   done
-  reasoning_get "jobs/$id" | jq -r '"\(.state) \(.outcome // .problem.code)"'
+  echo "$id"
 }
-check "the Approved closure is consistent: its Draft graph is not captured" \
-  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "CONSISTENCY"}')")" = "SUCCEEDED NOT_ENTAILED" ]
+job_answer() {
+  reasoning_get "jobs/$(run_job "$1")" | jq -r '"\(.state) \(.outcome // .problem.code)"'
+}
+consistency='"check": {"kind": "CONSISTENCY"}'
+check "the release is consistent" \
+  [ "$(job_answer "$(ontology_request CHECK "$consistency")")" = "SUCCEEDED NOT_ENTAILED" ]
 check "a class it makes unsatisfiable is found" \
   [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "SATISFIABILITY", "classExpression": {"kind": "NAMED_CLASS", "classIri": "https://open-metadata.org/finance#Hybrid"}}')")" = "SUCCEEDED ENTAILED" ]
-check "and explained" \
-  [ "$(job_answer "$(ontology_request EXPLAIN '"explain": {"statement": {"subjectIri": "https://open-metadata.org/finance#Hybrid", "predicateIri": "http://www.w3.org/2000/01/rdf-schema#subClassOf", "objectKind": "IRI", "objectIri": "http://www.w3.org/2002/07/owl#Nothing"}}')")" = "SUCCEEDED ENTAILED" ]
+explain='"explain": {"statement": {"subjectIri": "https://open-metadata.org/finance#Hybrid", "predicateIri": "http://www.w3.org/2000/01/rdf-schema#subClassOf", "objectKind": "IRI", "objectIri": "http://www.w3.org/2002/07/owl#Nothing"}}'
+explained=$(run_job "$(ontology_request EXPLAIN "$explain")")
+check "and explained" [ "$(reasoning_get "jobs/$explained" | jq -r '"\(.state) \(.outcome)"')" = "SUCCEEDED ENTAILED" ]
+check "the explanation names the source member of each axiom" \
+  [ "$(docker exec "$CONTAINER" cat "$JOBS/$explained/result.json" | jq -c '.justificationSources[0]')" = \
+    '[["urn:openmetadata:ontology-member:3"],["urn:openmetadata:ontology-member:1"],["urn:openmetadata:ontology-member:2"]]' ]
+other_release=$(new_uuid)
+never_hex=$(printf 'never uploaded' | shasum -a 256 | cut -d' ' -f1)
+check "a release that is not the one named fails the job with INPUT_CHANGED" \
+  [ "$(job_answer "$(RELEASE_ID=$other_release ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
+check "an upload that was never made fails the job with INPUT_CHANGED" \
+  [ "$(job_answer "$(UPLOAD_HEX=$never_hex ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
 
 echo "== Reasoner: REFRESH, snapshot queries and governance explanations =="
 curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/trig' \
   --data-binary "@$HERE/refresh-catalog.trig" "$BASE/ds/data"
-bundle_digest=$(sed -n 's/^# rule-bundle-digest //p' "$HERE/refresh-catalog.trig")
+pii_rule='PREFIX om: <https://open-metadata.org/ontology/>
+CONSTRUCT {
+  ?downstream om:hasTag ?piiTag .
+  ?downstream om:inferredTagSource ?upstream
+}
+WHERE {
+  ?upstream om:hasTag ?piiTag .
+  ?piiTag om:tagFQN ?fqn .
+  FILTER(STRSTARTS(?fqn, "PII."))
+  ?colLineage om:fromColumn ?upstream ;
+              om:toColumn ?downstream .
+}'
 refresh_at() {
-  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": %s}, "ontologySelection": "APPROVED", "ruleBundleDigest": "%s"}' \
-    "$(new_uuid)" "$1" "$bundle_digest"
+  jq -cn --arg id "$(new_uuid)" --argjson watermark "$1" --arg release "${RELEASE_ID:-8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d}" --arg body "$pii_rule" '{
+    requestId: $id, operation: "REFRESH",
+    sourceRevision: {datasetGeneration: "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", liveWriteWatermark: $watermark},
+    ontologyReleases: [{ontologyId: "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", releaseId: $release, contentDigest: "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}],
+    ruleBundleDigest: "sha256:9e4f1c2b3a4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7",
+    rules: [{name: "pii-propagation-via-lineage", ruleType: "CONSTRUCT", priority: 100, enabled: true, ruleBody: $body}]}'
 }
 snapshot_query() {
   curl -s -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/json' \
@@ -514,12 +615,12 @@ for _ in $(seq 1 180); do
 done
 check "a refresh publishes a snapshot" [ "$(reasoning_get "jobs/$refresh_id" | jq -r '"\(.state) \(.snapshotId != null)"')" = "SUCCEEDED true" ]
 echo "      $(reasoning_get "jobs/$refresh_id" | jq -c '{progress, engines: [.input.engines[].name]}')"
-check "a snapshot query sees the governance facts, not the phase 0 graph" [ "$(pii_columns)" = "c1,c2,c3" ]
+check "a snapshot query sees the governance facts, not the phase 0, staging or unlisted-ontology graphs" [ "$(pii_columns)" = "c1,c2,c3" ]
 check "and never the provenance graph" \
   [ "$(snapshot_query 'ASK { GRAPH <urn:openmetadata:provenance> { ?s ?p ?o } }' | jq -r .results.boolean)" = "false" ]
-check "nor the Draft graph" \
-  [ "$(snapshot_query 'ASK { GRAPH <https://open-metadata.org/graph/draft/loan> { ?s ?p ?o } }' | jq -r .results.boolean)" = "false" ]
-check "the refresh's result lists its closure" \
+check "nor an ontology graph that was not listed" \
+  [ "$(snapshot_query 'ASK { GRAPH <https://open-metadata.org/graph/ontology/00000000-0000-4000-8000-00000000dead> { ?s ?p ?o } }' | jq -r .results.boolean)" = "false" ]
+check "the refresh's result lists its release" \
   [ "$(reasoning_get "results/$refresh_id" | jq -r '"\(.page.items) \(.page.total)"')" = "closures 1" ]
 check "a governance fact is explained from the snapshot's witnesses" \
   [ "$(job_answer "$(ontology_request EXPLAIN '"explain": {"statement": {"subjectIri": "https://open-metadata.org/catalog/c3", "predicateIri": "https://open-metadata.org/ontology/hasTag", "objectKind": "IRI", "objectIri": "https://open-metadata.org/catalog/pii"}}')")" = "SUCCEEDED ENTAILED" ]
@@ -532,12 +633,8 @@ check "an older refresh cannot replace it" [ "$(job_answer "$(refresh_at 15)")" 
 docker restart "$CONTAINER" > /dev/null
 for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
 check "the snapshot serves again after a restart" [ "$(pii_columns) $(snapshot_query 'ASK {}' | jq -r .generation)" = "c1 2" ]
-
-curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/sparql-update' \
-  --data 'INSERT DATA { GRAPH <https://open-metadata.org/graph/asset/loan> { <https://open-metadata.org/finance#loan> a <https://open-metadata.org/finance#Liability> } }' \
-  "$BASE/ds/update"
-check "a pinned graph that changed fails the job with GENERATION_MISMATCH" \
-  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "CONSISTENCY"}')")" = "FAILED GENERATION_MISMATCH" ]
+check "a refresh that lists a release the graph does not hold fails with INPUT_CHANGED" \
+  [ "$(job_answer "$(RELEASE_ID=$other_release refresh_at 30)")" = "FAILED INPUT_CHANGED" ]
 
 echo "== Reasoner: a worker never disturbs Fuseki =="
 awk 'BEGIN { for (i = 0; i < 1000; i++) printf "<urn:smoke:s%d> <urn:smoke:p> \"%d\" .\n", i, i }' > "/tmp/$CONTAINER.serving.nt"

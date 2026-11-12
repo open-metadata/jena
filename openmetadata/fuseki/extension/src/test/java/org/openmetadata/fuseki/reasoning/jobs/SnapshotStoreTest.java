@@ -243,7 +243,7 @@ class SnapshotStoreTest {
                 + GENERATION
                 + "\", \"liveWriteWatermark\": "
                 + watermark
-                + "}, \"ontologySelection\": \"APPROVED\", \"ruleBundleDigest\": \"sha256:"
+                + "}, \"ontologyReleases\": [], \"ruleBundleDigest\": \"sha256:"
                 + "0".repeat(64)
                 + "\"}");
     return new SnapshotStore.Candidate(

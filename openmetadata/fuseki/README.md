@@ -29,13 +29,15 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `FUSEKI_MANAGE_SHIRO` | `true` | `false` keeps an operator-provided `$FUSEKI_BASE/shiro.ini`; `ADMIN_PASSWORD` is then not required. |
 | `FUSEKI_DATASETS` | unset | Comma-separated dataset names. Each gets a TDB2 dataset config in `$FUSEKI_BASE/configuration/<name>.ttl` if that file does not exist. Existing files are never modified. |
 | `FUSEKI_HEAP` | `4g` | Sets both `-Xms` and `-Xmx`, so the page-cache budget is predictable. Ignored when `JVM_ARGS` is set. |
-| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended. |
+| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended, and so is `-XX:MaxDirectMemorySize=256m` unless `JVM_ARGS` sets that flag. |
 | `FUSEKI_QUERY_TIMEOUT_MS` | unset | Server-wide `arq:queryTimeout`, applied to every dataset including existing ones. |
 | `FUSEKI_UPDATE_TIMEOUT_MS` | unset | Server-wide `arq:updateTimeout`, applied to every dataset. |
 | `FUSEKI_UNION_DEFAULT_GRAPH` | `false` | `true` makes the default graph the union of named graphs for every TDB2 dataset. |
 | `OPENMETADATA_EXTENSION_ENABLED` | `false` | `true` loads the OpenMetadata Graph Store extension. |
 | `OPENMETADATA_WRITE_TIMEOUT_MS` | `50000` | Extension only: deadline for a Graph Store upload, after which it is rolled back. |
 | `OPENMETADATA_MAX_UPLOAD_BYTES` | `67108864` | Extension only: largest accepted upload; larger ones get HTTP 413. |
+| `OPENMETADATA_STORAGE_MIN_FREE` | `10%` | Extension only: free space the data volume keeps. Below it every write gets HTTP 507 Insufficient Storage, nothing is applied, and reads and compaction keep working. A size such as `20g`, or a percentage of the volume. See [Disk space](#disk-space). |
+| `OPENMETADATA_STORAGE_ROOT` | `$FUSEKI_BASE/databases` | Extension only: the directory holding the TDB2 datasets, which the write guard and the storage report measure. |
 | `OPENMETADATA_REASONING_ENABLED` | `false` | `true` lets the extension run reasoner workers once the memory budget fits. Needs `OPENMETADATA_EXTENSION_ENABLED=true`. See [Reasoner](#reasoner). |
 | `OPENMETADATA_REASONER_HEAP` | `2g` | Worker heap `H_w`, its `-Xms` and `-Xmx`. At least `16m`. |
 | `OPENMETADATA_REASONER_OFF_HEAP` | `512m` | Worker off-heap budget `O_w`. At least `512m`, what the worker's flags cap. |
@@ -49,6 +51,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_MAX_QUERY_SECONDS` | `30` | Deadline of one snapshot query (`maxQuerySeconds`), and so how long a reader can keep a replaced snapshot on disk. At most 4 digits. |
 | `OPENMETADATA_REASONING_MAX_RESULT_ROWS` | `10000` | Rows one snapshot query or one page of a result returns (`maxResultRows`). At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES` | `4` | Snapshot queries that may run at once; more get HTTP 429. At most 3 digits. |
+| `OPENMETADATA_REASONING_MAX_UPLOAD_BYTES` | `64m` | The largest job input one `PUT /reasoning/inputs/...` may carry, the same as a Graph Store upload's limit. At least `1m`. Reported as the capability limit `maxUploadBytes`. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
 must be positive integers; sizes use the JVM's notation (`512m`, `2g`) with at most 13 digits;
@@ -76,6 +79,28 @@ guarantees are missing.
 
 When `OPENMETADATA_EXTENSION_ENABLED` is not `true`, the server runs with exactly the stock launch
 command: the extension's classes are never loaded.
+
+### Disk space
+
+TDB2 never reuses space on its own: every write transaction copies the index pages it touches, and the
+old pages stay on disk until the dataset is compacted (`POST /$/compact/<dataset>?deleteOld=true`).
+A dataset that only receives updates therefore grows until its volume is full. TDB2 memory-maps its
+files, so a write on a full volume does not fail cleanly: the JVM gets SIGBUS and exits, and keeps
+doing so on every restart. Compaction also needs free space about the size of the live data.
+
+The extension protects both:
+
+- **A write guard.** Below `OPENMETADATA_STORAGE_MIN_FREE`, SPARQL updates and Graph Store uploads and
+  deletes get HTTP 507 Insufficient Storage before they reach TDB2. Reads and compaction are not
+  refused, so the volume can always be compacted back above the reserve.
+- **A storage report.** `GET /$/openmetadata/storage` (admin only) returns the volume's
+  `totalBytes`, `usableBytes` and `reserveBytes`, and `lowOnSpace`, whether writes are refused.
+
+OpenMetadata reads the report to compact before the reserve is reached, and retries a 507 without
+counting it as a failed delivery.
+
+The image also starts the JVM with `-XX:-CreateCoredumpOnCrash`: a crash core dump is as large as
+the heap and lands on the node's disk rather than the data volume.
 
 ## Settings for OpenMetadata
 
@@ -118,12 +143,12 @@ TDB2 dataset under `/fuseki/reasoning`, has no network listener and never fetche
 
 This release adds the worker, its launcher, the memory-budget check and the HTTP job operations
 OpenMetadata calls ([Job operations](#job-operations)). `CHECK` and `EXPLAIN` run end to end: the
-extension captures the closure OpenMetadata pinned from the serving dataset
+extension captures the ontology release OpenMetadata uploaded
 ([Capture](#capture)), and a worker loads it and classifies or explains it. A `REFRESH` captures
-every active closure, OpenMetadata's rule bundle and the catalog triples the rules read, classifies
-each closure, runs the rules to a fixed point and publishes the result as an immutable snapshot
-([Refresh](#refresh), [Snapshots](#snapshots)), which `QUERY` reads and `EXPLAIN` explains
-governance facts from.
+every active release from the serving dataset and the catalog triples the rules read, classifies
+each release, runs the rules the request carries to a fixed point and publishes the result as an
+immutable snapshot ([Refresh](#refresh), [Snapshots](#snapshots)), which `QUERY` reads and `EXPLAIN`
+explains governance facts from.
 
 ### Engines
 
@@ -208,6 +233,19 @@ transitive containment hierarchy with its inverse and three assertions each (297
 247,000 logical axioms) wrote 581,000 triples in 44 s and peaked at 0.67 GiB of a 2 GiB heap after
 collection. The axiom limit is lower than that, because terminological axioms cost the engines more
 than assertions.
+
+Measured again on the published `6.2.0-600514c` image (Apple M4 Max, `linux/arm64`, two worker
+processors), the same shape needs:
+
+| Individuals | Closure triples | Logical axioms | Peak after collection | Classifies in |
+|---:|---:|---:|---:|---|
+| 10,000 | 59,434 | 49,384 | 0.16–0.23 GiB | 512 MiB, in 9–10 s |
+| 20,000 | 118,823 | 98,773 | 0.27–0.36 GiB | 512 MiB, in 16–26 s |
+| 50,000 | 296,997 | 246,947 | 0.57–0.65 GiB | 1 GiB, in 46–88 s; a 512 MiB heap runs out |
+
+The 200,000-axiom limit of the default heap therefore admits about 40,000 individuals of this shape;
+the 50,000-individual closure needs `OPENMETADATA_REASONER_HEAP=2560m` or a `maxLogicalAxioms` in
+its step file.
 
 The `RULES` limits do not grow with the heap: the step keeps its solutions, facts and witnesses on
 disk, and its heap does not grow with them. The starter rules over a 551,735-triple lineage catalog
@@ -331,7 +369,8 @@ the tests check against. The operations are served whenever the extension is ena
 
 | Request | Answer |
 |---|---|
-| `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the operations (`REFRESH`, `CHECK`, `EXPLAIN`, `RESULTS`, `QUERY`, each `AVAILABLE` or `NOT_IMPLEMENTED` with a reason), the memory budget (container limit, required bytes and each term), and the limits the store enforces (`maxQueuedJobs`, `maxDiskBytes`) |
+| `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the operations (`REFRESH`, `CHECK`, `EXPLAIN`, `RESULTS`, `QUERY`, each `AVAILABLE` or `NOT_IMPLEMENTED` with a reason), the memory budget (container limit, required bytes and each term), and the limits the store enforces (`maxQueuedJobs`, `maxDiskBytes`, `maxUploadBytes`, and the rest the protocol requires) |
+| `PUT /reasoning/inputs/sha256:<64 hex digits>` | Holds the body, `application/rdf+thrift`, as the input a later job names by that digest. `201` with `{"digest", "byteSize"}` when new; `200` when the same bytes were already held; `400` when the body is empty or does not hash to the digest in the path; `404` for a path that is not `sha256:` and 64 lowercase hex digits; `413` over `maxUploadBytes`; `415` for another content type; `503` when reasoning is disabled or holding it would put `/fuseki/reasoning` over the disk quota (`LIMIT_EXCEEDED`, subject `maxDiskBytes`); `405` for any other method |
 | `POST /reasoning/jobs?dataset=<name>` | `202` with the new job and a `Location`; `200` with the existing job when its `requestId` is known; `400` for a request the schema refuses; `404` for a dataset that is not served; `409` for a known `requestId` sent with a different request or dataset; `413` over 4 MiB; `415` unless `application/json`; `429` when the queue is full; `503` when reasoning is disabled or not ready, or the disk quota is reached |
 | `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
 | `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
@@ -341,8 +380,23 @@ the tests check against. The operations are served whenever the extension is ena
 Every refusal answers with the protocol's problem object, `{"code": ..., "message": ...}`, with
 `subject` naming the limit for `LIMIT_EXCEEDED`. A request is validated against the schema and the
 schemas it references, including the per-operation requirements (a `REFRESH` needs
-`ruleBundleDigest` and only accepts `APPROVED` ontologies; `CHECK` and `EXPLAIN` need `ontologyIri`
-and their question), before anything is stored. It may nest at most 64 levels deep.
+`ruleBundleDigest` and its `rules`, and takes no `releaseRdf`; `CHECK` and `EXPLAIN` name exactly
+one release in `ontologyReleases`, the uploaded RDF in `releaseRdf`, and their question), before
+anything is stored. It may nest at most 64 levels deep. Every request lists its ontology releases
+(`ontologyId`, `releaseId`, and the release's `contentDigest`, which the store only records); the
+job's `input` records them with `releaseRdf`.
+
+**Uploads.** A release is sent first, then a job names it. Uploads live under
+`/fuseki/reasoning/inputs/<hex>`, addressed by the SHA-256 of their bytes: the body is streamed to a
+temporary file while it is hashed, refused over `maxUploadBytes` or when the hash differs from the
+path, and renamed into place, so a reader never sees a partial upload and the same bytes uploaded
+again change nothing but the clock below. They count against `OPENMETADATA_REASONING_DISK_QUOTA` with
+everything else under `/fuseki/reasoning`, and an upload that would pass it is removed and refused.
+An upload is kept while any queued or running job names it. Once none does, it is removed when
+more than an hour has passed since it was last uploaded, so a second job over the same release needs
+no second upload; uploads no job ever names go the same way. The removal runs when an upload
+arrives, when a job ends and at server start, which also removes half-written uploads. The hour is
+fixed, not a setting.
 
 **Routing.** Fuseki dispatches a dataset's operations by endpoint name, so `/reasoning/jobs/<id>`
 cannot be one of them. The module registers one servlet at `/reasoning/*`, which routes the path
@@ -374,7 +428,7 @@ removed, oldest first. Directories without a `job.json` are never removed.
 **What a job does in this release.** A `CHECK` runs `capture`, `load` and `classify`; an
 `EXPLAIN` runs `snapshot` (a governance fact is answered there, see
 [Governance explanations](#governance-explanations)), then `capture`, `load` and `explain`; a
-`REFRESH` runs `capture`, `load`, `classify` (one worker step per closure), `rules`, `compact` and
+`REFRESH` runs `capture`, `load`, `classify` (one worker step per release), `rules`, `compact` and
 `publish` ([Refresh](#refresh)). The outcome of a check or explanation is the protocol's answer:
 
 | Result | Job |
@@ -384,21 +438,25 @@ removed, oldest first. Directories without a `job.json` are never removed.
 | Inconsistent closure | `SUCCEEDED`, `INCONSISTENT` |
 | A limit, the job's time, or the worker's heap ran out | `SUCCEEDED`, `INCOMPLETE`, with the problem `LIMIT_EXCEEDED` naming the limit (`maxImports`, `maxClosureAxioms`, `maxIndividuals`, `maxExpressionDepth`, `maxDiskBytes`, `maxJobSeconds`) or `MEMORY_BUDGET_EXHAUSTED` |
 | Closure outside OWL 2 DL | `FAILED`, `PROFILE_VIOLATION` |
-| No manifest for the request, or a manifest or import that is not one | `FAILED`, `MISSING_IMPORT`, `subject` the ontology or manifest |
-| A pinned graph or manifest whose content changed | `FAILED`, `GENERATION_MISMATCH`, `subject` the graph or version IRI |
+| The upload is not held, has another size or hash than `releaseRdf` says, or does not hold exactly one `owl:Ontology` with `owl:versionIRI <urn:openmetadata:ontology-release:{releaseId}>` | `FAILED`, `INPUT_CHANGED`, `subject` the upload's digest, or the `ontologyId` for a wrong header |
+| The release has an `owl:imports`, which nothing can satisfy because no other ontology is in the input | `FAILED`, `MISSING_IMPORT`, `subject` the imported IRI |
+| An upload that is not RDF-Thrift | `FAILED`, `INVALID_REQUEST`, `subject` the upload's digest |
 | A question naming an entity outside the closure | `FAILED`, `INVALID_REQUEST` |
 | Cancelled | `CANCELLED` |
 
 The job's `input.engines` names the engine build that answered. `result.json` in the job directory
 holds the detail: the unsatisfiable classes (at most 100, with the full count) and the check's
-axiom for a `CHECK`, the justifications for an `EXPLAIN`, and the closure's admission counts.
-`capture.json` lists the captured graphs. A question the schema admits but OWL cannot state, such as
+axiom for a `CHECK`, the justifications for an `EXPLAIN`, and the closure's admission counts. An
+`EXPLAIN` also gets `justificationSources`, parallel to `justifications`: for each axiom, the
+`dct:source` members the release export attached to it (empty for an axiom without one), so an
+explanation can name the members behind each statement. `capture.json` records the release's
+ontology IRI, its version IRI and the spool's size. A question the schema admits but OWL cannot state, such as
 an intersection without operands, is refused with `400` when the job is submitted.
 
 Capabilities report every operation `AVAILABLE` with the limits the protocol requires of it
 (`maxQueuedJobs`, `maxJobSeconds`, `maxDiskBytes`, `maxClosureAxioms`, `maxIndividuals`,
-`maxExpressionDepth` and `maxImports` for the jobs; `maxDerivedTriples` (10,000,000) and
-`maxRulePasses` (64) for `REFRESH`; `maxResultRows` for `RESULTS` and `QUERY`, and
+`maxExpressionDepth`, `maxImports` and `maxUploadBytes` for the jobs; `maxDerivedTriples`
+(10,000,000) and `maxRulePasses` (64) for `REFRESH`; `maxResultRows` for `RESULTS` and `QUERY`, and
 `maxQuerySeconds` for `QUERY`), the engine builds read from the worker jar's manifest plus
 `governance-rules` (`jena-6.2.0`, SPARQL CONSTRUCT rules), and the OWL 2 DL constructs as coverage.
 `NOT_READY` stays the transient answer (reasoning disabled, memory budget, disk unmeasurable, server
@@ -412,76 +470,34 @@ step file, so the worker enforces exactly what capabilities report.
 
 ### Capture
 
-OpenMetadata keeps each ontology axiom, term and relationship type in a named graph of its own,
-and pins a closure in a content-addressed version manifest, the graph
-`{base}graph/manifest/<hex>` (OpenMetadata's
-`ADR:2026-10-15-reasoning-closures-are-approved-graphs-pinned-by-a-content-manifest` and
-`docs/rdf-ontology-contract.md`). A request names its closure with `ontologyIri`,
-`ontologySelection` and `ontologyDigest`, the closure digest. The capture finds the manifest by the
-version IRI those give (`<ontologyIri>/version/<hex>`, or `/candidate/<hex>` for a candidate) and
-checks the graph's name; an `APPROVED` request without a digest uses the manifest
-`{base}graph/ontology/activations` names for the ontology. The store never needs OpenMetadata's
-base IRI.
+OpenMetadata seals an ontology's members into an immutable release. Fuseki holds only each
+ontology's active release, so a release under review, which a `CHECK` or `EXPLAIN` may name, is
+sent as an upload instead of entering the serving dataset (OpenMetadata's
+`ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules`). The upload is the
+release's export as RDF-Thrift, which keeps each statement's source member as an `owl:Axiom` with
+`owl:annotatedSource`, `owl:annotatedProperty`, `owl:annotatedTarget` and `dct:source`. The capture
+never reads the serving dataset. For the release a request names it:
 
-Inside one read transaction of the serving dataset, the capture then, for the manifest and each
-manifest it imports (`omr:importsManifest`):
+1. finds the upload `releaseRdf.digest` names and checks it again: its size must be `byteSize`
+   and its bytes must hash to the digest, as they did when they were uploaded, since a job may wait
+   in the queue and a disk may corrupt a file. Anything else is `INPUT_CHANGED` with the digest as
+   subject: upload again and resubmit;
+2. parses the RDF-Thrift as a stream into one graph, `https://open-metadata.org/graph/ontology/{ontologyId}`
+   (the name an active release has in the serving dataset), and writes N-Quads, gzip level 1, to
+   `capture.nq.gz` in the job directory, renamed into place only when complete. Memory does not
+   grow with the release;
+3. requires exactly one `owl:Ontology`, named, whose `owl:versionIRI` is
+   `urn:openmetadata:ontology-release:{releaseId}` of the release the request named. Anything else
+   is `INPUT_CHANGED` with the `ontologyId` as subject: the bytes are not that release. Imports
+   between ontologies are deferred, so no other ontology is in the input and any `owl:imports`
+   cannot resolve; it is `MISSING_IMPORT` naming the import. `contentDigest` is not checked, since
+   it is OpenMetadata's digest of the sealed manifest and says nothing about the export's bytes.
 
-1. recomputes the closure digest (`om-closure-v2`) from the manifest's header, its
-   `omr:pinnedDigest` members and one `import <ontology> <closure digest>` line per
-   `omr:importsManifest`, and compares it with the manifest's `omr:closureDigest`, and the root's
-   with the request's `ontologyDigest`. A manifest of another algorithm, such as `om-closure-v1`,
-   is refused `NOT_IMPLEMENTED`. OpenMetadata publishes no closure with a missing import or an
-   import cycle, and the digest has no line for either: a manifest naming a manifest the store
-   does not hold is refused `MISSING_IMPORT`, and one that imports itself, directly or not, cannot
-   match its own digest and is refused `GENERATION_MISMATCH` (`CaptureTest`);
-2. copies the manifest's `owl:Ontology` header (type, version IRI, imports), never its `omr:`
-   control triples;
-3. reads each pinned graph not copied yet, recomputes its digest and compares it with the pinned
-   one, then copies it.
-
-It writes N-Quads, gzip level 1, to `capture.nq.gz` in the job directory, renamed into place only
-when complete. Graphs that are not pinned, such as Draft graphs outside a candidate closure, are
-never read. A read transaction never blocks Fuseki's writer: a write commits during a capture, which
-keeps seeing the version it started with (`CaptureTest`). The server holds one pinned graph at a
-time, one manifest's member list and the set of captured graph names, never the closure. Every
-4,096 quads the capture checks the triple bound (the worker's `maxClosureTriples`, which protects
-`maxClosureAxioms` before parsing), the compressed size against what the disk quota leaves, the
-job's deadline and cancellation; at most `maxImports` (10,000) graphs. The working dataset the load
-builds is checked against the quota again before anything reasons over it.
-
-**Graph digest** (`om-graph-v2`). `sha256:` and the SHA-256 of the graph's canonical N-Triples,
-one triple per line, lines sorted in Java string order, each ending in `\n`. Nothing in it depends
-on blank node labels, which TDB2 assigns differently from OpenMetadata:
-
-1. *Refinement.* A blank node's first colour is the SHA-256 hex of the sorted signatures of the
-   triples it occurs in, joined by `|` (itself written `_:self`, other blank nodes `_:`, other terms
-   in N-Triples). Its next colour hashes its colour, `\n`, and the signatures with neighbours
-   written `_:<colour>`. Rounds stop at the first that does not increase the number of distinct
-   colours, keeping the colours before it.
-2. *Distinguishing.* While colours tie, for each node of the smallest tied colour, recolour it
-   SHA-256(colour + `*`), refine and repeat, and keep the result whose text sorts first, as
-   RDFC-1.0 does. When no triple joins more than two blank nodes, none is in a triple term and the
-   joins are acyclic, which holds for every tree the OWL 2 RDF mapping writes, tied nodes are
-   interchangeable and only one per tie is tried.
-3. *Text.* Each blank node is written `_:b<colour>`.
-
-Past 1,024 distinguishing steps or 10,000,000 incident-triple visits a graph has no digest: OpenMetadata
-writes its member record without one and never pins it, and a capture that meets one refuses it
-`GENERATION_MISMATCH`. It is OpenMetadata's `OntologyGraphDigest` over `OntologyGraphCanonicalForm`
-step for step; the store indexes each blank node's triples once, so a refinement round costs time
-linear in the graph. `extension/src/test/resources/digest-vectors/` is a copy of OpenMetadata's
-vectors, with the digests its classes compute, including tied blank nodes (`nested-twins.ttl`,
-`cycles.ttl`) and a graph too symmetric to digest; the store must give the same, also after a round
-trip through TDB2 and with its blank nodes relabelled (`GraphDigestTest`). Literals are compared by
-their lexical form as stored.
-
-**Measured** on an Apple M-series laptop, Java 21, worker heap 2 GiB (`CapturePerformanceIT`, run
-with `-Dreasoning.performance=true`): a catalog closure of 1,801 table graphs and a schema graph,
-225,116 triples, 37,900 individuals and 187,304 logical axioms, captured with every digest checked
-in 2.2 s to a 1.7 MB spool; loaded in 3.4 s into a 254 MB working dataset (TDB2 allocates its files
-in segments); classified with HermiT in 20.3 s, peaking at 0.27 GiB after collection; 27.8 s for the
-whole job. A closure five times larger, 1,125,116 triples in 9,002 graphs, captured in 11.3 s in a
-JVM of its own with a 256 MiB heap, TDB2's default caches included.
+Every 4,096 quads the capture checks the triple bound (the worker's `maxClosureTriples`, which
+protects `maxClosureAxioms` before parsing), the compressed size against what the disk quota leaves,
+the job's deadline and cancellation; `maxImports` is 1. The working dataset the load builds is
+checked against the quota again before anything reasons over it. Reaching a bound stops the copy and
+removes the partial spool.
 
 **Access.** The image's `shiro.ini` requires the admin account for every path except `/$/ping`, so
 the operations are admin-only. To give a service account reasoning and nothing else, run with
@@ -513,56 +529,54 @@ and against the image's own `shiro.ini`.
 ### Refresh
 
 A `REFRESH` recomputes every deduction from asserted input and publishes it as a new snapshot of
-the serving dataset it names (the plan's refresh lifecycle). It names its rules by
-`ruleBundleDigest` and sends no `rules` (an empty list means the same); a request that carries
-rules is admitted only if its enabled rules digest to `ruleBundleDigest` and every one compiles,
-else `400`.
+the serving dataset it names (the plan's refresh lifecycle). The request lists every active
+ontology release in `ontologyReleases` (possibly none) and carries the governance rules inline in
+`rules`, with OpenMetadata's digest of them in `ruleBundleDigest`
+(`ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules`). The store records
+the releases' `contentDigest`s and the rule digest with the snapshot's `input` and never checks or
+recomputes either: they are OpenMetadata's, and what the store can check is the serving graph.
+
+**Rules.** Disabled rules take no part. Every enabled rule is compiled with the `RULES` step's own
+compiler when the job is submitted, so a rule OpenMetadata saves is never refused later, and one it
+should not have saved is `400` before anything is queued: `RULE_FAILED` with the rule as subject
+and the compiler's problems (at most 10) as message, or `INVALID_REQUEST` for a name used twice or a
+body over 16,384 characters. `RuleCompilerVectorsTest` runs OpenMetadata's admission vectors
+through the same entry point.
 
 **Capture.** Inside one read transaction of the serving dataset the extension:
 
-1. reads the rule bundle OpenMetadata published, the graph `{base}graph/rules/bundle/<hex>`
-   holding `omr:bundleDigest "<ruleBundleDigest>"` (OpenMetadata's
-   `docs/rdf-rule-bundle-contract.md` and
-   `ADR:2026-10-15-governance-rules-are-published-as-a-content-addressed-bundle`), recomputes its
-   `om-rules-v1` digest (SHA-256 over `om-rules-v1` and one `rule <name> <ruleType> sha256:<body
-   hash>` line per rule, in name order) and compiles every rule with the `RULES` step's own
-   compiler. No such graph is `RULE_FAILED` (subject the digest); a mismatch is
-   `GENERATION_MISMATCH`; more than 256 rules is `LIMIT_EXCEEDED`; another algorithm is
-   `NOT_IMPLEMENTED`; a rule the compiler refuses is `RULE_FAILED` with the rule as subject and the
-   compiler's problems (at most 10) as message. `RuleCompilerVectorsTest` runs OpenMetadata's
-   admission vectors through the same entry point, so a rule OpenMetadata saves is never refused
-   here;
-2. reads `{base}graph/ontology/activations` and checks the request's `ontologyDigest`, when it has
-   one, against the activations' `om-activations-v1` digest (SHA-256 over `om-activations-v1` and
-   one `active <glossary> <closure digest>` line per activation in glossary order), else
-   `GENERATION_MISMATCH`;
-3. captures every active closure as a `CHECK` does ([Capture](#capture)), checking that each
-   activation's manifest is the `APPROVED` closure it names, and lists each closure's graphs in
-   `closures/<n>.graphs`; at most 1,000 closures, 10,000 graphs each and 100,000 in all;
-4. streams the catalog: every quad whose predicate a rule can match, read predicate by predicate
+1. reads, for each listed release, the graph `https://open-metadata.org/graph/ontology/{ontologyId}`
+   in which Fuseki holds an active release. It must hold exactly one named `owl:Ontology` whose
+   `owl:versionIRI` is `urn:openmetadata:ontology-release:{releaseId}`: a missing graph, or a graph
+   of another release because the ontology was activated again since the request was made, fails
+   the job `INPUT_CHANGED` with the `ontologyId` as subject, and the next refresh sees the new
+   release. An `owl:imports` is `MISSING_IMPORT`, as for a `CHECK`, since no other ontology is in
+   the input. Each release is one closure with a `CLASSIFY` step of its own; at most 1,000;
+2. streams the catalog: every quad whose predicate a rule can match, read predicate by predicate
    from TDB2's predicate-first index (a rule with a variable predicate or a negated property set
-   reads everything), from every graph but the store's own (`urn:openmetadata:`), OpenMetadata's
-   control and derived graphs (paths `/graph/inferred/`, `/graph/manifest/`,
-   `/graph/manifestStaging/`, `/graph/ontology/`, `/graph/rules/`) and ontology graphs (those with
-   an `omr:OntologyGraph` member record), so a Draft axiom reaches a refresh only through a closure
-   that pins it, which no activation does. Graph decisions are kept in an LRU of 4,096; the
-   catalog may span 10,000 graphs.
+   reads everything), from every graph but the store's own (`urn:openmetadata:`) and the paths
+   `/graph/ontology/` (every ontology graph: the listed releases are read in step 1, and a release
+   that is not listed is no input), `/graph/staging/` (where OpenMetadata stages the chunks of a
+   graph it replaces, which are never complete) and `/graph/inferred/` (the phase 0 materializer's
+   output). Graph decisions are kept in an LRU of 4,096; the catalog may span 10,000 graphs and
+   the rules 100,000 graphs in all.
 
 The spool is checked against the disk quota and the deadline every 4,096 quads, and the server
-holds one pinned graph and the graph names, never the catalog. A refresh whose source revision is
-older than the current snapshot's (same dataset generation, lower watermark) stops here with
-`SUPERSEDED`.
+holds one release's header, the graph names and nothing of the catalog. A refresh whose source
+revision is older than the current snapshot's (same dataset generation, lower watermark) stops
+before capturing with `SUPERSEDED`. A refresh with no releases still runs the rules over the
+catalog.
 
 **Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY` step per closure into
-`urn:openmetadata:entailments:<closure hex>`; `rules` runs the bundle to a fixed point
+`urn:openmetadata:entailments:<release id>`; `rules` runs the rules to a fixed point
 (`maxPasses` 64) reading the catalog graphs, the closures' graphs and their entailments, writing
 each rule's conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to
 `urn:openmetadata:provenance`; `compact` compacts the working dataset; `publish` makes it the
 dataset's current snapshot. The closures' entailments and the rules' new facts together may not
 pass `maxDerivedTriples`: each `CLASSIFY` gets what is left as `maxOutputTriples`, and `RULES` gets
 the rest as `maxNewFacts`; the spool of a pass gets what the disk quota leaves. A refresh publishes
-complete results or none: a limit, the deadline, the worker's heap, a closure outside OWL 2 DL or
-an inconsistent closure (`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the
+complete results or none: a limit, the deadline, the worker's heap, a release outside OWL 2 DL or
+an inconsistent release (`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the
 protocol's limit names (`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as
 subjects, and the previous snapshot stays current. A `SUCCEEDED` refresh has `snapshotId`, and
 `input.engines` names the engines that computed it.
@@ -632,7 +646,7 @@ other worker dependency (`RuleCodeIsolationIT`). Admission uses the same bridge.
 
 **Measured** on an Apple M-series laptop, Java 21, worker heap 1 GiB (`RefreshPerformanceIT`, run
 with `-Dreasoning.performance=true`; `-Dreasoning.performance.tables=` sets the size), with the
-starter PII, schema-tag and domain rules and a closure of 1,000 term graphs, while a reader and a
+starter PII, schema-tag and domain rules and a release of 1,000 classes, while a reader and a
 writer used the serving dataset:
 
 | Catalog | Captured | Derived | Job | Steps (capture, load, classify, rules, compact) | Worker heap after GC | Server heap after GC | Snapshot | Peak reasoning disk | Slowest serving read / write, before and during |
@@ -658,13 +672,25 @@ container memory limit >= (H_f + O_f + H_w + O_w + C_min) / 0.9
 | Term | Meaning | Value |
 |---|---|---|
 | `H_f` | Fuseki heap | `FUSEKI_HEAP`, or the last `-Xmx` in `JVM_ARGS` |
-| `O_f` | Fuseki off-heap | 1 GiB, 1.5 GiB from an 8 GiB heap |
+| `O_f` | Fuseki off-heap | Its direct-buffer limit (`-XX:MaxDirectMemorySize`, 256 MiB unless `JVM_ARGS` sets it; 0 means the heap) plus 768 MiB, or 1.25 GiB from an 8 GiB heap: 1 GiB and 1.5 GiB by default |
 | `H_w` | Worker heap | `OPENMETADATA_REASONER_HEAP` |
 | `O_w` | Worker off-heap: metaspace, code cache and direct memory are capped at 256, 128 and 64 MiB | `OPENMETADATA_REASONER_OFF_HEAP` |
 | `C_min` | Page cache kept for serving | `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR`; 50% of `/fuseki/databases` by default |
 
 The limit is read from cgroup v2 `memory.max`, else cgroup v1, else physical memory when the
-container has no limit. The values of `O_f` and `O_w` are starting values until they are measured.
+container has no limit.
+
+`O_f` and `O_w` were measured with Native Memory Tracking (committed memory outside the heap) on
+Apple M4 Max hardware, in a `linux/arm64` container limited to 4 CPUs and 16 GiB:
+
+- **Fuseki**, 4 GiB heap, while OpenMetadata rebuilt a 20,000-table, 200,000-edge catalog (2.8
+  million triples) twice and queried it: direct buffers reached 1.5 GiB without a limit, because
+  Fuseki allocates about 5 MiB of them per HTTP request and frees them only when a collection finds
+  their owners; everything else outside the heap stayed under 300 MiB. The entrypoint therefore caps
+  direct buffers, and the JVM collects when it reaches the cap.
+- **Worker**, 2 GiB heap: at most 200 MiB outside the heap, on every conformance fixture and on
+  catalog-shaped closures of 10,000 to 50,000 individuals. The 512 MiB default leaves room for the
+  capped regions it was sized from.
 
 For example, `FUSEKI_HEAP=512m`, `OPENMETADATA_REASONER_HEAP=1g` and
 `OPENMETADATA_REASONER_PAGE_CACHE_FLOOR=64m` need `(512 + 1024 + 1024 + 512 + 64) MiB / 0.9`, so
@@ -770,6 +796,13 @@ The image build downloads the release from Apache's CDN, falling back to the arc
 published SHA-512. The extension is compiled against the exact `fuseki-server.jar` it runs with, so an
 incompatible Fuseki fails the build. The smoke test needs `docker`, `curl`, `awk` and `jq`.
 
+Fuseki 6.2.0 bundles Apache Shiro 2.2.1 and Micrometer 1.17.0 inside `fuseki-server.jar`, and both
+carry published CVEs. The `server` stage of the Dockerfile replaces them with the releases listed in
+`server-jar/replacements.sha256`, downloaded from Maven Central and checked by SHA-256; the rest of
+Apache's jar is unchanged. Fuseki's own classes call the same Shiro and Micrometer methods when
+compiled against the new releases, and Fuseki's test suite gives the same results on them. Drop the
+stage when a Fuseki release ships fixed versions of both.
+
 The reasoner depends on OpenMetadata's HermiT build, which has no release yet. Install it once from
 the commit the Dockerfile pins, as the image build and the workflow do:
 
@@ -794,21 +827,24 @@ In `reasoner/`, `RefreshJobsIT` runs `REFRESH`, `QUERY`, `RESULTS` and governanc
 end with the packaged worker: a refresh publishes a snapshot a query reads; removing a premise and
 refreshing again retracts what it supported and advances the generation while a leased older
 snapshot survives until its reader is done; an older refresh fails `SUPERSEDED`; the snapshot serves
-after a restart; an invalid bundle and an inconsistent closure publish nothing.
+after a restart; a rule that cannot be admitted is refused at submission, a release that is no longer the
+active one fails `INPUT_CHANGED`, and an inconsistent release publishes nothing; an unlisted
+ontology graph and a staging graph never reach the rules.
 `RuleCodeIsolationIT` loads the packaged worker jar as the server does, behind a parent that hides
-the worker's dependencies. The smoke test refreshes over `test/check-closure.trig` and
-`test/refresh-catalog.trig` in the image, queries the snapshot, explains a governance fact,
+the worker's dependencies. The smoke test refreshes over `test/refresh-catalog.trig` in the image, queries the snapshot, explains a governance fact,
 retracts it, refreshes out of order and restarts.
 
 `mvn verify` in `extension/` runs the job operations against stand-in worker processes: queueing,
 cancellation, restart recovery and retention on real job directories, and the HTTP operations on a
-real Fuseki server with Shiro. It checks every request example, job and capabilities document
-against OpenMetadata's schemas, and captures closures from real TDB2 datasets laid out as
-OpenMetadata writes them. In `reasoner/`, `OntologyJobsIT` runs `CHECK` and `EXPLAIN` jobs end to
-end with the packaged worker: consistent, unsatisfiable, a candidate closure made inconsistent by a
-Draft graph, and a changed graph refused. The smoke test loads `test/check-closure.trig` and runs a
-`CHECK` and an `EXPLAIN` over it in the image, submits, reads and cancels a job, and
-restarts the container to check that the job and its request ID survive.
+real Fuseki server with Shiro, uploads included. It checks every request example, job and
+capabilities document against OpenMetadata's schemas, uploads against their size limit, digest,
+quota and retention, and captures real RDF-Thrift releases, accepting only the one a request names.
+In `reasoner/`, `OntologyJobsIT` runs `CHECK` and `EXPLAIN` jobs end to end with the packaged
+worker: a release uploaded as OpenMetadata sends it, consistent, with an unsatisfiable class, made
+inconsistent by an assertion, a release that is not the one named, an import, and a release over its
+limit. The smoke test uploads `test/check-release.rdf-thrift` to the image and runs a `CHECK` and an
+`EXPLAIN` over it, with the sources of the explanation's axioms, submits, reads and cancels a job,
+and restarts the container to check that the job and its request ID survive.
 
 ## Publishing
 
@@ -816,5 +852,24 @@ Images are published only from `release/<fuseki-version>` branches, never from `
 is cut from the matching upstream tag (`jena-6.2.0` for `release/6.2.0`), and its name must match the
 `FUSEKI_VERSION` in the Dockerfile.
 
+A publish (a push to the release branch, or a manual run of the workflow with the branch as input)
+runs in three jobs of `.github/workflows/openmetadata-fuseki-image.yml`:
+
+1. **Build and push.** After the extension, reasoner and local smoke tests pass, it pushes one
+   multi-architecture image (`linux/amd64`, `linux/arm64`) under the immutable tag
+   `<version>-<commit>` only, then pulls the pushed amd64 image by its digest and runs
+   `test/smoke-test.sh <image>@<digest>` against it.
+2. **arm64.** A native arm64 runner pulls the same digest for `linux/arm64` and runs the same smoke
+   test. The build ran arm64 only under emulation; this is the first time it starts natively.
+3. **Promote.** Once both pass, `docker buildx imagetools create` points `<version>` at that digest
+   without rebuilding, and the job fails unless `<version>` then resolves to exactly the tested digest.
+
+So `<version>` moves only to a digest that passed the smoke test on both architectures as pushed.
+A `<version>-<commit>` tag whose run failed after the push stays in the registry but is never
+promoted; do not use it. Pull requests build and smoke-test the image and publish nothing. Pin
+`<version>-<commit>`, or `<version>@<digest>`, in tests and deployments; `<version>` moves with
+each release build.
 Each publish pushes two tags for `linux/amd64` and `linux/arm64`: `<version>`, which moves to the latest
-build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in tests.
+build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in deployments
+and tests: with `imagePullPolicy: IfNotPresent`, a node that already has `<version>` never pulls a
+rebuild of it.

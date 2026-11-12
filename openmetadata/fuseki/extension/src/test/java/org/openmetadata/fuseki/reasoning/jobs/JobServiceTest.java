@@ -36,8 +36,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonObject;
-import org.apache.jena.sparql.core.DatasetGraph;
-import org.apache.jena.sparql.core.DatasetGraphFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -268,7 +266,7 @@ class JobServiceTest {
 
   @Test
   void aRefreshFailsAtCaptureWithoutTheWorkersRuleCompiler() throws Exception {
-    final JobService service = service(plans(name -> null), Map.of());
+    final JobService service = service(plans(), Map.of());
     final JsonObject failed =
         await(service, id(service.submit(request("refresh-request"))), state("FAILED"));
     final JsonObject problem = failed.getObj("problem");
@@ -280,31 +278,91 @@ class JobServiceTest {
   }
 
   @Test
-  void aCheckOfAnOntologyTheDatasetDoesNotHoldFailsAtCapture() throws Exception {
-    final DatasetGraph empty = DatasetGraphFactory.createTxnMem();
-    final JobService service = service(plans(name -> empty), Map.of());
-    // The candidate names no closure digest; the Approved explanation has no active closure.
-    for (final Map.Entry<String, String> example :
-        Map.of(
-                "check-subsumption-request", "INVALID_REQUEST",
-                "explain-request", "MISSING_IMPORT")
-            .entrySet()) {
+  void aCheckWhoseUploadIsNotHeldFailsAtCaptureAsInputChanged() throws Exception {
+    final JobService service = service(plans(), Map.of());
+    for (final String example : List.of("check-subsumption-request", "explain-request")) {
       final JsonObject failed =
-          await(service, id(service.submit(request(example.getKey()))), state("FAILED"));
+          await(service, id(service.submit(request(example))), state("FAILED"));
       final JsonObject problem = failed.getObj("problem");
-      assertEquals(example.getValue(), problem.getString("code"), failed.toString());
+      assertEquals("INPUT_CHANGED", problem.getString("code"), failed.toString());
       assertEquals("capture", problem.getString("step"));
       assertEquals(
-          Contract.example(example.getKey()).getString("ontologyIri"),
+          Contract.example(example).getObj("releaseRdf").getString("digest"),
           problem.getString("subject"));
       assertConforms(failed);
     }
-    final JobService gone = service(plans(name -> null), Map.of());
-    final JsonObject retried = Contract.example("check-subsumption-request");
-    retried.put("requestId", UUID.randomUUID().toString());
-    final JsonObject failed =
-        await(gone, id(gone.submit(JobRequest.validate(retried, "openmetadata"))), state("FAILED"));
-    assertEquals("INVALID_REQUEST", failed.getObj("problem").getString("code"));
+  }
+
+  @Test
+  void anUploadLivesUntilEveryJobThatNamesItHasFinished() throws Exception {
+    final CountDownLatch release = new CountDownLatch(1);
+    final Stage.Planner planner =
+        (job, request) ->
+            List.of(
+                stage(
+                    "hold",
+                    context -> {
+                      release.await();
+                      return Stage.Result.completed();
+                    }));
+    final JobService service = service(planner, Map.of());
+    final Releases.Release named = Releases.of("");
+    final Releases.Release other = Releases.of(":Asset a owl:Class .\n");
+    upload(service, named);
+    final JsonObject check = Contract.example("check-subsumption-request");
+    check.put("requestId", UUID.randomUUID().toString());
+    final UUID id = id(service.submit(JobRequest.validate(named.into(check), "openmetadata")));
+    await(service, id, state("RUNNING"));
+
+    now.addAndGet(5 * JobInputs.HOLD_MILLIS);
+    upload(service, other);
+    assertTrue(Files.exists(held(named)), "a running job still reads it");
+    assertTrue(Files.exists(held(other)));
+
+    release.countDown();
+    await(service, id, state("SUCCEEDED"));
+    assertFalse(Files.exists(held(named)), "removed once no job needs it and the hold has passed");
+    assertTrue(Files.exists(held(other)), "uploaded just now, so inside its hold");
+  }
+
+  @Test
+  void aServerStartRemovesUploadsPastTheirHoldAndHalfWrittenOnes() throws Exception {
+    final JobService first = service(worker(SUCCEED), Map.of());
+    final Releases.Release old = Releases.of("");
+    upload(first, old);
+    first.close();
+    final Path half = Files.writeString(held(old).resolveSibling("upload-9.tmp"), "half");
+    now.addAndGet(2 * JobInputs.HOLD_MILLIS);
+
+    service(worker(SUCCEED), Map.of());
+    assertFalse(Files.exists(held(old)));
+    assertFalse(Files.exists(half));
+  }
+
+  @Test
+  void anUploadCountsAgainstTheDiskQuota() throws Exception {
+    final JobService service = service(worker(SUCCEED), Map.of(JobSettings.DISK_QUOTA, "1m"));
+    final byte[] large = new byte[(1 << 20) + 1];
+    final JobService.Refused refused =
+        assertThrows(
+            JobService.Refused.class,
+            () -> service.upload(Releases.hash(large), new java.io.ByteArrayInputStream(large)));
+    assertEquals(503, refused.status());
+    assertEquals("maxDiskBytes", refused.problem().subject());
+    assertFalse(
+        Files.exists(settings.reasoningRoot().resolve("inputs").resolve(Releases.hash(large))));
+  }
+
+  @Test
+  void uploadsAreRefusedWhileReasoningIsDisabled() throws Exception {
+    settings = workers.settings(Map.of("OPENMETADATA_REASONING_ENABLED", "false"));
+    final JobService service = service(worker(SUCCEED), Map.of());
+    final JobService.Refused refused =
+        assertThrows(
+            JobService.Refused.class,
+            () -> service.upload("0".repeat(64), new java.io.ByteArrayInputStream(new byte[1])));
+    assertEquals(503, refused.status());
+    assertFalse(Files.exists(settings.reasoningRoot()));
   }
 
   @Test
@@ -439,6 +497,8 @@ class JobServiceTest {
     final JsonObject limits = capabilities.getObj("limits");
     assertEquals(3600, limits.getNumber("maxJobSeconds").intValue());
     assertEquals(Operations.MAX_IMPORTS, limits.getNumber("maxImports").intValue());
+    assertEquals(1, Operations.MAX_IMPORTS, "imports between ontologies are deferred");
+    assertEquals(64L << 20, limits.getNumber("maxUploadBytes").longValue(), "64 MiB by default");
     assertEquals(32, limits.getNumber("maxExpressionDepth").intValue());
     assertEquals(200_000, limits.getNumber("maxClosureAxioms").longValue(), "2 GiB worker heap");
     assertEquals(50_000, limits.getNumber("maxIndividuals").longValue());
@@ -498,6 +558,12 @@ class JobServiceTest {
         Contract.violations(Contract.CAPABILITIES, withoutJobSeconds).stream()
             .anyMatch(violation -> violation.startsWith("$.limits.")),
         "CHECK was accepted as AVAILABLE without maxJobSeconds");
+    final JsonObject withoutUploadLimit = service.capabilities();
+    withoutUploadLimit.getObj("limits").remove("maxUploadBytes");
+    assertTrue(
+        Contract.violations(Contract.CAPABILITIES, withoutUploadLimit).stream()
+            .anyMatch(violation -> violation.startsWith("$.limits.")),
+        "CHECK was accepted as AVAILABLE without maxUploadBytes");
     assertEquals(
         List.of(),
         Contract.violations(Contract.CAPABILITIES, Contract.example("ready-capabilities")));
@@ -558,8 +624,9 @@ class JobServiceTest {
     return service;
   }
 
-  private Stage.Planner plans(final ServingDatasets datasets) {
-    return Plans.current(new Operations(settings, JobSettings.fromEnvironment(Map.of())), datasets);
+  private Stage.Planner plans() {
+    return Plans.current(
+        new Operations(settings, JobSettings.fromEnvironment(Map.of())), name -> null);
   }
 
   private static Stage.Planner worker(final String behaviour) {
@@ -606,6 +673,19 @@ class JobServiceTest {
         return body.run(context);
       }
     };
+  }
+
+  private void upload(final JobService service, final Releases.Release release) throws Exception {
+    service.upload(
+        release.digest().substring("sha256:".length()),
+        new java.io.ByteArrayInputStream(release.rdf()));
+  }
+
+  private Path held(final Releases.Release release) {
+    return settings
+        .reasoningRoot()
+        .resolve("inputs")
+        .resolve(release.digest().substring("sha256:".length()));
   }
 
   private static JobRequest request(final String example) throws JobRequest.Invalid {
