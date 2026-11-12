@@ -651,8 +651,8 @@ writer used the serving dataset:
 
 | Catalog | Captured | Derived | Job | Steps (capture, load, classify, rules, compact) | Worker heap after GC | Server heap after GC | Snapshot | Peak reasoning disk | Slowest serving read / write, before and during |
 |---|---|---|---|---|---|---|---|---|---|
-| 5,000 tables, 137,612 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 38.6 s | 0.9, 4.9, 3.7, 17.9, 11.0 s | 46 MiB at most | 40 MiB | 416 MB | 0.98 GB | 127 / 168 ms before, 428 / 813 ms during |
-| 20,000 tables, 544,442 triples | 342,442, 1.66 MB | 327,600, 21 passes | 85.0 s | 2.4, 6.3, 3.8, 42.2, 30.2 s | 80 MiB at most | 63 MiB | 1.14 GB | 2.91 GB | 593 / 698 ms before, 755 / 856 ms during |
+| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 20.6 s | 0.5, 1.9, 1.1, 10.7, 6.3 s | 45 MiB at most | 41 MiB | 416 MB | 0.99 GB | 60 / 128 ms before, 121 / 242 ms during |
+| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 52.5 s | 1.6, 3.3, 1.1, 25.1, 21.4 s | 54 MiB at most | 76 MiB | 1.14 GB | 2.91 GB | 62 / 129 ms before, 113 / 242 ms during |
 
 The column descriptions no rule reads were never captured. Disk, not memory, is what a refresh
 costs: a snapshot holds the captured input, the derived facts and one witness per fact in six TDB2
