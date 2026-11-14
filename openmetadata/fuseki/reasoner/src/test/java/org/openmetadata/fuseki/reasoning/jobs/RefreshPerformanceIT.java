@@ -71,6 +71,9 @@ class RefreshPerformanceIT {
   private static final int TABLES = Integer.getInteger("reasoning.performance.tables", 5_000);
   private static final int RELEASES = Integer.getInteger("reasoning.performance.releases", 1);
   private static final int TERMS = Integer.getInteger("reasoning.performance.terms", 1_000);
+  private static final String SNAPSHOT_NODE_CACHE =
+      System.getProperty("reasoning.performance.snapshotNodeCache");
+  private static final int QUERY_REPEATS = 5;
   private static final long BASELINE_MILLIS = 10_000;
   private static final int COLUMNS = 10;
 
@@ -92,7 +95,12 @@ class RefreshPerformanceIT {
 
     final ImageLayout image = ImageLayout.create(root.resolve("image"), FUSEKI_SERVER, REASONER);
     final ReasoningSettings settings = image.settings("1g");
-    final Operations operations = new Operations(settings, JobSettings.fromEnvironment(Map.of()));
+    final JobSettings jobSettings =
+        JobSettings.fromEnvironment(
+            SNAPSHOT_NODE_CACHE == null
+                ? Map.of()
+                : Map.of(JobSettings.SNAPSHOT_NODE_CACHE, SNAPSHOT_NODE_CACHE));
+    final Operations operations = new Operations(settings, jobSettings);
     final JobService service =
         new JobService(
             operations,
@@ -261,26 +269,23 @@ class RefreshPerformanceIT {
       report.put("servingReads", reads.get());
       report.put("slowestServingReadMillis", TimeUnit.NANOSECONDS.toMillis(slowestRead.get()));
       report.put("slowestServingWriteMillis", TimeUnit.NANOSECONDS.toMillis(slowestWrite.get()));
+      report.put("snapshotNodeCache", jobSettings.snapshotNodeCache());
+      final String pii = "SELECT ?c WHERE { ?c <" + OM + "hasTag> <" + C + "pii> }";
       final long queryStart = System.nanoTime();
-      final JsonObject answer =
-          JSON.parse(
-              new String(
-                  operations
-                      .queries()
-                      .run(
-                          "openmetadata",
-                          ("{\"query\": \"SELECT ?c WHERE { ?c <"
-                                  + OM
-                                  + "hasTag> <"
-                                  + C
-                                  + "pii> }\"}")
-                              .getBytes(StandardCharsets.UTF_8))
-                      .body(),
-                  StandardCharsets.UTF_8));
+      final JsonObject answer = query(operations, pii);
       report.put(
           "snapshotQueryMillis", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - queryStart));
       report.put("snapshotQueryRows", answer.get("rows"));
       report.put("snapshotQueryTruncated", answer.get("truncated"));
+      report.put("snapshotQueryRepeatMicros", fastestRepeat(operations, pii));
+      // A full page of two columns: more nodes than TDB2's small cache of 10,000 holds.
+      final String page = "SELECT ?t ?c WHERE { ?t <" + OM + "hasColumn> ?c }";
+      final long pageStart = System.nanoTime();
+      final JsonObject pageAnswer = query(operations, page);
+      report.put(
+          "snapshotPageMillis", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pageStart));
+      report.put("snapshotPageRows", pageAnswer.get("rows"));
+      report.put("snapshotPageRepeatMicros", fastestRepeat(operations, page));
       Files.writeString(
           Path.of(
               "target",
@@ -295,6 +300,31 @@ class RefreshPerformanceIT {
       service.close();
       TDBInternal.expel(serving);
     }
+  }
+
+  private static JsonObject query(final Operations operations, final String sparql)
+      throws Exception {
+    final JsonObject request = new JsonObject();
+    request.put("query", sparql);
+    return JSON.parse(
+        new String(
+            operations
+                .queries()
+                .run("openmetadata", JSON.toString(request).getBytes(StandardCharsets.UTF_8))
+                .body(),
+            StandardCharsets.UTF_8));
+  }
+
+  /** The fastest of a few more runs of a query the snapshot has already answered, in µs. */
+  private static long fastestRepeat(final Operations operations, final String sparql)
+      throws Exception {
+    long fastest = Long.MAX_VALUE;
+    for (int i = 0; i < QUERY_REPEATS; i++) {
+      final long start = System.nanoTime();
+      query(operations, sparql);
+      fastest = Math.min(fastest, System.nanoTime() - start);
+    }
+    return TimeUnit.NANOSECONDS.toMicros(fastest);
   }
 
   /** Writes and bulk-loads the catalog and the term graphs; returns the triple count. */

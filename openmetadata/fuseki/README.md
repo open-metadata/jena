@@ -52,6 +52,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_MAX_RESULT_ROWS` | `10000` | Rows one snapshot query or one page of a result returns (`maxResultRows`). At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` | `1000000` | Quads one snapshot query may read from the store, the provenance quads its view hides included; a query that reads more stops with `LIMIT_EXCEEDED` (subject `maxQueryScannedQuads`, not a capabilities limit). At most 9 digits. |
 | `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES` | `4` | Snapshot queries that may run at once; more get HTTP 429. At most 3 digits. |
+| `OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE` | the Fuseki heap / 32 KiB, from 10,000 to 999,999: `131072` with the 4g heap | Nodes each open snapshot keeps decoded in the Fuseki heap for its queries' answers, about 220 bytes each. At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_UPLOAD_BYTES` | `64m` | The largest job input one `PUT /reasoning/inputs/...` may carry, the same as a Graph Store upload's limit. At least `1m`. Reported as the capability limit `maxUploadBytes`. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
@@ -643,8 +644,9 @@ every publication.
 - **Isolation.** Snapshots are never registered as Fuseki datasets, and inferred results never go
   to the serving dataset: OpenMetadata's phase 0 graphs `{base}graph/inferred/*` are not read by a
   refresh and are OpenMetadata's to remove after cutover. The Fuseki JVM opens a snapshot only after
-  the worker that wrote it has exited, lazily and with TDB2's small store parameters, so its caches
-  stay small in the server heap.
+  the worker that wrote it has exited, lazily and with TDB2's small store parameters but for the
+  cache of decoded nodes, which holds `OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE` entries: by
+  default about 29 MiB a snapshot in a 4 GiB heap, under a hundredth of it.
 
 ### Snapshot queries
 
@@ -691,20 +693,28 @@ process that opens it and serving holds the snapshot open: the extension loads t
 rule code (the same compiler and `Explanations` the worker runs) never reaches the OWL API or any
 other worker dependency (`RuleCodeIsolationIT`). Admission uses the same bridge.
 
-**Measured** on an Apple M-series laptop, Java 21, worker heap 1 GiB (`RefreshPerformanceIT`, run
+**Measured** on an Apple M5 Max laptop, Java 21, worker heap 1 GiB (`RefreshPerformanceIT`, run
 with `-Dreasoning.performance=true`; `-Dreasoning.performance.tables=` sets the size), with the
 starter PII, schema-tag and domain rules and a release of 1,000 classes, while a reader and a
 writer used the serving dataset:
 
 | Catalog | Captured | Derived | Job | Steps (capture, load, classify, rules, compact) | Worker heap after GC | Server heap after GC | Snapshot | Peak reasoning disk | Slowest serving read / write, before and during |
 |---|---|---|---|---|---|---|---|---|---|
-| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 20.6 s | 0.5, 1.9, 1.1, 10.7, 6.3 s | 45 MiB at most | 41 MiB | 416 MB | 0.99 GB | 60 / 128 ms before, 121 / 242 ms during |
-| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 52.5 s | 1.6, 3.3, 1.1, 25.1, 21.4 s | 54 MiB at most | 76 MiB | 1.14 GB | 2.91 GB | 62 / 129 ms before, 113 / 242 ms during |
+| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 18.4 s | 0.4, 1.9, 1.0, 9.2, 5.7 s | 64 MiB at most | 37 MiB | 416 MB | 0.98 GB | 61 / 132 ms before, 115 / 232 ms during |
+| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 47.0 s | 1.6, 3.1, 1.1, 22.0, 19.0 s | 79 MiB at most | 76 MiB | 1.14 GB | 2.91 GB | 60 / 144 ms before, 117 / 245 ms during |
 
 The column descriptions no rule reads were never captured. Disk, not memory, is what a refresh
 costs: a snapshot holds the captured input, the derived facts and one witness per fact in six TDB2
-quad indexes, and a refresh needs the working dataset and its compacted copy at once. A snapshot
-query for the 4,200 PII columns of the larger catalog took 157 ms.
+quad indexes, and a refresh needs the working dataset and its compacted copy at once. Committing
+to disk and writing indexes, not decoding nodes, is most of `rules` and `compact`: with 10,000-entry
+node caches in the worker the same refresh took 50.4 to 51.1 s (`rules` 24.3 to 24.9 s against 21.6
+to 22.4 s, `compact` within its run-to-run spread), and the heap of those two steps after GC was 18 MiB at
+most against 79. The times move by a fifth with what else the machine is doing.
+
+On the larger catalog a snapshot query for the 4,200 PII columns took 57 ms the first time and
+11 ms repeated. A full page of 10,000 two-column rows, 11,000 nodes, took 88 to 107 ms the first
+time and, repeated, 29 to 36 ms with the 131,072-entry node cache a 4 GiB Fuseki heap gets
+(`-Dreasoning.performance.snapshotNodeCache=`) against 50 to 51 ms with 10,000 entries.
 
 Releases cost about 12 ms each after the worker's start, since one worker classifies them all and
 commits once: with 1,000 tables and releases of 100 classes each

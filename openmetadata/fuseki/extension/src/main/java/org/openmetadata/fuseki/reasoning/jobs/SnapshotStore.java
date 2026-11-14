@@ -76,6 +76,7 @@ public final class SnapshotStore implements AutoCloseable {
 
   private final Path root;
   private final long leaseMillis;
+  private final StoreParams storeParams;
   private final Object lock = new Object();
 
   /** One lineage per serving dataset name, which the HTTP layer checks is served. */
@@ -226,10 +227,16 @@ public final class SnapshotStore implements AutoCloseable {
   /**
    * @param reasoningRoot the reasoning root; snapshots live in its {@value #DIRECTORY}
    * @param leaseMillis how long a lease can last: the query deadline and a margin
+   * @param nodeCache nodes each open snapshot keeps decoded for its queries' answers
    */
-  public SnapshotStore(final Path reasoningRoot, final long leaseMillis) {
+  public SnapshotStore(final Path reasoningRoot, final long leaseMillis, final int nodeCache) {
     this.root = reasoningRoot.resolve(DIRECTORY);
     this.leaseMillis = leaseMillis;
+    // Set explicitly: only an explicit value overrides the one the worker recorded in the dataset.
+    this.storeParams =
+        StoreParams.builder("snapshot", StoreParams.getSmallStoreParams())
+            .nodeId2NodeCacheSize(nodeCache)
+            .build();
   }
 
   /**
@@ -470,9 +477,8 @@ public final class SnapshotStore implements AutoCloseable {
     }
   }
 
-  private static DatasetGraph connect(final Path location) {
-    return DatabaseMgr.connectDatasetGraph(
-        Location.create(location), StoreParams.getSmallStoreParams());
+  private DatasetGraph connect(final Path location) {
+    return DatabaseMgr.connectDatasetGraph(Location.create(location), storeParams);
   }
 
   /** Closes and deletes a snapshot nobody reads any more. Under the lock. */

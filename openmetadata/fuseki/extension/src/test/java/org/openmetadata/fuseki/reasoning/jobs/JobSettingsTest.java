@@ -44,6 +44,25 @@ class JobSettingsTest {
   }
 
   @Test
+  void theSnapshotNodeCacheDefaultsFromTheHeapAndReadsItsVariable() {
+    assertEquals(131_072, JobSettings.defaultSnapshotNodeCache(4L << 30), "the image's 4g heap");
+    assertEquals(10_000, JobSettings.defaultSnapshotNodeCache(64L << 20));
+    assertEquals(999_999, JobSettings.defaultSnapshotNodeCache(64L << 30));
+    assertEquals(
+        JobSettings.defaultSnapshotNodeCache(Runtime.getRuntime().maxMemory()),
+        JobSettings.fromEnvironment(Map.of()).snapshotNodeCache());
+    assertEquals(
+        2_500,
+        JobSettings.fromEnvironment(Map.of(JobSettings.SNAPSHOT_NODE_CACHE, "2500"))
+            .snapshotNodeCache());
+    final IllegalArgumentException invalid =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> JobSettings.fromEnvironment(Map.of(JobSettings.SNAPSHOT_NODE_CACHE, "1000000")));
+    assertTrue(invalid.getMessage().contains(JobSettings.SNAPSHOT_NODE_CACHE));
+  }
+
+  @Test
   void theScanBudgetDefaultsAndReadsItsVariable() {
     assertEquals(1_000_000, JobSettings.fromEnvironment(Map.of()).maxQueryScannedQuads());
     assertEquals(

@@ -45,6 +45,8 @@ import org.openmetadata.fuseki.reasoning.Sizes;
  *     query may read from the store, those its view hides included
  * @param maxConcurrentQueries OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES: snapshot queries that
  *     may run at once; more get HTTP 429
+ * @param snapshotNodeCache OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE: nodes each open snapshot
+ *     keeps decoded in the Fuseki heap
  */
 public record JobSettings(
     int maxQueuedJobs,
@@ -57,7 +59,8 @@ public record JobSettings(
     int maxQuerySeconds,
     int maxResultRows,
     int maxQueryScannedQuads,
-    int maxConcurrentQueries) {
+    int maxConcurrentQueries,
+    int snapshotNodeCache) {
 
   public static final String MAX_QUEUED_JOBS = "OPENMETADATA_REASONING_MAX_QUEUED_JOBS";
   public static final String JOB_HISTORY = "OPENMETADATA_REASONING_JOB_HISTORY";
@@ -71,6 +74,7 @@ public record JobSettings(
       "OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS";
   public static final String MAX_CONCURRENT_QUERIES =
       "OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES";
+  public static final String SNAPSHOT_NODE_CACHE = "OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE";
 
   public static final int DEFAULT_MAX_QUEUED_JOBS = 16;
   public static final int DEFAULT_JOB_HISTORY = 1000;
@@ -114,6 +118,19 @@ public record JobSettings(
    */
   public static final int DEFAULT_MAX_CONCURRENT_QUERIES = 4;
 
+  /** What TDB2's small store parameters give, and every snapshot had before the cache was sized. */
+  static final int MIN_DEFAULT_SNAPSHOT_NODE_CACHE = 10_000;
+
+  /** The most the variable takes, and about 220 MiB of nodes in each open snapshot. */
+  static final int MAX_SNAPSHOT_NODE_CACHE = 999_999;
+
+  /**
+   * Heap behind each node of the default cache. A cached node measured about 220 bytes on a
+   * catalog, so one snapshot's full cache is under a hundredth of the heap, and the five snapshots
+   * a dataset can have open under a twentieth: the serving datasets' own caches keep the rest.
+   */
+  static final long HEAP_BYTES_PER_SNAPSHOT_NODE = 32_768;
+
   /** Queued and kept jobs are held in memory, a few KiB each, so their counts stay small. */
   private static final Pattern FOUR_DIGITS = Pattern.compile("[1-9][0-9]{0,3}");
 
@@ -146,6 +163,13 @@ public record JobSettings(
     final int queries =
         integer(
             environment, MAX_CONCURRENT_QUERIES, THREE_DIGITS, 3, DEFAULT_MAX_CONCURRENT_QUERIES);
+    final int nodeCache =
+        integer(
+            environment,
+            SNAPSHOT_NODE_CACHE,
+            COUNT,
+            6,
+            defaultSnapshotNodeCache(Runtime.getRuntime().maxMemory()));
     long quotaBytes = -1;
     int quotaPercent = DEFAULT_DISK_QUOTA_PERCENT;
     final String quota = value(environment, DISK_QUOTA);
@@ -176,7 +200,16 @@ public record JobSettings(
         querySeconds,
         resultRows,
         scannedQuads,
-        queries);
+        queries,
+        nodeCache);
+  }
+
+  /** The snapshot node cache of a Fuseki JVM with this heap, when the variable is unset. */
+  static int defaultSnapshotNodeCache(final long heapBytes) {
+    return (int)
+        Math.max(
+            MIN_DEFAULT_SNAPSHOT_NODE_CACHE,
+            Math.min(MAX_SNAPSHOT_NODE_CACHE, heapBytes / HEAP_BYTES_PER_SNAPSHOT_NODE));
   }
 
   public long retentionMillis() {
