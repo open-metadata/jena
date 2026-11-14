@@ -193,7 +193,7 @@ worker on it. Every path a step names must stay inside its job directory.
 | `LOAD` | Bulk-loads exported N-Quads or TriG (optionally gzip-compressed) into a fresh private TDB2 dataset |
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
 | `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
-| `COMPACT` | Compacts the dataset before it is published |
+| `COMPACT` | Replaces the dataset with a packed copy of it before it is published ([Compaction](#compaction)) |
 | `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance file beside the dataset ([Governance rules](#governance-rules)) |
 
 A closure is the listed `closure.graphs`; or, with `"graphsFile"`, the graphs a file in the job
@@ -288,6 +288,36 @@ After a step that did not succeed, it removes the step's exported closure and an
 `*.tmp` files from the job directory. A step's log keeps the first and the last 512 KiB of the
 worker's output. The worker inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `HOME` from
 the server's environment, so `ADMIN_PASSWORD` and JVM options meant for Fuseki never reach it.
+
+### Compaction
+
+By the time `COMPACT` runs, the working dataset's B+tree pages are about half full, and the dataset
+still holds the earlier copy of every page that a later transaction changed. `COMPACT` replaces the
+dataset with a packed copy of it, built in `<stepId>.packed.tmp` in the job directory and renamed
+over it:
+
+- Each index is read in its own order and written bottom-up as full pages, the way TDB2's bulk
+  loader (`tdb2.xloader`) builds an index from sorted input. No quad is inserted.
+- The node table's data file is copied byte for byte. A node's id is its offset in that file, so
+  every id stays valid and the index records are copied unchanged.
+- Each index of the copy comes from the same index of the source. The step therefore fails if the
+  indexes of the source do not all hold the same number of records, where a copy that rebuilt every
+  index from one would have hidden it.
+
+TDB2's own compaction (`DatabaseMgr.compact`), which the step used before, inserts every quad into
+a new database: six tree descents per quad, and pages that end up half full again. The step alone,
+on the working datasets of the two catalogs [measured below](#governance-explanations) after `LOAD`
+and `RULES`, three interleaved runs each:
+
+| Working dataset | TDB2 compaction | Packed copy |
+|---|---|---|
+| 5,000 tables: 169,512 quads, 255 MB | 2.8 to 3.2 s, leaves 255 MB | 1.4 s, leaves 204 MB |
+| 20,000 tables: 672,042 quads, 490 MB | 6.7 s, leaves 473 MB | 1.5 to 2.0 s, leaves 314 MB |
+
+Publishing the working dataset as it is would save that second or two, and would keep the half-full
+pages in every snapshot, on disk and in the page cache that serves its queries. TDB2 grows each of
+its files 8 MiB at a time, so 201 MB of any snapshot's database (24 index files) is fixed; that is
+nearly all of the smaller one.
 
 ### Governance rules
 
@@ -601,18 +631,19 @@ before capturing with `SUPERSEDED`. A refresh with no releases still runs the ru
 catalog.
 
 **Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY` step per closure into
-`urn:openmetadata:entailments:<release id>`; `rules` runs the rules to a fixed point
-(`maxPasses` 64) reading the catalog graphs, the closures' graphs and their entailments, writing
-each rule's conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to the file
-`provenance` in the job directory; `compact` compacts the working dataset; `publish` makes the two
-the dataset's current snapshot. The closures' entailments and the rules' new facts together may not
-pass `maxDerivedTriples`: each `CLASSIFY` gets what is left as `maxOutputTriples`, and `RULES` gets
-the rest as `maxNewFacts`; the spool of a pass gets what the disk quota leaves. A refresh publishes
-complete results or none: a limit, the deadline, the worker's heap, a release outside OWL 2 DL or
-an inconsistent release (`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the
-protocol's limit names (`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as
-subjects, and the previous snapshot stays current. A `SUCCEEDED` refresh has `snapshotId`, and
-`input.engines` names the engines that computed it.
+`urn:openmetadata:entailments:<release id>`; `rules` runs the rules to a fixed point (`maxPasses`
+64) reading the catalog graphs, the closures' graphs and their entailments, writing each rule's
+conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to the file `provenance` in the
+job directory; `compact` replaces the working dataset with a packed copy
+([Compaction](#compaction)); `publish` makes the two the dataset's current snapshot. The closures'
+entailments and the rules' new facts together may not pass `maxDerivedTriples`: each `CLASSIFY` gets
+what is left as `maxOutputTriples`, and `RULES` gets the rest as `maxNewFacts`; the spool of a pass
+gets what the disk quota leaves. A refresh publishes complete results or none: a limit, the
+deadline, the worker's heap, a release outside OWL 2 DL or an inconsistent release
+(`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the protocol's limit names
+(`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as subjects, and the
+previous snapshot stays current. A `SUCCEEDED` refresh has `snapshotId`, and `input.engines` names
+the engines that computed it.
 
 ### Snapshots
 
@@ -697,20 +728,35 @@ process that opens it and serving holds the snapshot open: the extension loads t
 rule code (the same compiler and `Explanations` the worker runs) never reaches the OWL API or any
 other worker dependency (`RuleCodeIsolationIT`). Admission uses the same bridge.
 
-**Measured** on an Apple M-series laptop, Java 21, worker heap 1 GiB (`RefreshPerformanceIT`, run
-with `-Dreasoning.performance=true`; `-Dreasoning.performance.tables=` sets the size), with the
-starter PII, schema-tag and domain rules and a release of 1,000 classes, while a reader and a
-writer used the serving dataset:
+**Measured** on an Apple M-series laptop (18 cores), Java 21, worker heap 1 GiB
+(`RefreshPerformanceIT`, run with `-Dreasoning.performance=true`; `-Dreasoning.performance.tables=`
+sets the size), with the starter PII, schema-tag and domain rules and a release of 1,000 classes,
+while a reader and a writer used the serving dataset. Each figure is the median of three runs:
 
 | Catalog | Captured | Derived | Job | Steps (capture, load, classify, rules, compact) | Worker heap after GC | Server heap after GC | Snapshot | Peak reasoning disk | Slowest serving read / write, before and during |
 |---|---|---|---|---|---|---|---|---|---|
-| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 20.6 s | 0.5, 1.9, 1.1, 10.7, 6.3 s | 45 MiB at most | 41 MiB | 416 MB | 0.99 GB | 60 / 128 ms before, 121 / 242 ms during |
-| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 52.5 s | 1.6, 3.3, 1.1, 25.1, 21.4 s | 54 MiB at most | 76 MiB | 1.14 GB | 2.91 GB | 62 / 129 ms before, 113 / 242 ms during |
+| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 13.0 s (11.5 to 13.1) | 0.6, 3.0, 1.7, 5.2, 2.2 s | 43 MiB at most | 37 MiB | 216 MB | 0.47 GB | 121 / 228 ms before, 127 / 284 ms during |
+| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 19.7 s (19.5 to 20.8) | 1.9, 4.3, 1.5, 9.9, 2.2 s | 54 MiB at most | 60 MiB | 363 MB | 0.80 GB | 105 / 223 ms before, 131 / 298 ms during |
 
-The column descriptions no rule reads were never captured. Disk, not memory, is what a refresh
-costs: a snapshot holds the captured input, the derived facts and one witness per fact in six TDB2
-quad indexes, and a refresh needs the working dataset and its compacted copy at once. A snapshot
-query for the 4,200 PII columns of the larger catalog took 157 ms.
+The laptop was running other builds during these runs (load average 7 to 23), so the times are
+upper bounds and the serving latencies say only that a refresh does not add to them by much; sizes
+and counts do not depend on load. Runs of the build before the provenance file, the delta file, the
+single RULES transaction and the packed copy were interleaved with them: 28.8 s (25.7 to 32.2) and
+69.6 s (65.6 to 75.8), of which RULES took 15.2 and 33.9 s and COMPACT 8.4 and 25.6 s; snapshots of
+416 MB and 1.14 to 1.16 GB; 1.01 and 2.9 to 3.0 GB of disk at the peak.
+
+The column descriptions no rule reads were never captured. What bounds each figure:
+
+- **Job time.** Every step is one thread. RULES evaluates 21 passes and is the largest step; LOAD is
+  TDB2's loader; COMPACT is mostly creating and syncing a second set of files, so it hardly grows
+  with the catalog.
+- **Snapshot.** The database holds the captured input and the derived facts in six quad indexes:
+  201 MB of files TDB2 allocates whatever they hold, and about 170 bytes for each of the 0.68
+  million quads of the larger catalog. The provenance file adds 150 bytes per derived fact (12 and
+  49 MB).
+- **Peak disk.** The working dataset and its packed copy exist at once, beside the provenance file.
+
+A snapshot query for the 4,200 PII columns of the larger catalog took 59 ms.
 
 ### Memory budget
 

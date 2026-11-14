@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.stream.Stream;
 import org.apache.jena.dboe.base.file.Location;
 import org.apache.jena.sparql.core.DatasetGraph;
@@ -92,6 +93,18 @@ public final class WorkingDataset {
           .sum();
     } catch (final IOException e) {
       throw new UncheckedIOException(e);
+    }
+  }
+
+  /** Removes a dataset's directory and everything in it; an absent one is left alone. */
+  static void delete(final Path location) throws IOException {
+    if (!Files.exists(location)) {
+      return;
+    }
+    try (Stream<Path> entries = Files.walk(location)) {
+      for (final Path entry : entries.sorted(Comparator.reverseOrder()).toList()) {
+        Files.delete(entry);
+      }
     }
   }
 
