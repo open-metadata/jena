@@ -25,6 +25,7 @@ import java.util.Set;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.graph.Triple;
+import org.apache.jena.query.ARQ;
 import org.apache.jena.query.Query;
 import org.apache.jena.query.QueryException;
 import org.apache.jena.query.QueryFactory;
@@ -122,6 +123,17 @@ final class RuleCompiler {
           FN + "implicit-timezone");
 
   private RuleCompiler() {}
+
+  /**
+   * The context rules are compiled and evaluated in: property functions off, whatever is
+   * registered, since they run code named by an IRI. It lives here, not in RulesStep, so the Fuseki
+   * module's ServerBridge reaches it without loading any worker step class.
+   */
+  static Context evaluationContext() {
+    final Context context = ARQ.getContext().copy();
+    context.set(ARQ.enablePropertyFunctions, false);
+    return context;
+  }
 
   /** The compiled rule, or the problems that refuse it, each naming the rule. */
   record Result(CompiledRule rule, List<Problem> problems) {}

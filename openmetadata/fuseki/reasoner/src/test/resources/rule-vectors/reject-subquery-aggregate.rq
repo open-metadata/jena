@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/>
+CONSTRUCT { ?x :q ?n } WHERE { { SELECT ?x (COUNT(?y) AS ?n) WHERE { ?x :p ?y } GROUP BY ?x } }

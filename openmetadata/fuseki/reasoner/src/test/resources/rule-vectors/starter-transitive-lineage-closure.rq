@@ -1,0 +1,7 @@
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX om: <https://open-metadata.org/ontology/>
+CONSTRUCT { ?x om:transitivelyDerivedFrom ?y }
+WHERE {
+  ?x prov:wasDerivedFrom+ ?y .
+  FILTER(?x != ?y)
+}

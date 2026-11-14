@@ -20,12 +20,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -164,6 +173,176 @@ class JobInputsTest {
     assertEquals(2, names().size());
   }
 
+  @Test
+  void anUploadThatCannotFitIsRefusedByItsDeclaredLengthBeforeItsBodyIsRead() throws Exception {
+    final InputStream unreadable =
+        new InputStream() {
+          @Override
+          public int read() {
+            throw new AssertionError("the body was read");
+          }
+        };
+    final JobService.Refused refused =
+        assertThrows(
+            JobService.Refused.class,
+            () -> inputs.put("a".repeat(64), unreadable, 600, ROOMY, 1_000, () -> 500, NOW));
+    assertEquals(503, refused.status());
+    assertEquals("maxDiskBytes", refused.problem().subject());
+    assertEquals(List.of(), names(), "no temporary file was created");
+
+    final JobService.Refused full =
+        assertThrows(
+            JobService.Refused.class,
+            () -> inputs.put("a".repeat(64), unreadable, -1, ROOMY, 1_000, () -> 1_000, NOW));
+    assertEquals(503, full.status());
+  }
+
+  @Test
+  void uploadsBeyondTheConcurrencyCapAreAnsweredBusyUntilOneFinishes() throws Exception {
+    final CountDownLatch release = new CountDownLatch(1);
+    final CountDownLatch reading = new CountDownLatch(JobInputs.MAX_CONCURRENT_UPLOADS);
+    final ExecutorService pool = Executors.newCachedThreadPool();
+    try {
+      final List<Future<JobInputs.Stored>> running = new ArrayList<>();
+      for (int i = 0; i < JobInputs.MAX_CONCURRENT_UPLOADS; i++) {
+        final byte[] bytes = bytes("upload " + i);
+        final InputStream blocked =
+            new InputStream() {
+              private final ByteArrayInputStream rest = new ByteArrayInputStream(bytes);
+
+              @Override
+              public int read() throws IOException {
+                return rest.read();
+              }
+
+              @Override
+              public int read(final byte[] buffer, final int offset, final int length)
+                  throws IOException {
+                reading.countDown();
+                try {
+                  release.await();
+                } catch (final InterruptedException e) {
+                  throw new IOException(e);
+                }
+                return rest.read(buffer, offset, length);
+              }
+            };
+        running.add(
+            pool.submit(
+                () -> inputs.put(Releases.hash(bytes), blocked, ROOMY, ROOMY, () -> 0, NOW)));
+      }
+      assertTrue(reading.await(10, TimeUnit.SECONDS));
+      final JobService.Refused busy =
+          assertThrows(
+              JobService.Refused.class,
+              () -> put(Releases.hash(bytes("one too many")), bytes("one too many")));
+      assertEquals(429, busy.status());
+      assertEquals(Problem.Code.LIMIT_EXCEEDED, busy.problem().code());
+      assertEquals("maxConcurrentUploads", busy.problem().subject());
+
+      release.countDown();
+      for (final Future<JobInputs.Stored> upload : running) {
+        assertTrue(upload.get(10, TimeUnit.SECONDS).created());
+      }
+      assertTrue(
+          put(Releases.hash(bytes("one too many")), bytes("one too many")).created(),
+          "a slot is free again");
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void sweepingIsNotBlockedWhileAnUploadMeasuresTheDisk() throws Exception {
+    final CountDownLatch measuring = new CountDownLatch(1);
+    final CountDownLatch finish = new CountDownLatch(1);
+    final ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      final byte[] bytes = bytes("slow to measure");
+      final AtomicInteger calls = new AtomicInteger();
+      final Future<JobInputs.Stored> upload =
+          pool.submit(
+              () ->
+                  inputs.put(
+                      Releases.hash(bytes),
+                      new ByteArrayInputStream(bytes),
+                      ROOMY,
+                      ROOMY,
+                      () -> {
+                        if (calls.incrementAndGet() == 2) {
+                          measuring.countDown();
+                          await(finish);
+                        }
+                        return 0;
+                      },
+                      NOW));
+      assertTrue(measuring.await(10, TimeUnit.SECONDS));
+      inputs.sweep(Set.of(), NOW, false);
+      finish.countDown();
+      assertTrue(upload.get(10, TimeUnit.SECONDS).created());
+    } finally {
+      finish.countDown();
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void concurrentUploadsNeverLeaveCommittedStateOverTheQuota() throws Exception {
+    final byte[] first = new byte[1_000];
+    final byte[] second = new byte[1_000];
+    second[0] = 1;
+    final long quota = 1_500;
+    final CountDownLatch secondMeasuring = new CountDownLatch(1);
+    final CountDownLatch firstCommitted = new CountDownLatch(1);
+    final ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      final AtomicInteger firstCalls = new AtomicInteger();
+      final Future<JobInputs.Stored> a =
+          pool.submit(
+              () -> {
+                final JobInputs.Stored stored =
+                    inputs.put(
+                        Releases.hash(first),
+                        new ByteArrayInputStream(first),
+                        ROOMY,
+                        quota,
+                        () -> {
+                          if (firstCalls.incrementAndGet() == 2) {
+                            await(secondMeasuring);
+                          }
+                          return 1_000;
+                        },
+                        NOW);
+                firstCommitted.countDown();
+                return stored;
+              });
+      final AtomicInteger secondCalls = new AtomicInteger();
+      final Future<JobInputs.Stored> b =
+          pool.submit(
+              () ->
+                  inputs.put(
+                      Releases.hash(second),
+                      new ByteArrayInputStream(second),
+                      ROOMY,
+                      quota,
+                      () -> {
+                        if (secondCalls.incrementAndGet() == 2) {
+                          secondMeasuring.countDown();
+                          await(firstCommitted);
+                        }
+                        return 1_000;
+                      },
+                      NOW));
+      assertTrue(a.get(10, TimeUnit.SECONDS).created());
+      final ExecutionException refused =
+          assertThrows(ExecutionException.class, () -> b.get(10, TimeUnit.SECONDS));
+      assertEquals(503, ((JobService.Refused) refused.getCause()).status());
+      assertEquals(List.of(Releases.hash(first)), names());
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
   private JobInputs.Stored put(final String hex, final byte[] bytes) throws Exception {
     return put(hex, bytes, NOW);
   }
@@ -184,6 +363,14 @@ class JobInputsTest {
     }
     try (Stream<Path> files = Files.list(directory)) {
       return files.map(file -> file.getFileName().toString()).sorted().toList();
+    }
+  }
+
+  private static void await(final CountDownLatch latch) throws IOException {
+    try {
+      latch.await();
+    } catch (final InterruptedException e) {
+      throw new IOException(e);
     }
   }
 

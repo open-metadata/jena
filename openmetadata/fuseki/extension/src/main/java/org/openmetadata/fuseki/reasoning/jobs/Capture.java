@@ -158,7 +158,7 @@ public final class Capture {
     boolean complete = false;
     try {
       final Copy copy = new Copy(bounds, cancelled);
-      final Header header = new Header();
+      final Header header = new Header("the upload");
       try (CountingOutputStream file = new CountingOutputStream(Files.newOutputStream(partial));
           OutputStream out = new BufferedOutputStream(new FastGzip(file), BUFFER_BYTES);
           InputStream in = Files.newInputStream(upload)) {
@@ -180,7 +180,7 @@ public final class Capture {
                 .withSubject(release.digest()));
       }
       copy.checkBytes(copy.file.count());
-      final String versionIri = header.verify(release);
+      final String versionIri = header.verify(release.ontologyId(), release.releaseId());
       Files.move(partial, spool, StandardCopyOption.REPLACE_EXISTING);
       complete = true;
       return new Result(
@@ -230,7 +230,7 @@ public final class Capture {
     }
   }
 
-  private static Refused changed(final String subject, final String message) {
+  static Refused changed(final String subject, final String message) {
     return new Refused(Problem.of(Problem.Code.INPUT_CHANGED, message).withSubject(subject));
   }
 
@@ -243,14 +243,22 @@ public final class Capture {
   }
 
   /** The few triples of the ontology header the capture decides on; the rest only pass through. */
-  private static final class Header {
+  static final class Header {
     private static final int MAX_REMEMBERED = 8;
 
     private final Set<Node> ontologies = new LinkedHashSet<>();
     private final Set<Node> versions = new LinkedHashSet<>();
     private final Set<Node> imports = new LinkedHashSet<>();
     private final Set<Node> versionSubjects = new HashSet<>();
-    private Node ontology;
+    Node ontology;
+    private final String source;
+
+    /**
+     * @param source what the header was read from, as it reads mid-sentence: "the upload"
+     */
+    Header(final String source) {
+      this.source = source;
+    }
 
     void see(final Triple triple) {
       final Node predicate = triple.getPredicate();
@@ -272,32 +280,35 @@ public final class Capture {
     }
 
     /** The release's version IRI, once the header is known to be the named release's. */
-    String verify(final Release release) throws Refused {
-      final String expected = RELEASE_IRI_PREFIX + release.releaseId();
+    String verify(final String ontologyId, final String releaseId) throws Refused {
+      final String expected = RELEASE_IRI_PREFIX + releaseId;
       if (ontologies.size() != 1) {
         throw changed(
-            release.ontologyId(),
-            "The upload has "
+            ontologyId,
+            Character.toUpperCase(source.charAt(0))
+                + source.substring(1)
+                + " has "
                 + (ontologies.isEmpty() ? "no" : "more than one")
                 + " owl:Ontology, not the one header of release "
-                + release.releaseId());
+                + releaseId);
       }
       ontology = ontologies.iterator().next();
       if (!ontology.isURI()) {
         throw changed(
-            release.ontologyId(),
-            "The owl:Ontology in the upload is a blank node, not a named one");
+            ontologyId, "The owl:Ontology in " + source + " is a blank node, not a named one");
       }
       if (!versions.contains(NodeFactory.createURI(expected))
           || versions.size() != 1
           || versionSubjects.size() != 1
           || !versionSubjects.contains(ontology)) {
         throw changed(
-            release.ontologyId(),
-            "The owl:Ontology in the upload does not state owl:versionIRI <"
+            ontologyId,
+            "The owl:Ontology in "
+                + source
+                + " does not state owl:versionIRI <"
                 + expected
                 + ">, so it is not release "
-                + release.releaseId()
+                + releaseId
                 + "; it has "
                 + versions);
       }
@@ -310,7 +321,7 @@ public final class Capture {
                           + imported
                           + ">, but no other ontology is in the input: imports between ontologies"
                           + " are not supported")
-                  .withSubject(imported.isURI() ? imported.getURI() : release.ontologyId()));
+                  .withSubject(imported.isURI() ? imported.getURI() : ontologyId));
         }
       }
       return expected;
@@ -353,11 +364,11 @@ public final class Capture {
   }
 
   /** The copy's running counts and its checks against the bounds. */
-  private static final class Copy {
+  static final class Copy {
     private final Bounds bounds;
     private final BooleanSupplier cancelled;
-    private CountingOutputStream file;
-    private long triples;
+    CountingOutputStream file;
+    long triples;
 
     Copy(final Bounds bounds, final BooleanSupplier cancelled) {
       this.bounds = bounds;
@@ -410,14 +421,14 @@ public final class Capture {
    * The lowest compression level: capture runs in the server's JVM, and the spool is read once and
    * deleted, so CPU matters more than its size.
    */
-  private static final class FastGzip extends GZIPOutputStream {
+  static final class FastGzip extends GZIPOutputStream {
     FastGzip(final OutputStream out) throws IOException {
       super(out, 1 << 16);
       def.setLevel(Deflater.BEST_SPEED);
     }
   }
 
-  private static final class CountingOutputStream extends FilterOutputStream {
+  static final class CountingOutputStream extends FilterOutputStream {
     private long count;
 
     CountingOutputStream(final OutputStream out) {
