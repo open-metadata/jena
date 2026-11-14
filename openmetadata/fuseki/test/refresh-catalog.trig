@@ -1,0 +1,43 @@
+#  Copyright 2026 Collate
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# What a serving dataset holds for the smoke test's REFRESH, as OpenMetadata writes it: the active
+# release of the ontology test/check-release.ttl is the export of (its graph, with the header that
+# states the release), a catalog with column lineage from a PII column, and three graphs a refresh
+# must not read: another ontology the request does not list, a staging graph, and a phase 0
+# inferred graph. The rules travel inline in the request, so nothing here is a rule.
+PREFIX om: <https://open-metadata.org/ontology/>
+PREFIX c: <https://open-metadata.org/catalog/>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX : <https://open-metadata.org/finance#>
+
+<https://open-metadata.org/graph/ontology/3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b> {
+    <https://open-metadata.org/ontology/finance> a owl:Ontology ;
+        owl:versionIRI <urn:openmetadata:ontology-release:8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d> .
+    :Asset a owl:Class .
+    :Liability a owl:Class .
+    :Asset owl:disjointWith :Liability .
+    :loan a owl:NamedIndividual , :Asset .
+}
+
+<https://open-metadata.org/graph/ontology/00000000-0000-4000-8000-00000000dead> {
+    c:c7 om:hasTag c:pii .
+}
+
+<https://open-metadata.org/graph/staging/knowledge-7> {
+    c:c8 om:hasTag c:pii .
+}
+
+<https://open-metadata.org/graph/knowledge> {
+    c:pii om:tagFQN "PII.Sensitive" .
+    c:c1 om:hasTag c:pii .
+    c:l1 om:fromColumn c:c1 ; om:toColumn c:c2 .
+    c:l2 om:fromColumn c:c2 ; om:toColumn c:c3 .
+}
+
+<https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
+    c:c9 om:hasTag c:pii .
+}

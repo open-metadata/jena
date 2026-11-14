@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/>
+CONSTRUCT { ?x :q ?y } WHERE { SERVICE <http://example.org/sparql> { ?x :p ?y } }

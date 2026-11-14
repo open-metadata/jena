@@ -265,14 +265,14 @@ class JobServiceTest {
   }
 
   @Test
-  void aRefreshFailsAtCaptureUntilSnapshotsExist() throws Exception {
+  void aRefreshFailsAtCaptureWithoutTheWorkersRuleCompiler() throws Exception {
     final JobService service = service(plans(), Map.of());
     final JsonObject failed =
         await(service, id(service.submit(request("refresh-request"))), state("FAILED"));
     final JsonObject problem = failed.getObj("problem");
     assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
     assertEquals("capture", problem.getString("step"));
-    assertEquals(Operations.REFRESH_MISSING, problem.getString("message"));
+    assertEquals(Operations.RULE_CODE_MISSING, problem.getString("message"));
     assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
     assertConforms(failed);
   }
@@ -520,16 +520,24 @@ class JobServiceTest {
             "REFRESH", "NOT_IMPLEMENTED",
             "CHECK", "AVAILABLE",
             "EXPLAIN", "AVAILABLE",
-            "RESULTS", "NOT_IMPLEMENTED",
-            "QUERY", "NOT_IMPLEMENTED"),
+            "RESULTS", "AVAILABLE",
+            "QUERY", "AVAILABLE"),
         availability);
   }
 
   @Test
   void capabilitiesCannotClaimAnOperationWithoutTheLimitsItNeeds() throws Exception {
     final JobService service = service(worker(SUCCEED), Map.of());
-    for (final String operation : List.of("REFRESH", "RESULTS", "QUERY")) {
+    for (final String[] claim :
+        List.of(
+            new String[] {"REFRESH", "maxRulePasses"},
+            new String[] {"REFRESH", "maxDerivedTriples"},
+            new String[] {"RESULTS", "maxResultRows"},
+            new String[] {"QUERY", "maxResultRows"},
+            new String[] {"QUERY", "maxQuerySeconds"})) {
+      final String operation = claim[0];
       final JsonObject claimed = service.capabilities();
+      claimed.getObj("limits").remove(claim[1]);
       claimed
           .get("operations")
           .getAsArray()
@@ -542,7 +550,7 @@ class JobServiceTest {
       assertTrue(
           Contract.violations(Contract.CAPABILITIES, claimed).stream()
               .anyMatch(violation -> violation.startsWith("$.limits.")),
-          operation + " was accepted as AVAILABLE without its limits");
+          operation + " was accepted as AVAILABLE without " + claim[1]);
     }
     final JsonObject withoutJobSeconds = service.capabilities();
     withoutJobSeconds.getObj("limits").remove("maxJobSeconds");
@@ -605,8 +613,7 @@ class JobServiceTest {
     final ReasoningSettings current = settings;
     final JobService service =
         new JobService(
-            current,
-            JobSettings.fromEnvironment(jobEnv),
+            new Operations(current, JobSettings.fromEnvironment(jobEnv)),
             workers.launcher(current),
             () -> workers.readiness(current),
             planner,
@@ -618,7 +625,8 @@ class JobServiceTest {
   }
 
   private Stage.Planner plans() {
-    return Plans.current(new Operations(settings, JobSettings.fromEnvironment(Map.of())));
+    return Plans.current(
+        new Operations(settings, JobSettings.fromEnvironment(Map.of())), name -> null);
   }
 
   private static Stage.Planner worker(final String behaviour) {
@@ -713,6 +721,37 @@ class JobServiceTest {
 
   private Path jobDirectory(final UUID id) {
     return settings.reasoningRoot().resolve("jobs").resolve(id.toString());
+  }
+
+  @Test
+  void pagesOfAFinishedJobsResultAreCutFromOneParsedResultThatPagingNeverChanges()
+      throws Exception {
+    final JobService service = service(worker(SUCCEED), Map.of());
+    final UUID id = id(service.submit(request(UUID.randomUUID())));
+    await(service, id, state("SUCCEEDED"));
+    final Path file = jobDirectory(id).resolve(Plans.RESULT);
+    Files.writeString(
+        file,
+        "{\"closures\": [1, 2, 3, 4, 5], \"engine\": \"x\"}",
+        java.nio.charset.StandardCharsets.UTF_8);
+
+    final JsonObject first = service.results(id, 0, 2);
+    assertEquals("[ 1 , 2 ]", JSON.toStringFlat(first.getObj("result").get("closures")));
+    assertEquals(5, first.getObj("page").getNumber("total").intValue());
+    final JsonObject last = service.results(id, 4, 2);
+    assertEquals("[ 5 ]", JSON.toStringFlat(last.getObj("result").get("closures")));
+    assertEquals("x", last.getObj("result").getString("engine"));
+    assertEquals(
+        "[ 1 , 2 ]",
+        JSON.toStringFlat(first.getObj("result").get("closures")),
+        "a later page does not change an earlier answer");
+
+    Files.writeString(file, "{\"closures\": [9], \"engine\": \"y\"}");
+    Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(1_000));
+    assertEquals(
+        "y",
+        service.results(id, 0, 2).getObj("result").getString("engine"),
+        "a result that was replaced is read again");
   }
 
   private static Predicate<JsonObject> state(final String state) {

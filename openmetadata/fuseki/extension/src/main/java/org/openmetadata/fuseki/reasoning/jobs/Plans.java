@@ -15,12 +15,25 @@ package org.openmetadata.fuseki.reasoning.jobs;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import org.apache.jena.atlas.io.IO;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
+import org.apache.jena.datatypes.TypeMapper;
+import org.apache.jena.graph.Node;
+import org.apache.jena.graph.NodeFactory;
+import org.apache.jena.graph.Triple;
+import org.apache.jena.query.TxnType;
+import org.apache.jena.sparql.core.DatasetGraph;
+import org.apache.jena.sparql.core.Quad;
 import org.openmetadata.fuseki.reasoning.AtomicFiles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,8 +42,16 @@ import org.slf4j.LoggerFactory;
  * The steps each operation takes. CHECK and EXPLAIN capture the release the request uploaded,
  * bulk-load it into a private working dataset in a worker, and classify or explain there; the
  * answer goes to the job's outcome, with its detail in {@code result.json} in the job directory,
- * which the RESULTS operation will serve. REFRESH needs snapshots and the governance rules step, so
- * it still fails at capture with NOT_IMPLEMENTED.
+ * which the RESULTS operation serves. An EXPLAIN of a fact the dataset's current snapshot derived
+ * with a governance rule is answered from that snapshot's witnesses instead.
+ *
+ * <p>A REFRESH captures every active release from the serving dataset and the catalog triples the
+ * rules read; loads them; classifies each release into its entailment graph, all in one worker;
+ * runs the request's rules to a fixed point; compacts; and publishes the working dataset as the
+ * dataset's new snapshot ({@link SnapshotStore}). Every step is bounded by the job's deadline and
+ * the disk quota, the classify and rules steps together by maxDerivedTriples, and the rules by
+ * maxRulePasses; a refresh that reaches any of them, or meets an inconsistent release, fails and
+ * publishes nothing.
  *
  * <p>A job has {@link JobSettings#maxJobSeconds()} from its start: each worker step gets what is
  * left as its deadline. A check that reaches a limit or its time answers INCOMPLETE with the
@@ -43,24 +64,38 @@ final class Plans {
   static final String RESULT = "result.json";
   static final String WORKING = "working";
   static final String CHECK_FILE = "check.ofn";
+  static final String CLASSIFY = "classify";
+  static final String CLASSIFY_CLOSURES = "classify.closures.json";
+
+  /** Rule problems a refused bundle reports in its message, the first in bundle order. */
+  static final int MAX_REPORTED_RULE_PROBLEMS = 10;
+
+  /** The RULES step's limits as capabilities name them, for a refresh that reaches one. */
+  static final Map<String, String> RULE_LIMITS =
+      Map.of(
+          "maxPasses", "maxRulePasses",
+          "maxNewFacts", "maxDerivedTriples",
+          "maxSpoolBytes", "maxDiskBytes");
 
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
 
   private Plans() {}
 
-  static Stage.Planner current(final Operations operations) {
+  static Stage.Planner current(final Operations operations, final ServingDatasets datasets) {
     return (job, request) -> {
       final long deadline =
           System.nanoTime() + TimeUnit.SECONDS.toNanos(operations.jobSettings().maxJobSeconds());
       return switch (job.operation()) {
         case REFRESH ->
-            List.of(
-                Stage.unavailable(CAPTURE, Operations.REFRESH_MISSING),
-                Stage.unavailable("load", Operations.REFRESH_MISSING),
-                Stage.unavailable("classify", Operations.REFRESH_MISSING),
-                Stage.unavailable("rules", Operations.REFRESH_MISSING),
-                Stage.unavailable("compact", Operations.REFRESH_MISSING),
-                Stage.unavailable("publish", Operations.REFRESH_MISSING));
+            operations.ruleCode().isEmpty()
+                ? List.of(Stage.unavailable(CAPTURE, Operations.RULE_CODE_MISSING))
+                : List.of(
+                    refreshCapture(operations, datasets, deadline),
+                    refreshLoad(operations, deadline),
+                    classifyClosures(operations, deadline),
+                    rules(operations, deadline),
+                    compact(deadline),
+                    publish(operations));
         case CHECK ->
             List.of(
                 capture(operations, deadline),
@@ -68,6 +103,7 @@ final class Plans {
                 classify(operations, deadline));
         case EXPLAIN ->
             List.of(
+                governance(operations),
                 capture(operations, deadline),
                 load(operations, deadline),
                 explain(operations, deadline));
@@ -227,6 +263,568 @@ final class Plans {
           }
           return explainAnswer(context);
         });
+  }
+
+  /**
+   * Captures a refresh's input. A refresh whose source revision is already older than the current
+   * snapshot's stops here, before any work; the generation it captured at goes into capture.json
+   * for the publication's compare-and-set.
+   */
+  private static Stage refreshCapture(
+      final Operations operations, final ServingDatasets datasets, final long deadline) {
+    return stage(
+        CAPTURE,
+        context -> {
+          final DatasetGraph dataset = datasets.get(context.job().dataset());
+          if (dataset == null) {
+            return Stage.Result.failed(
+                Problem.of(
+                        Problem.Code.INVALID_REQUEST,
+                        "Dataset '" + context.job().dataset() + "' is no longer served")
+                    .atStep(CAPTURE));
+          }
+          final JsonObject request = context.request();
+          final Revision revision = Revision.of(request);
+          final String name = context.job().dataset();
+          final long base = operations.snapshots().generation(name);
+          final Optional<JsonObject> current = operations.snapshots().currentMetadata(name);
+          if (current.isPresent()) {
+            final Revision published = Revision.of(current.get().getObj("input"));
+            if (published.datasetGeneration().equals(revision.datasetGeneration())
+                && published.watermark() > revision.watermark()) {
+              return Stage.Result.failed(
+                  Problem.of(
+                          Problem.Code.SUPERSEDED,
+                          "Snapshot "
+                              + current.get().getString("id")
+                              + " already covers live writes up to "
+                              + published.watermark()
+                              + ", later than this refresh's "
+                              + revision.watermark())
+                      .atStep(CAPTURE));
+            }
+          }
+          final Capture.Bounds bounds =
+              new Capture.Bounds(
+                  operations.workerLimits().maxClosureTriples(), diskLeft(operations), deadline);
+          try {
+            final List<RefreshCapture.Release> releases = new ArrayList<>();
+            for (final JsonValue value : request.get("ontologyReleases").getAsArray()) {
+              final JsonObject release = value.getAsObject();
+              releases.add(
+                  new RefreshCapture.Release(
+                      release.getString("ontologyId"),
+                      release.getString("releaseId"),
+                      release.getString("contentDigest")));
+            }
+            final RefreshCapture.Result captured =
+                RefreshCapture.run(
+                    dataset,
+                    releases,
+                    RuleBundle.of(request.get("rules").getAsArray()),
+                    context.directory(),
+                    bounds,
+                    context.cancelled());
+            final JsonObject json = captured.toJson();
+            json.put("baseGeneration", base);
+            AtomicFiles.write(context.directory().resolve(CAPTURE_RESULT), JSON.toString(json));
+            LOG.info(
+                "Reasoning job {} captured {} releases, {} rules and {} catalog triples in {}"
+                    + " graphs: {} triples, {} bytes in {} ms",
+                context.job().id(),
+                captured.closures().size(),
+                captured.rules(),
+                captured.catalogTriples(),
+                captured.catalogGraphs().size(),
+                captured.triples(),
+                captured.bytes(),
+                captured.millis());
+            return Stage.Result.completed();
+          } catch (final Capture.Cancelled e) {
+            return Stage.Result.stopped();
+          } catch (final Capture.Refused e) {
+            return Stage.Result.failed(e.problem().atStep(CAPTURE));
+          }
+        });
+  }
+
+  /**
+   * Compiles every rule of a bundle with the RULES step's compiler, so an invalid bundle is refused
+   * at submission, before anything runs, naming its first refused rule.
+   */
+  static Optional<Problem> admit(final Operations operations, final RuleBundle bundle) {
+    if (bundle.rules().isEmpty()) {
+      return Optional.empty();
+    }
+    final Optional<RuleCode> code = operations.ruleCode();
+    if (code.isEmpty()) {
+      return Optional.of(Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.RULE_CODE_MISSING));
+    }
+    final List<RuleCode.RuleProblem> problems =
+        code.get().compile(bundle.rulesJson(), operations.workerLimits().maxRulePatterns());
+    if (problems.isEmpty()) {
+      return Optional.empty();
+    }
+    final StringBuilder message = new StringBuilder("The rules are refused: ");
+    for (int i = 0; i < Math.min(problems.size(), MAX_REPORTED_RULE_PROBLEMS); i++) {
+      message
+          .append(i == 0 ? "" : "; ")
+          .append(problems.get(i).code())
+          .append(' ')
+          .append(problems.get(i).message());
+    }
+    if (problems.size() > MAX_REPORTED_RULE_PROBLEMS) {
+      message.append("; and ").append(problems.size() - MAX_REPORTED_RULE_PROBLEMS).append(" more");
+    }
+    return Optional.of(
+        Problem.of(Problem.Code.RULE_FAILED, message.toString())
+            .withSubject(problems.get(0).rule()));
+  }
+
+  private static Stage refreshLoad(final Operations operations, final long deadline) {
+    return failingAtLimits(load(operations, deadline));
+  }
+
+  /**
+   * Classifies each captured closure into its entailment graph, in one worker step over the shared
+   * working dataset: starting a worker per closure cost about a second each. The worker classifies
+   * the closures in turn and writes each one's result as {@code classify-<n>.result.json} when it
+   * is done, so the first closure without a completed result is the one that ended the step, and a
+   * problem names that closure's step and ontology as it did when each had a step of its own. An
+   * inconsistent closure fails the refresh: its consequences would be arbitrary, so nothing is
+   * published.
+   */
+  private static Stage classifyClosures(final Operations operations, final long deadline) {
+    final WorkerStage worker =
+        new WorkerStage(
+            CLASSIFY,
+            context -> {
+              final JsonObject step = step("CLASSIFY_ALL", deadline);
+              step.put("closuresFile", CLASSIFY_CLOSURES);
+              final JsonObject limits = limits(operations, context);
+              // What the closures may write together; the worker gives each what is left of it.
+              limits.put("maxNewFacts", operations.workerLimits().maxNewFacts());
+              step.put("limits", limits);
+              return step;
+            });
+    return stage(
+        CLASSIFY,
+        context -> {
+          final List<RefreshCapture.Closure> closures = new ArrayList<>();
+          for (final JsonValue value : json(context, CAPTURE_RESULT).get("closures").getAsArray()) {
+            closures.add(RefreshCapture.Closure.fromJson(value.getAsObject()));
+          }
+          Stage.Result ran = Stage.Result.completed();
+          if (!closures.isEmpty()) {
+            if (context.cancelled().getAsBoolean()) {
+              return Stage.Result.stopped();
+            }
+            if (System.nanoTime() - deadline >= 0) {
+              return Stage.Result.failed(outOfTime().atStep(closureStep(0)));
+            }
+            final JsonArray inputs = new JsonArray();
+            for (final RefreshCapture.Closure closure : closures) {
+              final JsonObject input = new JsonObject();
+              input.put("root", closure.ontologyIri());
+              input.put("graphsFile", closure.graphsFile());
+              input.put("output", closure.entailments());
+              inputs.add(input);
+            }
+            AtomicFiles.write(
+                context.directory().resolve(CLASSIFY_CLOSURES), JSON.toString(inputs));
+            ran = worker.run(context);
+            if (ran.cancelled()) {
+              return ran;
+            }
+          }
+          long derived = 0;
+          final JsonArray outcomes = new JsonArray();
+          final JsonArray engines = new JsonArray();
+          for (int i = 0; i < closures.size(); i++) {
+            final RefreshCapture.Closure closure = closures.get(i);
+            final String name = closureStep(i);
+            final JsonObject manifest = completed(context, name);
+            if (manifest == null) {
+              return Stage.Result.failed(unfinished(ran.problem(), closure).atStep(name));
+            }
+            final JsonObject entailments = manifest.getObj("entailments");
+            if (!entailments.getBoolean("consistent")) {
+              return Stage.Result.failed(
+                  Problem.of(
+                          Problem.Code.INCONSISTENT_ONTOLOGY,
+                          "The active release of <"
+                              + closure.ontologyIri()
+                              + "> (version <"
+                              + closure.versionIri()
+                              + ">) is inconsistent, so it has no consequences to publish;"
+                              + " explain the inconsistency with an EXPLAIN job")
+                      .withSubject(closure.ontologyIri())
+                      .atStep(name));
+            }
+            derived += entailments.getNumber("outputTriples").longValue();
+            final JsonObject outcome = closure.toJson();
+            outcome.remove("graphsFile");
+            outcome.put("consistent", true);
+            outcome.put("unsatisfiableCount", entailments.get("unsatisfiable"));
+            outcome.put("unsatisfiableClasses", manifest.get("unsatisfiable"));
+            outcome.put("entailedTriples", entailments.get("outputTriples"));
+            copy(manifest, outcome, "engine");
+            outcomes.add(outcome);
+            addEngine(engines, manifest);
+          }
+          if (ran.problem() != null) {
+            // Every closure was classified and the step still did not complete: its deadline
+            // passed as the last one ended.
+            return Stage.Result.failed(ran.problem());
+          }
+          final JsonObject classified = new JsonObject();
+          classified.put("closures", outcomes);
+          classified.put("derived", derived);
+          classified.put("engines", engines);
+          AtomicFiles.write(
+              context.directory().resolve("classify.json"), JSON.toString(classified));
+          return Stage.Result.completed().withEngines(engines);
+        });
+  }
+
+  /** The id the worker gives the closure at this position of a CLASSIFY_ALL step. */
+  private static String closureStep(final int position) {
+    return CLASSIFY + "-" + position;
+  }
+
+  /** A closure's result manifest, or null when the worker did not complete the closure. */
+  private static JsonObject completed(final Stage.Context context, final String step) {
+    final Path file = context.directory().resolve(step + ".result.json");
+    if (!Files.isRegularFile(file)) {
+      return null;
+    }
+    final JsonObject manifest = JSON.read(file.toString());
+    return "SUCCEEDED".equals(manifest.getString("status")) ? manifest : null;
+  }
+
+  /**
+   * Why a closure has no completed result: the problem that ended the worker step, about this
+   * closure. A limit without a subject is the output budget the closures share.
+   */
+  private static Problem unfinished(final Problem ended, final RefreshCapture.Closure closure) {
+    if (ended == null) {
+      return Problem.of(
+              Problem.Code.WORKER_LOST,
+              "The worker completed without a result for <" + closure.ontologyIri() + ">")
+          .withSubject(closure.ontologyIri());
+    }
+    if (ended.subject() != null) {
+      return ended;
+    }
+    return ended.withSubject(
+        ended.code() == Problem.Code.LIMIT_EXCEEDED ? "maxDerivedTriples" : closure.ontologyIri());
+  }
+
+  /**
+   * Runs the bundle to a fixed point over the catalog, the closures and their entailments. Its new
+   * facts get what the closures' entailments left of maxDerivedTriples; its spool, what the disk
+   * quota leaves. A refresh without enabled rules has nothing to run.
+   */
+  private static Stage rules(final Operations operations, final long deadline) {
+    final WorkerStage worker =
+        new WorkerStage(
+            "rules",
+            context -> {
+              final JsonObject step = step("RULES", deadline);
+              step.put("readFile", RefreshCapture.READ_FILE);
+              final JsonArray rules = new JsonArray();
+              for (final JsonValue value : bundleRules(context)) {
+                final JsonObject rule = value.getAsObject();
+                final JsonObject spec = new JsonObject();
+                spec.put("name", rule.getString("name"));
+                spec.put("ruleType", rule.getString("ruleType"));
+                spec.put("ruleBody", rule.getString("ruleBody"));
+                spec.put("output", RefreshCapture.ruleGraph(rule.getString("name")));
+                rules.add(spec);
+              }
+              step.put("rules", rules);
+              step.put("provenance", SnapshotStore.PROVENANCE);
+              final long classified =
+                  json(context, "classify.json").getNumber("derived").longValue();
+              final JsonObject limits = new JsonObject();
+              limits.put(
+                  "maxNewFacts", Math.max(1, operations.workerLimits().maxNewFacts() - classified));
+              limits.put("maxPasses", operations.workerLimits().maxPasses());
+              long disk;
+              try {
+                disk = diskLeft(operations);
+              } catch (final IOException e) {
+                disk = 1;
+              }
+              limits.put(
+                  "maxSpoolBytes",
+                  Math.max(1, Math.min(operations.workerLimits().maxSpoolBytes(), disk)));
+              step.put("limits", limits);
+              return step;
+            });
+    return stage(
+        "rules",
+        context -> {
+          final JsonArray engines = json(context, "classify.json").get("engines").getAsArray();
+          if (bundleRules(context).isEmpty()) {
+            return Stage.Result.completed();
+          }
+          if (System.nanoTime() - deadline >= 0) {
+            return Stage.Result.failed(outOfTime().atStep("rules"));
+          }
+          final Stage.Result ran = worker.run(context);
+          if (ran.cancelled()) {
+            return ran;
+          }
+          if (ran.problem() != null) {
+            final Problem problem = ran.problem();
+            final String limit =
+                problem.subject() == null ? null : RULE_LIMITS.get(problem.subject());
+            return Stage.Result.failed(limit == null ? problem : problem.withSubject(limit));
+          }
+          final JsonArray all = JSON.copy(engines).getAsArray();
+          all.add(Operations.governanceEngine());
+          return Stage.Result.completed().withEngines(all);
+        });
+  }
+
+  private static Stage compact(final long deadline) {
+    final WorkerStage worker = new WorkerStage("compact", context -> step("COMPACT", deadline));
+    return stage(
+        "compact",
+        context -> {
+          if (System.nanoTime() - deadline >= 0) {
+            return Stage.Result.failed(outOfTime().atStep("compact"));
+          }
+          return worker.run(context);
+        });
+  }
+
+  /**
+   * Publishes the compacted working dataset as the dataset's new snapshot, by compare-and-set
+   * against the generation the capture saw; the refresh's result describes it.
+   */
+  private static Stage publish(final Operations operations) {
+    return stage(
+        "publish",
+        context -> {
+          final JsonObject capture = json(context, CAPTURE_RESULT);
+          final JsonObject classified = json(context, "classify.json");
+          final Revision revision = Revision.of(context.request());
+          final JsonObject detail = new JsonObject();
+          detail.put("closures", classified.get("closures"));
+          detail.put("rules", ruleSummary(context));
+          final JsonObject catalog = new JsonObject();
+          catalog.put("triples", capture.getObj("catalog").get("triples"));
+          catalog.put("graphs", capture.getObj("catalog").get("graphs").getAsArray().size());
+          catalog.put("anyPredicate", capture.getObj("catalog").get("anyPredicate"));
+          detail.put("catalog", catalog);
+          // A refresh without enabled rules ran no RULES step and has no witnesses.
+          final Path provenance = context.directory().resolve(SnapshotStore.PROVENANCE);
+          final SnapshotStore.Candidate candidate =
+              new SnapshotStore.Candidate(
+                  context.job().id(),
+                  context.job().sequence(),
+                  revision.datasetGeneration(),
+                  revision.watermark(),
+                  context.job().input(),
+                  detail);
+          final JsonObject snapshot;
+          try {
+            snapshot =
+                operations
+                    .snapshots()
+                    .publish(
+                        context.job().dataset(),
+                        capture.getNumber("baseGeneration").longValue(),
+                        candidate,
+                        context.directory().resolve(WORKING),
+                        Files.exists(provenance) ? provenance : null,
+                        System.currentTimeMillis());
+          } catch (final SnapshotStore.Superseded e) {
+            return Stage.Result.failed(
+                Problem.of(Problem.Code.SUPERSEDED, e.getMessage()).atStep("publish"));
+          }
+          final JsonObject result = new JsonObject();
+          result.put("operation", "REFRESH");
+          result.put("snapshot", snapshot);
+          result.put("generation", operations.snapshots().generation(context.job().dataset()));
+          result.put("catalog", catalog);
+          result.put("closures", classified.get("closures"));
+          result.put("rules", ruleSummary(context));
+          AtomicFiles.write(context.directory().resolve(RESULT), JSON.toString(result));
+          return Stage.Result.completed().withSnapshot(UUID.fromString(snapshot.getString("id")));
+        });
+  }
+
+  /**
+   * Answers an EXPLAIN of a fact the dataset's current snapshot derived with a governance rule,
+   * from the witnesses its RULES step recorded in the snapshot's provenance file: the rule, the
+   * pass and the premises, each explained in turn down to asserted facts. Any other statement goes
+   * on to the OWL explanation.
+   */
+  private static Stage governance(final Operations operations) {
+    return stage(
+        "snapshot",
+        context -> {
+          final Triple fact = triple(context.request().getObj("explain").getObj("statement"));
+          final Optional<SnapshotStore.Lease> leased =
+              operations.snapshots().lease(context.job().dataset());
+          if (fact == null || leased.isEmpty()) {
+            return Stage.Result.completed();
+          }
+          try (SnapshotStore.Lease lease = leased.get()) {
+            final DatasetGraph snapshot = lease.database();
+            snapshot.begin(TxnType.READ);
+            try {
+              if (!derivedByRule(snapshot, fact)) {
+                return Stage.Result.completed();
+              }
+              if (operations.ruleCode().isEmpty()) {
+                return Stage.Result.failed(
+                    Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.RULE_CODE_MISSING)
+                        .atStep("snapshot"));
+              }
+              final JsonObject explanation =
+                  operations
+                      .ruleCode()
+                      .get()
+                      .explain(
+                          snapshot,
+                          lease.provenance().toString(),
+                          fact,
+                          GOVERNANCE_DEPTH,
+                          Math.min(GOVERNANCE_FACTS, operations.jobSettings().maxResultRows()),
+                          GOVERNANCE_PATH_LENGTH,
+                          GOVERNANCE_PATH_NODES);
+              if (explanation == null) {
+                return Stage.Result.completed();
+              }
+              final JsonObject result = new JsonObject();
+              result.put("operation", "EXPLAIN");
+              result.put("outcome", "ENTAILED");
+              result.put("kind", "GOVERNANCE");
+              result.put("snapshot", lease.description());
+              result.put("generation", lease.generation());
+              result.put("explanation", explanation);
+              AtomicFiles.write(context.directory().resolve(RESULT), JSON.toString(result));
+              final JsonArray engines = new JsonArray();
+              engines.add(Operations.governanceEngine());
+              return Stage.Result.answered("ENTAILED", null).withEngines(engines);
+            } finally {
+              snapshot.end();
+            }
+          }
+        });
+  }
+
+  /** Bounds of a governance explanation: the worker's defaults, the facts cut to a result page. */
+  static final int GOVERNANCE_DEPTH = 16;
+
+  static final int GOVERNANCE_FACTS = 1_000;
+  static final int GOVERNANCE_PATH_LENGTH = 256;
+  static final int GOVERNANCE_PATH_NODES = 100_000;
+
+  private static boolean derivedByRule(final DatasetGraph snapshot, final Triple fact) {
+    final Iterator<Quad> quads =
+        snapshot.find(Node.ANY, fact.getSubject(), fact.getPredicate(), fact.getObject());
+    while (quads.hasNext()) {
+      final Node graph = quads.next().getGraph();
+      if (graph.isURI() && graph.getURI().startsWith(RefreshCapture.ruleGraph(""))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The statement as a triple; null for a literal the schema admits but RDF cannot write. */
+  static Triple triple(final JsonObject statement) {
+    final Node subject = NodeFactory.createURI(statement.getString("subjectIri"));
+    final Node predicate = NodeFactory.createURI(statement.getString("predicateIri"));
+    final Node object;
+    if ("IRI".equals(statement.getString("objectKind"))) {
+      if (!statement.hasKey("objectIri")) {
+        return null;
+      }
+      object = NodeFactory.createURI(statement.getString("objectIri"));
+    } else {
+      if (!statement.hasKey("literalValue")) {
+        return null;
+      }
+      final String value = statement.getString("literalValue");
+      if (statement.hasKey("language")) {
+        object = NodeFactory.createLiteralLang(value, statement.getString("language"));
+      } else if (statement.hasKey("datatypeIri")) {
+        object =
+            NodeFactory.createLiteralDT(
+                value,
+                TypeMapper.getInstance().getSafeTypeByName(statement.getString("datatypeIri")));
+      } else {
+        object = NodeFactory.createLiteralString(value);
+      }
+    }
+    return Triple.create(subject, predicate, object);
+  }
+
+  /** A refresh's rules, as its capture wrote them. */
+  private static JsonArray bundleRules(final Stage.Context context) {
+    return JSON.parseAny(
+            IO.readWholeFileAsUTF8(
+                context.directory().resolve(RefreshCapture.RULES_FILE).toString()))
+        .getAsArray();
+  }
+
+  /** Per-rule counts of the RULES step, or none when the bundle had no rules. */
+  private static JsonObject ruleSummary(final Stage.Context context) {
+    final JsonObject summary = new JsonObject();
+    final Path file = context.directory().resolve("rules.result.json");
+    if (!Files.isRegularFile(file)) {
+      summary.put("ran", false);
+      return summary;
+    }
+    final JsonObject manifest = JSON.read(file.toString());
+    summary.put("ran", true);
+    summary.put("outcome", manifest.get("outcome"));
+    copy(manifest, summary, "passes", "newFacts", "derived", "solutions", "rules");
+    return summary;
+  }
+
+  /** The source revision a request or a snapshot's input names. */
+  record Revision(String datasetGeneration, long watermark) {
+    static Revision of(final JsonObject withRevision) {
+      final JsonObject revision = withRevision.getObj("sourceRevision");
+      return new Revision(
+          revision.getString("datasetGeneration"),
+          revision.getNumber("liveWriteWatermark").longValue());
+    }
+  }
+
+  /**
+   * A refresh publishes complete results or none: a limit a check would answer INCOMPLETE with
+   * fails the refresh instead.
+   */
+  private static Stage failingAtLimits(final Stage inner) {
+    return stage(
+        inner.name(),
+        context -> {
+          final Stage.Result result = inner.run(context);
+          return result.answered() && result.problem() != null
+              ? Stage.Result.failed(result.problem())
+              : result;
+        });
+  }
+
+  private static JsonObject json(final Stage.Context context, final String file) {
+    return JSON.read(context.directory().resolve(file).toString());
+  }
+
+  private static void addEngine(final JsonArray engines, final JsonObject manifest) {
+    final JsonArray found = engines(manifest);
+    for (final JsonValue engine : found) {
+      if (!engines.contains(engine)) {
+        engines.add(engine);
+      }
+    }
   }
 
   /** The job's answer to a check, from the classify step's manifest. */

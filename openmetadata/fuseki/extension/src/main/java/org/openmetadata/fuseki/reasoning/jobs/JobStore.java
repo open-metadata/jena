@@ -148,6 +148,11 @@ final class JobStore {
 
   /** Bytes under the reasoning root, which every job, working dataset and snapshot shares. */
   static long sizeOnDisk(final Path root) throws IOException {
+    return sizeOnDisk(root, null);
+  }
+
+  /** As {@link #sizeOnDisk(Path)}, leaving out the directory {@code skip} directly under root. */
+  static long sizeOnDisk(final Path root, final String skip) throws IOException {
     if (!Files.isDirectory(root)) {
       return 0;
     }
@@ -155,6 +160,16 @@ final class JobStore {
     Files.walkFileTree(
         root,
         new SimpleFileVisitor<>() {
+          @Override
+          public FileVisitResult preVisitDirectory(
+              final Path directory, final BasicFileAttributes attributes) {
+            return skip != null
+                    && root.equals(directory.getParent())
+                    && directory.getFileName().toString().equals(skip)
+                ? FileVisitResult.SKIP_SUBTREE
+                : FileVisitResult.CONTINUE;
+          }
+
           @Override
           public FileVisitResult visitFile(final Path file, final BasicFileAttributes attributes) {
             total[0] += attributes.size();

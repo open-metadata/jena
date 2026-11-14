@@ -12,6 +12,7 @@
  */
 package org.openmetadata.fuseki.reasoning.jobs;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
@@ -21,11 +22,18 @@ import java.util.HexFormat;
 import java.util.UUID;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
+import org.apache.jena.graph.Node;
+import org.apache.jena.graph.NodeFactory;
+import org.apache.jena.graph.Triple;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
 import org.apache.jena.riot.Lang;
 import org.apache.jena.riot.RDFDataMgr;
 import org.apache.jena.riot.RDFFormat;
+import org.apache.jena.riot.RDFParser;
+import org.apache.jena.riot.system.StreamRDFBase;
+import org.apache.jena.sparql.core.DatasetGraph;
+import org.apache.jena.system.Txn;
 
 /**
  * Ontology releases as OpenMetadata uploads them: RDF-Thrift of one ontology's members under an
@@ -97,6 +105,29 @@ public final class Releases {
   /** A release made of exactly this Turtle, whatever its header says. */
   public static Release raw(final UUID ontologyId, final UUID releaseId, final String turtle) {
     return new Release(ontologyId, releaseId, thrift(turtle));
+  }
+
+  /**
+   * Makes the release the active one of its ontology in a serving dataset: its triples are the
+   * graph {@code graph/ontology/{ontologyId}}, replacing whatever that graph held.
+   */
+  public static void activate(final DatasetGraph serving, final Release release) {
+    final Node graph = NodeFactory.createURI(Capture.ONTOLOGY_GRAPH_PREFIX + release.ontologyId());
+    Txn.executeWrite(
+        serving,
+        () -> {
+          serving.deleteAny(graph, Node.ANY, Node.ANY, Node.ANY);
+          RDFParser.source(new ByteArrayInputStream(release.rdf()))
+              .lang(Lang.RDFTHRIFT)
+              .parse(
+                  new StreamRDFBase() {
+                    @Override
+                    public void triple(final Triple triple) {
+                      serving.add(
+                          graph, triple.getSubject(), triple.getPredicate(), triple.getObject());
+                    }
+                  });
+        });
   }
 
   public static byte[] thrift(final String turtle) {

@@ -135,7 +135,17 @@ class JobRequestTest {
               final JsonArray releases = r.get("ontologyReleases").getAsArray();
               releases.add(JSON.copy(releases.get(0)));
             },
-            "ontologyReleases: items must be unique"),
+            "ontologyReleases[1].ontologyId: "),
+        violation(
+            "two different releases of one ontology",
+            "refresh-request",
+            r -> {
+              final JsonArray releases = r.get("ontologyReleases").getAsArray();
+              final JsonObject other = (JsonObject) JSON.copy(releases.get(0));
+              other.put("releaseId", UUID.nameUUIDFromBytes(new byte[] {7}).toString());
+              releases.add(other);
+            },
+            "ontologyReleases[1].ontologyId: "),
         violation(
             "more releases than a request may list",
             "refresh-request",

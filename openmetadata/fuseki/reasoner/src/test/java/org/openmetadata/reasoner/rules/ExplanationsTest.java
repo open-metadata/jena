@@ -132,6 +132,21 @@ class ExplanationsTest {
   }
 
   @Test
+  void aPathSearchStopsOnceItHasReachedAsManyNodesAsItMayVisit() throws Exception {
+    run();
+    final Triple closure = Triple.create(uri("t4"), om("transitivelyDerivedFrom"), uri("t0"));
+    final PathPremise reached =
+        (PathPremise)
+            explain(closure, new Explanations.Bounds(16, 1_000, 256, 1_000)).premises().get(0);
+    assertTrue(reached.complete());
+    final PathPremise stopped =
+        (PathPremise)
+            explain(closure, new Explanations.Bounds(16, 1_000, 256, 1)).premises().get(0);
+    assertFalse(stopped.complete());
+    assertTrue(stopped.chain().isEmpty());
+  }
+
+  @Test
   void anExistsConditionIsAnsweredWithOneMatch() throws Exception {
     run();
     final Fact fact =
@@ -175,8 +190,7 @@ class ExplanationsTest {
     return RuleFixtures.read(
         job,
         dataset ->
-            Explanations.explain(
-                dataset, NodeFactory.createURI(RuleFixtures.PROVENANCE), fact, bounds));
+            Explanations.explain(dataset, job.resolve(RuleFixtures.PROVENANCE), fact, bounds));
   }
 
   private static Triple tag(final String column) {

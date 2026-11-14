@@ -1,0 +1,12 @@
+PREFIX om: <https://open-metadata.org/ontology/>
+CONSTRUCT {
+  ?downstream om:hasTag ?piiTag .
+  ?downstream om:inferredTagSource ?upstream
+}
+WHERE {
+  ?upstream om:hasTag ?piiTag .
+  ?piiTag om:tagFQN ?fqn .
+  FILTER(STRSTARTS(?fqn, "PII."))
+  ?colLineage om:fromColumn ?upstream ;
+              om:toColumn ?downstream .
+}

@@ -15,6 +15,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
@@ -41,32 +42,42 @@ public interface Stage {
    * How a stage ended: completed, possibly with the job's outcome; answered, which ends the job
    * SUCCEEDED with its outcome now, possibly INCOMPLETE with the problem that stopped it; failed
    * with a problem; or stopped after a cancellation. {@code engines} are the engine builds that
-   * computed the result, recorded with the job's input; null when the stage ran none.
+   * computed the result, recorded with the job's input; null when the stage ran none. {@code
+   * snapshotId} is the snapshot a refresh's publish stage made current.
    */
   record Result(
-      String outcome, Problem problem, boolean cancelled, boolean answered, JsonArray engines) {
+      String outcome,
+      Problem problem,
+      boolean cancelled,
+      boolean answered,
+      JsonArray engines,
+      UUID snapshotId) {
     public static Result completed() {
-      return new Result(null, null, false, false, null);
+      return new Result(null, null, false, false, null, null);
     }
 
     public static Result completed(final String outcome) {
-      return new Result(outcome, null, false, false, null);
+      return new Result(outcome, null, false, false, null, null);
     }
 
     public static Result answered(final String outcome, final Problem problem) {
-      return new Result(outcome, problem, false, true, null);
+      return new Result(outcome, problem, false, true, null, null);
     }
 
     public static Result failed(final Problem problem) {
-      return new Result(null, problem, false, false, null);
+      return new Result(null, problem, false, false, null, null);
     }
 
     public static Result stopped() {
-      return new Result(null, null, true, false, null);
+      return new Result(null, null, true, false, null, null);
     }
 
     public Result withEngines(final JsonArray computedBy) {
-      return new Result(outcome, problem, cancelled, answered, computedBy);
+      return new Result(outcome, problem, cancelled, answered, computedBy, snapshotId);
+    }
+
+    public Result withSnapshot(final UUID published) {
+      return new Result(outcome, problem, cancelled, answered, engines, published);
     }
   }
 

@@ -19,14 +19,17 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonNumber;
 import org.apache.jena.atlas.json.JsonObject;
@@ -53,6 +56,12 @@ public final class JobService implements AutoCloseable {
   /** Thread interruption ends a worker step with SIGKILL and then waits for the worker to exit. */
   private static final long STOP_WAIT_MILLIS = 60_000;
 
+  /** How long an upload may rely on the last walk of the rest of the reasoning root. */
+  static final long DISK_USE_TTL_MILLIS = 5_000;
+
+  /** Parsed job results kept for paging; each can hold up to maxResultRows items. */
+  static final int MAX_CACHED_RESULTS = 4;
+
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
 
   private final ReasoningSettings settings;
@@ -64,6 +73,18 @@ public final class JobService implements AutoCloseable {
   private final LongSupplier clock;
   private final JobStore store;
   private final JobInputs inputs;
+  private final DiskUse diskUse;
+
+  /**
+   * Parsed results by {@link #parsedResult}, least recently read first; at most MAX_CACHED_RESULTS.
+   */
+  private final Map<String, JsonObject> resultCache =
+      new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, JsonObject> eldest) {
+          return size() > MAX_CACHED_RESULTS;
+        }
+      };
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -71,6 +92,7 @@ public final class JobService implements AutoCloseable {
   private final ArrayDeque<Job> queue = new ArrayDeque<>();
   private Thread runner;
   private boolean closed;
+  private long lastSequence;
 
   /** A job, and whether this submission created it or found it by its request ID. */
   public record Submission(JsonObject job, boolean created) {}
@@ -95,34 +117,51 @@ public final class JobService implements AutoCloseable {
     }
   }
 
+  /**
+   * @param operations what the service shares with its planner: the same instance must build the
+   *     plans, so both see one snapshot store
+   */
   JobService(
-      final ReasoningSettings settings,
-      final JobSettings jobSettings,
+      final Operations operations,
       final WorkerLauncher launcher,
       final Supplier<Readiness> readiness,
       final Stage.Planner planner,
       final LongSupplier clock) {
-    this.settings = settings;
-    this.jobSettings = jobSettings;
+    this.settings = operations.settings();
+    this.jobSettings = operations.jobSettings();
     this.launcher = launcher;
     this.readiness = readiness;
     this.planner = planner;
-    this.operations = new Operations(settings, jobSettings);
+    this.operations = operations;
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
     this.inputs = new JobInputs(settings.reasoningRoot());
+    this.diskUse =
+        new DiskUse(
+            settings.reasoningRoot(),
+            clock,
+            DISK_USE_TTL_MILLIS,
+            task -> {
+              final Thread thread = new Thread(task, "openmetadata-reasoning-disk-use");
+              thread.setDaemon(true);
+              thread.start();
+            });
   }
 
-  /** The service the Fuseki module runs, with the container's memory and this JVM's heap. */
-  public static JobService create(final ReasoningSettings settings, final JobSettings jobs) {
+  /**
+   * The service the Fuseki module runs, with the container's memory and this JVM's heap. A REFRESH
+   * reads the dataset {@code datasets} serves, which may answer only once the server has started.
+   */
+  public static JobService create(
+      final ReasoningSettings settings, final JobSettings jobs, final ServingDatasets datasets) {
     final long fusekiHeap = Runtime.getRuntime().maxMemory();
     final ContainerMemory memory = ContainerMemory.system();
+    final Operations operations = new Operations(settings, jobs);
     return new JobService(
-        settings,
-        jobs,
+        operations,
         new WorkerLauncher(settings, memory, fusekiHeap, false),
         () -> Readiness.evaluate(settings, memory, fusekiHeap, false, false),
-        Plans.current(new Operations(settings, jobs)),
+        Plans.current(operations, datasets),
         System::currentTimeMillis);
   }
 
@@ -135,9 +174,11 @@ public final class JobService implements AutoCloseable {
       return;
     }
     Files.createDirectories(settings.reasoningRoot().resolve("jobs"));
+    operations.snapshots().open();
     int interrupted = 0;
     synchronized (lock) {
       for (final Job job : store.load()) {
+        lastSequence = Math.max(lastSequence, job.sequence());
         if (!job.state().finished()) {
           store.killRecordedWorkers(job.id());
           store.discardWork(job.id());
@@ -151,6 +192,7 @@ public final class JobService implements AutoCloseable {
       retain();
       inputs.sweep(uploadsInUse(), clock.getAsLong(), true);
     }
+    diskUse.measure();
     LOG.info(
         "Reasoning jobs: {} kept, {} interrupted by the last shutdown", jobs.size(), interrupted);
   }
@@ -190,6 +232,7 @@ public final class JobService implements AutoCloseable {
         Thread.currentThread().interrupt();
       }
     }
+    operations.close();
   }
 
   /** OpenMetadata's rdfReasoningCapabilities document. */
@@ -249,6 +292,15 @@ public final class JobService implements AutoCloseable {
 
   public JobInputs.Stored upload(final String hex, final InputStream body)
       throws Refused, IOException {
+    return upload(hex, body, -1);
+  }
+
+  /**
+   * As above; {@code declaredBytes}, the client's Content-Length or -1, lets an upload that cannot
+   * fit be refused before its body is read.
+   */
+  public JobInputs.Stored upload(final String hex, final InputStream body, final long declaredBytes)
+      throws Refused, IOException {
     if (!settings.enabled()) {
       throw new Refused(
           503,
@@ -265,16 +317,44 @@ public final class JobService implements AutoCloseable {
           503,
           Problem.of(Problem.Code.NOT_READY, "Disk use cannot be measured: " + e.getMessage()));
     }
-    synchronized (lock) {
-      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
-    }
+    sweepInputs();
     return inputs.put(
         hex,
         body,
+        declaredBytes,
         jobSettings.maxUploadBytes(),
         quota,
-        () -> JobStore.sizeOnDisk(root),
+        diskUse::outsideUploads,
         clock.getAsLong());
+  }
+
+  /**
+   * The size of the upload held under {@code hex}, for {@code HEAD /reasoning/inputs/...}. Asking
+   * restarts the hold, as uploading the same bytes would, so a client keeps an input alive without
+   * sending it again.
+   */
+  public OptionalLong heldInput(final String hex) throws Refused, IOException {
+    if (!settings.enabled()) {
+      throw new Refused(
+          503,
+          Problem.of(
+              Problem.Code.NOT_READY,
+              "Reasoning is disabled: " + ReasoningSettings.ENABLED + " is not true"));
+    }
+    sweepInputs();
+    return inputs.hold(hex, clock.getAsLong());
+  }
+
+  /**
+   * Takes the in-use set under the lock and sweeps after releasing it, so job reads never wait on
+   * upload I/O.
+   */
+  private void sweepInputs() {
+    final Set<String> inUse;
+    synchronized (lock) {
+      inUse = uploadsInUse();
+    }
+    inputs.sweep(inUse, clock.getAsLong(), false);
   }
 
   /**
@@ -314,6 +394,9 @@ public final class JobService implements AutoCloseable {
       throw new Refused(
           503, Problem.of(Problem.Code.NOT_READY, String.join(" ", budget.reasons())));
     }
+    if (request.operation() == JobRequest.Operation.REFRESH) {
+      admitRules(request);
+    }
     synchronized (lock) {
       final Optional<Submission> existing = existing(request);
       if (existing.isPresent()) {
@@ -334,7 +417,8 @@ public final class JobService implements AutoCloseable {
                 .withSubject("maxQueuedJobs"));
       }
       requireDisk();
-      final Job job = Job.submitted(request, clock.getAsLong());
+      lastSequence = Math.max(lastSequence + 1, clock.getAsLong() * 1000);
+      final Job job = Job.submitted(request, clock.getAsLong(), lastSequence);
       try {
         store.create(job, request);
       } catch (final IOException e) {
@@ -351,6 +435,83 @@ public final class JobService implements AutoCloseable {
           "Reasoning job {} queued: {} request {}", job.id(), job.operation(), job.requestId());
       return new Submission(job.toJson(), true);
     }
+  }
+
+  /**
+   * A REFRESH is admitted only if every rule it carries compiles with the RULES step's compiler, so
+   * an invalid rule is refused here rather than after the capture.
+   */
+  private void admitRules(final JobRequest request) throws Refused {
+    final RuleBundle bundle;
+    try {
+      bundle = RuleBundle.of(request.document().get("rules").getAsArray());
+    } catch (final Capture.Refused e) {
+      throw new Refused(400, e.problem());
+    }
+    final Optional<Problem> problem = Plans.admit(operations, bundle);
+    if (problem.isPresent()) {
+      throw new Refused(400, problem.get());
+    }
+  }
+
+  /** The operations this service shares with its plans and the HTTP layer. */
+  public Operations operations() {
+    return operations;
+  }
+
+  /**
+   * A page of a finished job's result: {@code result.json} in its directory, with its main list,
+   * the closures of a refresh, the unsatisfiable classes of a check or the justifications of an
+   * explanation, cut to {@code limit} items from {@code offset}.
+   */
+  public JsonObject results(final UUID id, final int offset, final int limit) throws Refused {
+    final Job job;
+    synchronized (lock) {
+      job = jobs.get(id);
+    }
+    if (job == null) {
+      throw new Refused(404, Problem.of(Problem.Code.INVALID_REQUEST, "No job " + id));
+    }
+    if (!job.state().finished()) {
+      throw new Refused(
+          409,
+          Problem.of(Problem.Code.NOT_READY, "Job " + id + " has not finished: " + job.state()));
+    }
+    final Path file = store.directory(id).resolve(Plans.RESULT);
+    if (!Files.isRegularFile(file)) {
+      throw new Refused(
+          404,
+          job.problem() != null
+              ? job.problem()
+              : Problem.of(Problem.Code.INVALID_REQUEST, "Job " + id + " has no result"));
+    }
+    return Results.page(job.toJson(), parsedResult(id, file), offset, limit);
+  }
+
+  /**
+   * The parsed result.json of a finished job. Paging through a result asks for it once per page, so
+   * the last few are kept, keyed by the file's size and modification time in case the job directory
+   * was replaced; the result is shared and never modified.
+   */
+  private JsonObject parsedResult(final UUID id, final Path file) throws Refused {
+    final String key;
+    try {
+      key = id + ":" + Files.size(file) + ":" + Files.getLastModifiedTime(file).toMillis();
+    } catch (final IOException e) {
+      throw new Refused(
+          404, Problem.of(Problem.Code.INVALID_REQUEST, "Job " + id + " has no readable result"));
+    }
+    synchronized (resultCache) {
+      final JsonObject cached = resultCache.get(key);
+      if (cached != null) {
+        return cached;
+      }
+    }
+    final JsonObject parsed = JSON.read(file.toString());
+    synchronized (resultCache) {
+      resultCache.put(key, parsed);
+    }
+    return parsed;
   }
 
   public Optional<JsonObject> job(final UUID id) {
@@ -521,6 +682,11 @@ public final class JobService implements AutoCloseable {
           job.recordEngines(result.engines());
         }
       }
+      if (result.snapshotId() != null) {
+        synchronized (lock) {
+          job.published(result.snapshotId());
+        }
+      }
       if (result.answered()) {
         synchronized (lock) {
           job.progress(stage.name(), i + 1);
@@ -563,8 +729,8 @@ public final class JobService implements AutoCloseable {
     synchronized (lock) {
       finish(job, state, outcome, problem);
       retain();
-      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
     }
+    sweepInputs();
     LOG.info(
         "Reasoning job {} {}{}",
         job.id(),

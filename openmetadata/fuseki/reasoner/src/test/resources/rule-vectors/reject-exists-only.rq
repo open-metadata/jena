@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/>
+CONSTRUCT { :a :q :b } WHERE { FILTER EXISTS { ?x :p ?y } }
