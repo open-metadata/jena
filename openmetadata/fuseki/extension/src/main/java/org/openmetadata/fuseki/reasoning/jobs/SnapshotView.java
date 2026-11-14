@@ -24,18 +24,18 @@ import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.core.DatasetGraphWrapper;
 import org.apache.jena.sparql.core.DatasetGraphWrapperView;
 import org.apache.jena.sparql.core.Quad;
-import org.apache.jena.sparql.graph.GraphZero;
 import org.apache.jena.util.iterator.ExtendedIterator;
 import org.apache.jena.util.iterator.NiceIterator;
 
 /**
- * A published snapshot as a query sees it: read-only, without its provenance graph, and with a
- * default graph that is the union of every other graph. It never relies on TDB2's union default
- * graph, which the image turns on server-wide and which would include the provenance graph; the
- * union is one index scan with the graph left open, as the RULES step reads its selected graphs.
+ * A published snapshot as a query sees it: read-only, with a default graph that is the union of
+ * every graph, and with every quad a scan reads counted against a budget. The union is one index
+ * scan with the graph left open, as the RULES step reads its selected graphs. A snapshot's database
+ * holds only what queries may read: its witnesses are in a file beside it, not in a graph.
  *
  * <p>It is a {@link DatasetGraphWrapperView}: ARQ otherwise unwraps a wrapper and hands the query
- * to TDB2's own engine over the whole database, which would see the provenance graph.
+ * to TDB2's own engine over the database, whose scans the budget would not count and whose default
+ * graph depends on a server-wide setting.
  */
 final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrapperView {
   /** Thrown from a scan that passes its view's budget of quads; carries the budget. */
@@ -52,24 +52,19 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     }
   }
 
-  private final Node hidden;
   private final Graph union;
   private final long scanBudget;
   private final AtomicLong scanned = new AtomicLong();
 
-  SnapshotView(final DatasetGraph snapshot, final Node hidden) {
-    this(snapshot, hidden, Long.MAX_VALUE);
+  SnapshotView(final DatasetGraph snapshot) {
+    this(snapshot, Long.MAX_VALUE);
   }
 
-  /**
-   * A view that fails a scan once it has read {@code scanBudget} quads, hidden ones included: a
-   * query whose patterns match little still pays for what the store reads and the view discards.
-   */
-  SnapshotView(final DatasetGraph snapshot, final Node hidden, final long scanBudget) {
+  /** A view that fails a scan once it has read {@code scanBudget} quads. */
+  SnapshotView(final DatasetGraph snapshot, final long scanBudget) {
     super(snapshot);
-    this.hidden = hidden;
     this.scanBudget = scanBudget;
-    this.union = new VisibleUnion();
+    this.union = new Union();
   }
 
   private void scan() {
@@ -116,21 +111,8 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     if (Quad.isDefaultGraph(graph) || Quad.isUnionGraph(graph)) {
       return union;
     }
-    if (graph.equals(hidden)) {
-      return GraphZero.instance();
-    }
     final Graph named = super.getGraph(graph);
     return scanBudget == Long.MAX_VALUE ? named : new CountedGraph(named);
-  }
-
-  @Override
-  public boolean containsGraph(final Node graph) {
-    return !graph.equals(hidden) && super.containsGraph(graph);
-  }
-
-  @Override
-  public Iterator<Node> listGraphNodes() {
-    return Iter.filter(super.listGraphNodes(), graph -> !graph.equals(hidden));
   }
 
   @Override
@@ -140,21 +122,15 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
 
   @Override
   public Iterator<Quad> find(final Node g, final Node s, final Node p, final Node o) {
-    if (g != null && g.equals(hidden)) {
-      return Iter.nullIterator();
-    }
     if (g != null && (Quad.isDefaultGraph(g) || Quad.isUnionGraph(g))) {
       return Iter.map(union.find(s, p, o), triple -> Quad.create(Quad.defaultGraphIRI, triple));
     }
-    return Iter.filter(counted(super.find(g, s, p, o)), quad -> !hidden.equals(quad.getGraph()));
+    return counted(super.find(g, s, p, o));
   }
 
   @Override
   public Iterator<Quad> findNG(final Node g, final Node s, final Node p, final Node o) {
-    if (g != null && g.equals(hidden)) {
-      return Iter.nullIterator();
-    }
-    return Iter.filter(counted(super.findNG(g, s, p, o)), quad -> !hidden.equals(quad.getGraph()));
+    return counted(super.findNG(g, s, p, o));
   }
 
   @Override
@@ -253,11 +229,11 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
   }
 
   /**
-   * Every graph but the hidden one. TDB2 answers a scan with the graph open from an index ending in
-   * the graph, so copies of one triple in several graphs arrive together and are passed on once;
-   * only a scan with no subject, predicate or object bound can repeat a triple.
+   * Every graph as one. TDB2 answers a scan with the graph open from an index ending in the graph,
+   * so copies of one triple in several graphs arrive together and are passed on once; only a scan
+   * with no subject, predicate or object bound can repeat a triple.
    */
-  private final class VisibleUnion extends GraphBase {
+  private final class Union extends GraphBase {
     @Override
     protected ExtendedIterator<Triple> graphBaseFind(final Triple pattern) {
       final Iterator<Quad> quads =
@@ -274,12 +250,9 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
         @Override
         public boolean hasNext() {
           while (next == null && quads.hasNext()) {
-            final Quad quad = quads.next();
-            if (!hidden.equals(quad.getGraph())) {
-              final Triple triple = quad.asTriple();
-              if (!triple.equals(previous)) {
-                next = triple;
-              }
+            final Triple triple = quads.next().asTriple();
+            if (!triple.equals(previous)) {
+              next = triple;
             }
           }
           return next != null;

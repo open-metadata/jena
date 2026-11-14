@@ -50,7 +50,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_MAX_JOB_SECONDS` | `3600` | How long one job may run, capture included; each worker step gets what is left as its deadline. At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_QUERY_SECONDS` | `30` | Deadline of one snapshot query (`maxQuerySeconds`), and so how long a reader can keep a replaced snapshot on disk. At most 4 digits. |
 | `OPENMETADATA_REASONING_MAX_RESULT_ROWS` | `10000` | Rows one snapshot query or one page of a result returns (`maxResultRows`). At most 6 digits. |
-| `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` | `1000000` | Quads one snapshot query may read from the store, the provenance quads its view hides included; a query that reads more stops with `LIMIT_EXCEEDED` (subject `maxQueryScannedQuads`, not a capabilities limit). At most 9 digits. |
+| `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` | `1000000` | Quads one snapshot query may read from the store; a query that reads more stops with `LIMIT_EXCEEDED` (subject `maxQueryScannedQuads`, not a capabilities limit). At most 9 digits. |
 | `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES` | `4` | Snapshot queries that may run at once; more get HTTP 429. At most 3 digits. |
 | `OPENMETADATA_REASONING_MAX_UPLOAD_BYTES` | `64m` | The largest job input one `PUT /reasoning/inputs/...` may carry, the same as a Graph Store upload's limit. At least `1m`. Reported as the capability limit `maxUploadBytes`. |
 
@@ -194,7 +194,7 @@ worker on it. Every path a step names must stay inside its job directory.
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
 | `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
 | `COMPACT` | Compacts the dataset before it is published |
-| `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance graph ([Governance rules](#governance-rules)) |
+| `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance file beside the dataset ([Governance rules](#governance-rules)) |
 
 A closure is the listed `closure.graphs`; or, with `"graphsFile"`, the graphs a file in the job
 directory lists one per line, as a refresh lists each of the closures its working dataset holds;
@@ -227,7 +227,7 @@ records the limits a step ran with.
 | `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
 | `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
 | `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
-| `maxSpoolBytes` | 4 GiB, the file one `RULES` pass spools its solutions to | no |
+| `maxSpoolBytes` | 4 GiB, the files one `RULES` step keeps outside the dataset at once: a pass's solutions and the witnesses of every pass so far | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
 transitive containment hierarchy with its inverse and three assertions each (297,000 triples,
@@ -298,22 +298,24 @@ over a working dataset that `LOAD` (and `CLASSIFY`, for ontology conclusions) fi
 ```json
 {"protocol": 1, "stepId": "rules", "kind": "RULES", "dataset": "working", "timeoutMillis": 600000,
  "read": ["urn:capture:asserted", "urn:capture:context"],
- "provenance": "urn:capture:provenance",
+ "provenance": "provenance",
  "rules": [{"name": "pii-propagation-via-lineage", "ruleBody": "PREFIX om: <...> CONSTRUCT {...} WHERE {...}",
             "enabled": true, "priority": 200, "output": "urn:capture:inferred:pii-propagation-via-lineage"}],
  "limits": {"maxPasses": 64}}
 ```
 
 - `read` lists the graphs the rules read; they read the union of these and the output graphs, never
-  the provenance graph or any other graph. `urn:x-arq:DefaultGraph` names the default graph.
+  any other graph. `urn:x-arq:DefaultGraph` names the default graph.
   `readFile` instead names a file in the job directory listing them one per line, at most 100,000,
   as a refresh does.
 - `rules` is OpenMetadata's rule shape (`name`, `ruleBody`, `ruleType`, `enabled`, `priority`,
   `displayName`, `description`, `tags`) plus `output`, the graph a rule's conclusions go to, which
   every enabled rule needs. Rules may share an output graph. Order and `priority` do not change the
   result.
-- No output graph nor the provenance graph may be read, and no graph under
-  `urn:openmetadata:reasoner:` may be named: the step keeps its delta graphs there.
+- `provenance` names the file the step writes its witnesses to, in the job directory and outside
+  the dataset. It is not RDF in the dataset, so no rule and no query can read it.
+- No output graph may be read, and no graph under `urn:openmetadata:reasoner:` may be named: the
+  step keeps its delta graphs there.
 
 **Admission.** Every rule, enabled or not, is checked on its SPARQL algebra before anything runs, and
 one invalid rule rejects the bundle (`INVALID_RULES`, every problem listed with its rule). The step
@@ -328,8 +330,8 @@ casts may be called, never extension functions, and property functions are off, 
 named by an IRI; and a rule has at most 16,384 characters, 32 template triples, `maxRulePatterns`
 patterns and 32 levels of nesting.
 
-**Evaluation.** The step first empties its output and provenance graphs, so it always recomputes from
-what it reads: a premise deleted since the last run takes every conclusion that only it supported
+**Evaluation.** The step first empties its output graphs and removes its provenance file, so it
+always recomputes from what it reads: a premise deleted since the last run takes every conclusion that only it supported
 with it, including conclusions around a cycle, and a conclusion with another support stays. It then
 runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later pass evaluates, for every
 triple pattern that can match the previous pass's new facts, the rule with that one pattern matching
@@ -349,16 +351,29 @@ output graphs partial and writes no run record, so its dataset must not be publi
 The starter rules ship with `transitive-lineage-closure` disabled: it stores every
 ancestor/descendant pair, which grows quadratically with lineage depth.
 
-**Witnesses and explanations.** For every fact it derives, the step records in the provenance graph
-the solution that first derived it: the rule, the pass and the values of the rule's variables. Those
-values are terms the dataset already holds, so a witness costs index entries, not node data. A
-converged run also records the graphs it read and every enabled rule's body and SHA-256 digest. The
-worker's `Explanations` API (used by a later `EXPLAIN` for governance facts) rebuilds a fact's
-premises from its witness, explains each premise in turn down to facts the rules read, reconstructs a
-property-path premise as one shortest chain of triples and an EXISTS condition as one match, and
-marks where it stopped at its depth, size and path bounds. A derived fact's premises were all present
-before the pass that derived it, so an explanation always ends at asserted facts. The provenance
-graph is never part of the serving union.
+**Witnesses and explanations.** For every fact it derives, the step records the solution that first
+derived it: the rule, the pass and the values of the rule's variables. Witnesses go to the step's
+provenance file, never into the dataset:
+
+| Part | Holds |
+|---|---|
+| solutions | the rule, the pass and one term per variable of the rule, in the order derived; facts derived from one solution share it |
+| index | one 24-byte entry per derived fact, sorted: a 128-bit SHA-256 digest of the output graph and the triple, and where its solution is |
+| run record | the passes, the graphs the rules read, and every enabled rule's body, SHA-256 digest, output graph and variables |
+
+A witness is found from its fact alone, by binary search of the index, which is the only way
+anything reads one. The file is written under a temporary name while the passes run, its index
+sorted in runs of 65,536 entries that are then merged, and it takes its name only when the step
+converges, so a step that does not converge leaves none. Its terms are written out in full, so it
+counts against `maxSpoolBytes`. As RDF in the dataset a witness was three or more quads in six
+indexes, about 2.6 KB per derived fact and 72% of a snapshot's quads, which every query scanned
+past; in the file the 327,600 facts of the 20,000-table catalog below take 49 MB.
+
+The worker's `Explanations` API (used for governance `EXPLAIN`) rebuilds a fact's premises from its
+witness, explains each premise in turn down to facts the rules read, reconstructs a property-path
+premise as one shortest chain of triples and an EXISTS condition as one match, and marks where it
+stopped at its depth, size and path bounds. A derived fact's premises were all present before the
+pass that derived it, so an explanation always ends at asserted facts.
 
 ### Job operations
 
@@ -576,9 +591,9 @@ catalog.
 **Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY` step per closure into
 `urn:openmetadata:entailments:<release id>`; `rules` runs the rules to a fixed point
 (`maxPasses` 64) reading the catalog graphs, the closures' graphs and their entailments, writing
-each rule's conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to
-`urn:openmetadata:provenance`; `compact` compacts the working dataset; `publish` makes it the
-dataset's current snapshot. The closures' entailments and the rules' new facts together may not
+each rule's conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to the file
+`provenance` in the job directory; `compact` compacts the working dataset; `publish` makes the two
+the dataset's current snapshot. The closures' entailments and the rules' new facts together may not
 pass `maxDerivedTriples`: each `CLASSIFY` gets what is left as `maxOutputTriples`, and `RULES` gets
 the rest as `maxNewFacts`; the spool of a pass gets what the disk quota leaves. A refresh publishes
 complete results or none: a limit, the deadline, the worker's heap, a release outside OWL 2 DL or
@@ -590,13 +605,15 @@ subjects, and the previous snapshot stays current. A `SUCCEEDED` refresh has `sn
 ### Snapshots
 
 Each serving dataset has a lineage of snapshots under `/fuseki/reasoning/snapshots/<dataset>/`:
-one directory per snapshot with its compacted TDB2 database (`tdb/`) and `snapshot.json`, and
+one directory per snapshot with its compacted TDB2 database (`tdb/`), the provenance file of the
+rules that derived it (`provenance`, absent when no rules ran) and `snapshot.json`, and
 `current.json`, the pointer to the current one and its generation, a number that grows by one with
-every publication.
+every publication. The database holds what queries read and nothing else.
 
-- **Atomic.** `publish` moves the job's working dataset into a new snapshot directory (a rename on
-  the same volume, never a copy), opens it, writes its metadata, and only then replaces the pointer
-  by an atomic rename and swaps the current snapshot under one lock. A reader sees the old snapshot
+- **Atomic.** `publish` moves the job's working dataset and its provenance file into a new snapshot
+  directory (renames on the same volume, never copies), opens the database, writes the metadata,
+  and only then replaces the pointer by an atomic rename and swaps the current snapshot under one
+  lock. A reader sees the old snapshot
   or the new one, whole; a failure before the rename removes the new directory and leaves the old
   one current.
 - **Compare-and-set.** The capture records the generation that was current; `publish` succeeds
@@ -615,29 +632,36 @@ every publication.
   refresh and are OpenMetadata's to remove after cutover. The Fuseki JVM opens a snapshot only after
   the worker that wrote it has exited, lazily and with TDB2's small store parameters, so its caches
   stay small in the server heap.
+- **Format.** `snapshot.json` names the snapshot's layout in `store.format`, now 2. Format 1 kept
+  the witnesses in the graph `urn:openmetadata:provenance` of the database, which every query had
+  to be kept from. A snapshot of any other format is removed at startup like one that is not
+  current: the dataset has no snapshot, and its generation starts again at 1, with its next
+  refresh.
 
 ### Snapshot queries
 
 `POST /reasoning/query?dataset=<name>` with `{"query": "<SELECT or ASK>", "maxRows": <optional>,
 "timeoutSeconds": <optional>}` runs over the dataset's current snapshot: its default graph is the
-union of every graph of the snapshot but the provenance graph, and `GRAPH` sees the same graphs.
-`FROM`, `FROM NAMED`, `SERVICE`, other query forms and texts over 65,536 characters are refused.
+union of every graph of the snapshot's database, and `GRAPH` sees the same graphs. The witnesses
+are not in the database, so no query reaches them. `FROM`, `FROM NAMED`, `SERVICE`, other query
+forms and texts over 65,536 characters are refused.
 The answer is `{"snapshot": <rdfReasoningSnapshot without freshness>, "generation": <n>, "rows":
 <n>, "truncated": <bool>, "results": <SPARQL 1.1 JSON results>}`: at most `maxResultRows` rows
 (or fewer if asked) and 8 MiB of terms, with `truncated` when there were more. Freshness is
 OpenMetadata's to compute from the snapshot's input.
 
 Rows and bytes bound the answer, not the work before its first row, so a query is also bounded by
-what it reads: past `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` quads (counted at the store,
-hidden provenance quads too) it stops with `LIMIT_EXCEEDED` and the subject `maxQueryScannedQuads`.
-The default, one million, is about 40% of a 20,000-table snapshot's 2.4 million quads, so a
-full-snapshot sort, `COUNT(*)` or grouping stops while a query that follows bound patterns to at most a
-page of rows does not. A `SELECT` with `ORDER BY` and no `LIMIT` below `maxRows + 1` is run with
+what it reads: past `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` quads (counted at the store)
+it stops with `LIMIT_EXCEEDED` and the subject `maxQueryScannedQuads`. The default, one million, is
+about one and a half times the 0.68 million quads of a 20,000-table snapshot: a sort, `COUNT(*)` or
+grouping over a whole snapshot stops from about 30,000 tables, while a query that follows bound
+patterns to at most a page of rows does not at any size. A `SELECT` with `ORDER BY` and no `LIMIT` below `maxRows + 1` is run with
 `LIMIT maxRows + 1`, so ARQ keeps a heap of that size instead of sorting the whole result; the answer
 and its `truncated` flag are the same. Sorts and `DISTINCT` hold at most 100,000 rows in memory and
 spill to files in the JVM's `java.io.tmpdir`, which are deleted when the query ends; `GROUP BY` does
 not spill, and the scan budget is its bound. The query runs with ARQ's general engine over a
-read-only view: handing it TDB2's own engine would bypass the view and see the provenance graph.
+read-only view: handing it TDB2's own engine would bypass the view, and with it the scan budget
+and the union default graph.
 
 ### Results
 
@@ -650,7 +674,7 @@ the unsatisfiable classes of a check, or the justifications of an explanation ar
 ### Governance explanations
 
 An `EXPLAIN` whose statement is a fact the dataset's current snapshot holds in a rule's output
-graph is answered `ENTAILED` from that snapshot's witnesses (`result.json` has `"kind":
+graph is answered `ENTAILED` from that snapshot's provenance file (`result.json` has `"kind":
 "GOVERNANCE"`, the snapshot and the explanation): the rule and pass that first derived the fact,
 its premises, each explained in turn down to `ASSERTED` facts, property-path premises as one
 shortest chain, bounded at depth 16, 1,000 facts (or `maxResultRows`), 256-triple chains and

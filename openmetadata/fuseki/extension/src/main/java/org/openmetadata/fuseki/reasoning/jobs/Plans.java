@@ -497,7 +497,7 @@ final class Plans {
                 rules.add(spec);
               }
               step.put("rules", rules);
-              step.put("provenance", RefreshCapture.PROVENANCE);
+              step.put("provenance", SnapshotStore.PROVENANCE);
               final long classified =
                   json(context, "classify.json").getNumber("derived").longValue();
               final JsonObject limits = new JsonObject();
@@ -573,7 +573,8 @@ final class Plans {
           catalog.put("graphs", capture.getObj("catalog").get("graphs").getAsArray().size());
           catalog.put("anyPredicate", capture.getObj("catalog").get("anyPredicate"));
           detail.put("catalog", catalog);
-          detail.put("provenanceGraph", RefreshCapture.PROVENANCE);
+          // A refresh without enabled rules ran no RULES step and has no witnesses.
+          final Path provenance = context.directory().resolve(SnapshotStore.PROVENANCE);
           final SnapshotStore.Candidate candidate =
               new SnapshotStore.Candidate(
                   context.job().id(),
@@ -592,6 +593,7 @@ final class Plans {
                         capture.getNumber("baseGeneration").longValue(),
                         candidate,
                         context.directory().resolve(WORKING),
+                        Files.exists(provenance) ? provenance : null,
                         System.currentTimeMillis());
           } catch (final SnapshotStore.Superseded e) {
             return Stage.Result.failed(
@@ -611,8 +613,9 @@ final class Plans {
 
   /**
    * Answers an EXPLAIN of a fact the dataset's current snapshot derived with a governance rule,
-   * from the witnesses its RULES step recorded: the rule, the pass and the premises, each explained
-   * in turn down to asserted facts. Any other statement goes on to the OWL explanation.
+   * from the witnesses its RULES step recorded in the snapshot's provenance file: the rule, the
+   * pass and the premises, each explained in turn down to asserted facts. Any other statement goes
+   * on to the OWL explanation.
    */
   private static Stage governance(final Operations operations) {
     return stage(
@@ -642,7 +645,7 @@ final class Plans {
                       .get()
                       .explain(
                           snapshot,
-                          RefreshCapture.PROVENANCE,
+                          lease.provenance().toString(),
                           fact,
                           GOVERNANCE_DEPTH,
                           Math.min(GOVERNANCE_FACTS, operations.jobSettings().maxResultRows()),

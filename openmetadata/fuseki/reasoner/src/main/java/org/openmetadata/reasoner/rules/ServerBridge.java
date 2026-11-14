@@ -12,11 +12,11 @@
  */
 package org.openmetadata.reasoner.rules;
 
+import java.nio.file.Path;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
-import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.graph.Triple;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.util.Context;
@@ -74,11 +74,12 @@ public final class ServerBridge {
   }
 
   /**
-   * Explains a fact from the provenance graph of the RULES step that built a snapshot, inside a
-   * read transaction the caller holds.
+   * Explains a fact from the provenance file of the RULES step that built a snapshot, inside a read
+   * transaction the caller holds.
    *
-   * @return the explanation as JSON ({@link Explanations.Fact#toJson()}), or null when the
-   *     provenance graph holds no converged run
+   * @param provenance the path of the snapshot's provenance file
+   * @return the explanation as JSON ({@link Explanations.Fact#toJson()}), or null when there is no
+   *     such file, as for a snapshot no rules ran for
    */
   public static String explain(
       final DatasetGraph dataset,
@@ -91,7 +92,7 @@ public final class ServerBridge {
     final Explanations.Fact explained =
         Explanations.explain(
             dataset,
-            NodeFactory.createURI(provenance),
+            Path.of(provenance),
             fact,
             new Explanations.Bounds(maxDepth, maxFacts, maxPathLength, maxPathNodes));
     return explained == null ? null : JSON.toString(explained.toJson());

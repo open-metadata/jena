@@ -102,8 +102,8 @@ public final class RuleCode implements AutoCloseable {
   }
 
   /**
-   * Explains a fact from a snapshot's provenance, inside the caller's read transaction; null when
-   * the snapshot holds no converged run.
+   * Explains a fact of a snapshot from its provenance file, named by path, inside the caller's read
+   * transaction on the snapshot; null when there is no such file.
    */
   public JsonObject explain(
       final DatasetGraph snapshot,

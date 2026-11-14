@@ -16,9 +16,7 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
-import java.io.FilterOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -31,8 +29,8 @@ import org.apache.jena.sparql.engine.binding.BindingBuilder;
  * One pass's rule solutions on disk, written while the pass reads the dataset and read back while
  * it writes the conclusions, so neither the solutions nor the candidate facts are ever held in
  * memory and no read transaction is upgraded to a write. A record is the rule's index and its
- * witness variables' values; the template is instantiated when the record is applied. The file is
- * bounded: writing past {@code maxBytes} fails with {@link Full}.
+ * witness variables' values; the template is instantiated when the record is applied. The file
+ * counts against the step's {@link SpoolBudget}.
  */
 final class SolutionSpool {
   private static final int RECORD = 1;
@@ -40,23 +38,15 @@ final class SolutionSpool {
 
   private SolutionSpool() {}
 
-  /** The spool reached its size limit. */
-  static final class Full extends IOException {
-    Full(final long maxBytes) {
-      super("The pass's solutions exceed the spool limit of " + maxBytes + " bytes");
-    }
-  }
-
   static final class Writer implements AutoCloseable {
-    private final Counting counting;
+    private final SpoolBudget.Counting counting;
     private final DataOutputStream out;
-    private final long maxBytes;
     private long records;
 
-    Writer(final Path file, final long maxBytes) throws IOException {
-      this.counting = new Counting(new BufferedOutputStream(Files.newOutputStream(file), 1 << 16));
+    Writer(final Path file, final SpoolBudget budget) throws IOException {
+      this.counting =
+          budget.counting(new BufferedOutputStream(Files.newOutputStream(file), 1 << 16));
       this.out = new DataOutputStream(counting);
-      this.maxBytes = maxBytes;
     }
 
     void write(final CompiledRule rule, final Binding solution) throws IOException {
@@ -66,9 +56,6 @@ final class SolutionSpool {
         NodeCodec.write(out, solution.get(var));
       }
       records++;
-      if (counting.bytes > maxBytes) {
-        throw new Full(maxBytes);
-      }
     }
 
     long records() {
@@ -76,13 +63,16 @@ final class SolutionSpool {
     }
 
     long bytes() {
-      return counting.bytes;
+      return counting.written();
     }
 
     @Override
     public void close() throws IOException {
-      out.writeByte(END);
-      out.close();
+      try {
+        out.writeByte(END);
+      } finally {
+        out.close();
+      }
     }
   }
 
@@ -119,24 +109,4 @@ final class SolutionSpool {
   }
 
   record Record(CompiledRule rule, Binding solution) {}
-
-  private static final class Counting extends FilterOutputStream {
-    private long bytes;
-
-    Counting(final OutputStream out) {
-      super(out);
-    }
-
-    @Override
-    public void write(final int b) throws IOException {
-      out.write(b);
-      bytes++;
-    }
-
-    @Override
-    public void write(final byte[] buffer, final int offset, final int length) throws IOException {
-      out.write(buffer, offset, length);
-      bytes += length;
-    }
-  }
 }

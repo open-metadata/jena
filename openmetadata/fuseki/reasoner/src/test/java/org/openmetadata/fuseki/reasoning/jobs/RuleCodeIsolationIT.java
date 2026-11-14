@@ -93,7 +93,9 @@ class RuleCodeIsolationIT {
       assertNull(
           Txn.calculateRead(
               empty,
-              () -> code.explain(empty, RefreshCapture.PROVENANCE, fact, 16, 1000, 256, 100_000)),
+              () ->
+                  code.explain(
+                      empty, job.resolve("none").toString(), fact, 16, 1000, 256, 100_000)),
           "no converged run to explain from");
 
       Jobs.file(
@@ -119,7 +121,14 @@ class RuleCodeIsolationIT {
             Txn.calculateRead(
                 working,
                 () ->
-                    code.explain(working, "urn:catalog:provenance", fact, 16, 1000, 256, 100_000));
+                    code.explain(
+                        working,
+                        job.resolve(RuleFixtures.PROVENANCE).toString(),
+                        fact,
+                        16,
+                        1000,
+                        256,
+                        100_000));
         assertEquals("DERIVED", explained.getString("origin"), explained.toString());
         assertEquals("pii-propagation-via-lineage", explained.getString("rule"));
         assertTrue(explained.toString().contains("\"ASSERTED\""), explained.toString());

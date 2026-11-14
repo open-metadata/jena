@@ -292,7 +292,7 @@ GRAPH <urn:c> {
         "{\"protocol\": 1, \"stepId\": \"r\", \"kind\": \"RULES\", \"dataset\": \"working\","
             + " \"timeoutMillis\": 1000%s}";
     final String read = ", \"read\": [\"urn:c\"]";
-    final String provenance = ", \"provenance\": \"urn:prov\"";
+    final String provenance = ", \"provenance\": \"provenance\"";
     final String good = rule.formatted("urn:out", "");
     final Path valid =
         Jobs.write(job, "valid", step.formatted(read + provenance + ", \"rules\": [" + good + "]"));
@@ -301,13 +301,14 @@ GRAPH <urn:c> {
     assertInvalidStep(step.formatted(provenance + ", \"rules\": [" + good + "]"));
     assertInvalidStep(step.formatted(read + ", \"rules\": [" + good + "]"));
     assertInvalidStep(step.formatted(read + provenance));
-    assertInvalidStep(
-        step.formatted(read + ", \"provenance\": \"urn:c\", \"rules\": [" + good + "]"));
+    for (final String outside :
+        java.util.List.of("../provenance", "/tmp/provenance", "working/provenance", ".")) {
+      assertInvalidStep(
+          step.formatted(
+              read + ", \"provenance\": \"" + outside + "\", \"rules\": [" + good + "]"));
+    }
     assertInvalidStep(
         step.formatted(read + provenance + ", \"rules\": [" + rule.formatted("urn:c", "") + "]"));
-    assertInvalidStep(
-        step.formatted(
-            read + provenance + ", \"rules\": [" + rule.formatted("urn:prov", "") + "]"));
     assertInvalidStep(
         step.formatted(
             read
@@ -359,7 +360,7 @@ GRAPH <urn:c> {
     Jobs.file(job, "rules.read", "urn:c\n");
     final String rules =
         "{\"protocol\": 1, \"stepId\": \"r\", \"kind\": \"RULES\", \"dataset\": \"working\","
-            + " \"timeoutMillis\": 60000, %s \"provenance\": \"urn:prov\", \"rules\": [{\"name\":"
+            + " \"timeoutMillis\": 60000, %s \"provenance\": \"provenance\", \"rules\": [{\"name\":"
             + " \"copy-p\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q> ?o } WHERE { ?s <urn:p> ?o }\","
             + " \"output\": \"urn:rule-out\"}]}";
     final Path read = Jobs.write(job, "r", rules.formatted("\"readFile\": \"rules.read\","));

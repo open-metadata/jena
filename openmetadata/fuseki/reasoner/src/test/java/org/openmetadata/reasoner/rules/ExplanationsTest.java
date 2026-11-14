@@ -175,8 +175,7 @@ class ExplanationsTest {
     return RuleFixtures.read(
         job,
         dataset ->
-            Explanations.explain(
-                dataset, NodeFactory.createURI(RuleFixtures.PROVENANCE), fact, bounds));
+            Explanations.explain(dataset, job.resolve(RuleFixtures.PROVENANCE), fact, bounds));
   }
 
   private static Triple tag(final String column) {

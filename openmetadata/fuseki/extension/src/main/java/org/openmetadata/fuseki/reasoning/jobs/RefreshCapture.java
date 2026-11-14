@@ -183,9 +183,6 @@ public final class RefreshCapture {
     return STORE_GRAPHS + "inferred:" + rule;
   }
 
-  /** The graph the RULES step writes its witnesses to; never visible to snapshot queries. */
-  public static final String PROVENANCE = STORE_GRAPHS + "provenance";
-
   /**
    * Captures the input of a REFRESH into {@code directory}: the spool, one graphs file per release,
    * the rules' read list and the rules. The spool exists only if the capture succeeds.

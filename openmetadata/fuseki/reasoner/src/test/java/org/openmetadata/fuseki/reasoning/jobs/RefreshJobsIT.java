@@ -188,7 +188,30 @@ GRAPH <https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
     assertTrue(
         ask("ASK { GRAPH <" + entailments + "> { <" + F + "loan1> a <" + F + "Loan> } }"),
         "a direct type");
-    assertFalse(ask("ASK { GRAPH <" + RefreshCapture.PROVENANCE + "> { ?s ?p ?o } }"));
+    assertEquals(
+        Set.of(
+            GRAPH + "knowledge",
+            GRAPH + "ontology/" + finance.ontologyId(),
+            entailments,
+            RefreshCapture.ruleGraph("pii-propagation-via-lineage"),
+            RefreshCapture.ruleGraph("schema-tag-inheritance")),
+        select("SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        "the snapshot's database holds the input and the conclusions, and no witness");
+    assertFalse(
+        ask(
+            "ASK { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?s), 'urn:openmetadata:reasoner:')"
+                + " || STRSTARTS(STR(?p), 'urn:openmetadata:reasoner:')) }"),
+        "nothing of the step's own vocabulary is queryable");
+    assertTrue(
+        Files.size(
+                settings
+                    .reasoningRoot()
+                    .resolve("snapshots")
+                    .resolve(DATASET)
+                    .resolve(first.getString("snapshotId"))
+                    .resolve(SnapshotStore.PROVENANCE))
+            > 0,
+        "the witnesses are a file beside the snapshot's database");
     assertFalse(
         ask("ASK { ?s ?p ?o . FILTER(?o = <" + C + "draftOnly>) }"),
         "neither the unlisted ontology's nor the staging graph reached the rules");

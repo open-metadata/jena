@@ -39,7 +39,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Snapshots on real TDB2 databases: atomic publication, the generation compare-and-set, reader
- * leases against retention, restart cleanup, and queries that never see the provenance graph.
+ * leases against retention, restart cleanup, the provenance file carried beside the database, and
+ * bounded queries.
  */
 class SnapshotStoreTest {
   private static final String DATASET = "openmetadata";
@@ -61,21 +62,34 @@ class SnapshotStoreTest {
     store = open();
     assertEquals(0, store.generation(DATASET));
     assertTrue(store.lease(DATASET).isEmpty());
+    final Path working = working("one", "urn:x:a");
+    final Path provenance = working.resolveSibling(SnapshotStore.PROVENANCE);
+    Files.writeString(provenance, "urn:x:witness");
     final JsonObject published =
-        store.publish(DATASET, 0, candidate(10, 1), working("one", "urn:x:a"), 1L);
+        store.publish(DATASET, 0, candidate(10, 1), working, provenance, 1L);
     assertEquals(1, store.generation(DATASET));
     assertTrue(Files.notExists(root.resolve("jobs/one/working")), "moved, not copied");
+    assertTrue(Files.notExists(provenance), "moved with the database");
+    try (SnapshotStore.Lease lease = store.lease(DATASET).orElseThrow()) {
+      assertEquals(
+          root.resolve("snapshots")
+              .resolve(DATASET)
+              .resolve(published.getString("id"))
+              .resolve(SnapshotStore.PROVENANCE),
+          lease.provenance());
+      assertEquals("urn:x:witness", Files.readString(lease.provenance()));
+    }
 
     final SnapshotQueries queries = queries(Map.of());
     final JsonObject answer = query(queries, "SELECT ?s WHERE { ?s ?p ?o }");
     assertEquals(published.getString("id"), answer.getObj("snapshot").getString("id"));
     assertEquals(Set.of("urn:x:a", "urn:x:d"), values(answer));
-    assertFalse(
-        query(queries, "ASK { GRAPH <" + RefreshCapture.PROVENANCE + "> { ?s ?p ?o } }")
-            .getObj("results")
-            .getBoolean("boolean"));
-    assertFalse(
-        query(queries, "ASK { ?s ?p <urn:x:witness> }").getObj("results").getBoolean("boolean"));
+    assertEquals(
+        2,
+        query(queries, "SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }")
+            .getNumber("rows")
+            .intValue(),
+        "the database holds the asserted and the derived quad and nothing of the provenance");
     assertEquals(
         Set.of("urn:x:asserted", RefreshCapture.ruleGraph("r")),
         values(query(queries, "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")));
@@ -88,35 +102,35 @@ class SnapshotStoreTest {
   @Test
   void anOlderRefreshNeverReplacesANewerSnapshot() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(20, 2), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(20, 2), working("one", "urn:x:a"), null, 1L);
     assertThrows(
         SnapshotStore.Superseded.class,
-        () -> store.publish(DATASET, 0, candidate(30, 3), working("two", "urn:x:b"), 2L),
+        () -> store.publish(DATASET, 0, candidate(30, 3), working("two", "urn:x:b"), null, 2L),
         "it captured before generation 1 was published");
     assertThrows(
         SnapshotStore.Superseded.class,
-        () -> store.publish(DATASET, 1, candidate(15, 4), working("three", "urn:x:c"), 3L),
+        () -> store.publish(DATASET, 1, candidate(15, 4), working("three", "urn:x:c"), null, 3L),
         "a lower watermark of the same dataset generation");
     assertThrows(
         SnapshotStore.Superseded.class,
-        () -> store.publish(DATASET, 1, candidate(25, 1), working("four", "urn:x:c"), 4L),
+        () -> store.publish(DATASET, 1, candidate(25, 1), working("four", "urn:x:c"), null, 4L),
         "a job submitted before the current snapshot's");
     assertEquals(1, store.generation(DATASET));
     assertEquals(
         Set.of("urn:x:a", "urn:x:d"), values(query(queries(Map.of()), "SELECT ?s { ?s ?p ?o }")));
     assertTrue(
         Files.isDirectory(root.resolve("jobs/two/working")), "a refused one stays the job's");
-    store.publish(DATASET, 1, candidate(20, 5), working("five", "urn:x:e"), 5L);
+    store.publish(DATASET, 1, candidate(20, 5), working("five", "urn:x:e"), null, 5L);
     assertEquals(2, store.generation(DATASET), "an equal watermark with newer inputs publishes");
   }
 
   @Test
   void aLeasedSnapshotSurvivesItsReplacementUntilItsReaderIsDone() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
     final SnapshotStore.Lease reader = store.lease(DATASET).orElseThrow();
     final Path leased = root.resolve("snapshots").resolve(DATASET).resolve(reader.id().toString());
-    store.publish(DATASET, 1, candidate(2, 2), working("two", "urn:x:b"), 2L);
+    store.publish(DATASET, 1, candidate(2, 2), working("two", "urn:x:b"), null, 2L);
     assertTrue(Files.isDirectory(leased));
     assertEquals(1, store.retired(DATASET));
     Txn.executeRead(
@@ -133,9 +147,9 @@ class SnapshotStoreTest {
   @Test
   void aRestartKeepsOnlyEachCurrentSnapshot() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
     final SnapshotStore.Lease reader = store.lease(DATASET).orElseThrow();
-    store.publish(DATASET, 1, candidate(2, 2), working("two", "urn:x:b"), 2L);
+    store.publish(DATASET, 1, candidate(2, 2), working("two", "urn:x:b"), null, 2L);
     reader.close();
     store.close();
     final Path lineage = root.resolve("snapshots").resolve(DATASET);
@@ -150,9 +164,32 @@ class SnapshotStoreTest {
   }
 
   @Test
+  void aSnapshotOfAnotherFormatIsRemovedAtStartup() throws Exception {
+    store = open();
+    final JsonObject published =
+        store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
+    store.close();
+    final Path lineage = root.resolve("snapshots").resolve(DATASET);
+    final Path metadata =
+        lineage.resolve(published.getString("id")).resolve(SnapshotStore.METADATA);
+    final JsonObject old = JSON.read(metadata.toString());
+    assertEquals(SnapshotStore.FORMAT, old.getObj("store").getNumber("format").intValue());
+    // Format 1 had no format key: its witnesses were a graph of the database.
+    old.getObj("store").remove("format");
+    Files.writeString(metadata, JSON.toString(old));
+    store = open();
+    assertEquals(0, store.generation(DATASET));
+    assertTrue(store.lease(DATASET).isEmpty(), "nothing a query could read the witnesses from");
+    assertTrue(Files.notExists(lineage.resolve(published.getString("id"))));
+    store.publish(DATASET, 0, candidate(2, 2), working("two", "urn:x:b"), null, 2L);
+    assertEquals(
+        Set.of("urn:x:b", "urn:x:d"), values(query(queries(Map.of()), "SELECT ?s { ?s ?p ?o }")));
+  }
+
+  @Test
   void queriesAreBounded() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
     final SnapshotQueries queries = queries(Map.of(JobSettings.MAX_RESULT_ROWS, "1"));
     final JsonObject cut = query(queries, "SELECT ?s { ?s ?p ?o }");
     assertTrue(cut.getBoolean("truncated"));
@@ -183,13 +220,13 @@ class SnapshotStoreTest {
   @Test
   void aQueryThatScansPastItsBudgetIsStoppedWithTheSettingsName() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
     final String all = "SELECT ?s { ?s ?p ?o }";
     assertEquals(
         Set.of("urn:x:a", "urn:x:d"),
-        values(query(queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "3")), all)),
-        "the snapshot holds three quads, one of them the hidden provenance one");
-    final SnapshotQueries tight = queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "2"));
+        values(query(queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "2")), all)),
+        "the snapshot holds two quads");
+    final SnapshotQueries tight = queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "1"));
     for (final String sparql :
         java.util.List.of(
             all, "SELECT (COUNT(*) AS ?n) { ?s ?p ?o }", "SELECT ?s { ?s ?p ?o } ORDER BY ?s")) {
@@ -204,7 +241,7 @@ class SnapshotStoreTest {
   @Test
   void aQueryOverNamedGraphsPaysForTheirQuadsToo() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
     final String named = "SELECT ?s { GRAPH ?g { ?s ?p ?o } }";
     assertEquals(
         Set.of("urn:x:a", "urn:x:d"),
@@ -219,9 +256,9 @@ class SnapshotStoreTest {
   @Test
   void aSortWithoutALimitAnswersItsFirstRowsInOrderAndReportsTheCutAsBefore() throws Exception {
     store = open();
-    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
     final Path many = manySubjects("many", 5);
-    store.publish(DATASET, 1, candidate(2, 2), many, 2L);
+    store.publish(DATASET, 1, candidate(2, 2), many, null, 2L);
     final String sorted = "SELECT ?s { ?s <urn:x:p> ?o } ORDER BY DESC(?s)";
     final SnapshotQueries three = queries(Map.of(JobSettings.MAX_RESULT_ROWS, "3"));
     final JsonObject cut = query(three, sorted);
@@ -289,7 +326,7 @@ class SnapshotStoreTest {
     return values;
   }
 
-  /** A working dataset as a refresh leaves it: asserted, derived and provenance graphs. */
+  /** A working dataset as a refresh leaves it: asserted and derived graphs. */
   private Path working(final String job, final String subject) throws Exception {
     final Path location =
         Files.createDirectories(root.resolve("jobs").resolve(job)).resolve("working");
@@ -300,10 +337,7 @@ class SnapshotStoreTest {
             + "> <urn:x:p> <urn:x:o> }\n"
             + "GRAPH <"
             + RefreshCapture.ruleGraph("r")
-            + "> { <urn:x:d> <urn:x:q> <urn:x:o> }\n"
-            + "GRAPH <"
-            + RefreshCapture.PROVENANCE
-            + "> { <urn:x:witness> <urn:x:solution> <urn:x:witness> }\n";
+            + "> { <urn:x:d> <urn:x:q> <urn:x:o> }\n";
     Txn.executeWrite(dataset, () -> RDFParser.fromString(trig, Lang.TRIG).parse(dataset));
     TDBInternal.expel(dataset);
     return location;

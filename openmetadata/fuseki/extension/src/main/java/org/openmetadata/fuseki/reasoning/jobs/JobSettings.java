@@ -101,10 +101,10 @@ public record JobSettings(
   public static final int DEFAULT_MAX_RESULT_ROWS = 10_000;
 
   /**
-   * About 40% of the 2.4 million quads a 20,000-table snapshot holds, 1.7 million of them hidden
-   * provenance. A query that returns a page of at most {@value #DEFAULT_MAX_RESULT_ROWS} rows by
-   * following bound patterns reads thousands to a few hundred thousand quads; a sort, a count or a
-   * grouping over the whole snapshot reads all of them and is stopped.
+   * About one and a half times the 0.68 million quads a 20,000-table snapshot holds. A query that
+   * returns a page of at most {@value #DEFAULT_MAX_RESULT_ROWS} rows by following bound patterns
+   * reads thousands to a few hundred thousand quads; a sort, a count or a grouping over a whole
+   * snapshot of more than a million quads reads all of them and is stopped.
    */
   public static final int DEFAULT_MAX_QUERY_SCANNED_QUADS = 1_000_000;
 

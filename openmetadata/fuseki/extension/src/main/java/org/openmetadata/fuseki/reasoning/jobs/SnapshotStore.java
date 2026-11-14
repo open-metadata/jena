@@ -31,7 +31,6 @@ import java.util.concurrent.TimeUnit;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.dboe.base.file.Location;
-import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.query.TxnType;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.tdb2.DatabaseMgr;
@@ -44,14 +43,16 @@ import org.slf4j.LoggerFactory;
 /**
  * Published reasoning snapshots, one lineage per serving dataset, under {@code <reasoning
  * root>/snapshots/<dataset>/}: a directory per snapshot holding its compacted TDB2 database
- * ({@value #DATABASE}) and its metadata ({@value #METADATA}), and the pointer {@value #POINTER}
- * naming the current one with its generation.
+ * ({@value #DATABASE}), the provenance file of the rules that derived it ({@value #PROVENANCE},
+ * absent when no rules ran) and its metadata ({@value #METADATA}), and the pointer {@value
+ * #POINTER} naming the current one with its generation. The database holds what queries read and
+ * nothing else; explanations read the provenance file beside it.
  *
- * <p><b>Publication is atomic.</b> A refresh's working dataset is moved into a new snapshot
- * directory, opened, and only then made current by replacing the pointer with one atomic rename and
- * swapping the in-memory current snapshot under the store's lock: a reader leases either the old
- * snapshot or the new one, never part of either, and a failure before the rename leaves the old one
- * current and the new directory removed.
+ * <p><b>Publication is atomic.</b> A refresh's working dataset and provenance file are moved into a
+ * new snapshot directory, the database is opened, and only then is the snapshot made current by
+ * replacing the pointer with one atomic rename and swapping the in-memory current snapshot under
+ * the store's lock: a reader leases either the old snapshot or the new one, never part of either,
+ * and a failure before the rename leaves the old one current and the new directory removed.
  *
  * <p><b>Compare-and-set.</b> A refresh records the generation that was current when it captured its
  * input. It publishes only if that generation is still current, and never over a snapshot of the
@@ -64,12 +65,19 @@ import org.slf4j.LoggerFactory;
  * per dataset wait for their readers; a publication finding more waits for them up to the query
  * deadline. When the server starts, everything but each current snapshot is removed. Snapshots open
  * lazily, with TDB2's small store parameters, so their caches stay small in the Fuseki heap.
+ *
+ * <p><b>Format.</b> A snapshot's metadata names its layout ({@value #FORMAT}). Format 1 kept the
+ * witnesses in a graph of the database that every query had to be kept from; a snapshot of any
+ * other format than this one is removed at startup like one that is not current, and the next
+ * refresh publishes the dataset's snapshot again.
  */
 public final class SnapshotStore implements AutoCloseable {
   static final String DIRECTORY = "snapshots";
   static final String POINTER = "current.json";
   static final String METADATA = "snapshot.json";
   static final String DATABASE = "tdb";
+  static final String PROVENANCE = "provenance";
+  static final int FORMAT = 2;
   static final int MAX_RETIRED = 4;
 
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
@@ -167,11 +175,10 @@ public final class SnapshotStore implements AutoCloseable {
 
     private Lease(final Snapshot snapshot) {
       this.snapshot = snapshot;
-      this.view =
-          new SnapshotView(snapshot.database, NodeFactory.createURI(RefreshCapture.PROVENANCE));
+      this.view = new SnapshotView(snapshot.database);
     }
 
-    /** The snapshot as a query may read it: without its provenance graph. */
+    /** The snapshot as a query may read it: read-only, its default graph the union of all. */
     public DatasetGraph view() {
       return view;
     }
@@ -181,13 +188,17 @@ public final class SnapshotStore implements AutoCloseable {
      * quads.
      */
     SnapshotView budgetedView(final long scanBudget) {
-      return new SnapshotView(
-          snapshot.database, NodeFactory.createURI(RefreshCapture.PROVENANCE), scanBudget);
+      return new SnapshotView(snapshot.database, scanBudget);
     }
 
-    /** The whole snapshot, provenance included, for explanations only. */
+    /** The snapshot's database, for explanations, which read it with {@link #provenance()}. */
     DatasetGraph database() {
       return snapshot.database;
+    }
+
+    /** The snapshot's provenance file; there is none when no rules ran for the snapshot. */
+    Path provenance() {
+      return snapshot.directory.resolve(PROVENANCE);
     }
 
     public UUID id() {
@@ -307,6 +318,8 @@ public final class SnapshotStore implements AutoCloseable {
    * {@code expectedGeneration} is still current and nothing newer has published.
    *
    * @param working the working dataset's directory; it is moved, never copied
+   * @param provenance the provenance file of the rules that ran over {@code working}, moved with
+   *     it; {@code null} when no rules ran
    * @return the published snapshot's description
    */
   public JsonObject publish(
@@ -314,6 +327,7 @@ public final class SnapshotStore implements AutoCloseable {
       final long expectedGeneration,
       final Candidate candidate,
       final Path working,
+      final Path provenance,
       final long now)
       throws Superseded, IOException, InterruptedException {
     synchronized (lock) {
@@ -339,6 +353,9 @@ public final class SnapshotStore implements AutoCloseable {
       try {
         Files.createDirectories(directory);
         Files.move(working, directory.resolve(DATABASE), StandardCopyOption.ATOMIC_MOVE);
+        if (provenance != null) {
+          Files.move(provenance, directory.resolve(PROVENANCE), StandardCopyOption.ATOMIC_MOVE);
+        }
         database = connect(directory.resolve(DATABASE));
         database.begin(TxnType.READ);
         database.end();
@@ -443,6 +460,7 @@ public final class SnapshotStore implements AutoCloseable {
     metadata.put("input", JSON.copy(candidate.input()));
     metadata.put("publishedAt", now);
     final JsonObject store = JSON.copy(candidate.detail()).getAsObject();
+    store.put("format", FORMAT);
     store.put("generation", generation);
     store.put("jobSequence", candidate.jobSequence());
     metadata.put("store", store);
@@ -461,6 +479,10 @@ public final class SnapshotStore implements AutoCloseable {
       final JsonObject metadata = JSON.read(snapshot.resolve(METADATA).toString());
       if (!Files.isDirectory(snapshot.resolve(DATABASE))) {
         throw new IOException("its database is missing");
+      }
+      final JsonObject store = metadata.getObj("store");
+      if (!store.hasKey("format") || store.getNumber("format").intValue() != FORMAT) {
+        throw new IOException("it is not a format " + FORMAT + " snapshot");
       }
       return new Snapshot(
           dataset, id, pointer.getNumber("generation").longValue(), snapshot, metadata);

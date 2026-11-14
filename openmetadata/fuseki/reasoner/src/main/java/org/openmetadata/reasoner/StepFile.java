@@ -129,9 +129,10 @@ public record StepFile(
 
   /**
    * What a RULES step reads and writes: the graphs its rules read, the rules, and the provenance
-   * graph that receives one witness per derived fact. None of the graphs it writes may be read.
+   * file in the job directory that receives one witness per derived fact. No graph a rule writes
+   * may be read.
    */
-  public record Governance(List<String> read, List<Rule> rules, String provenance) {}
+  public record Governance(List<String> read, List<Rule> rules, Path provenance) {}
 
   public static Path resultPath(final Path stepFile) {
     return stepFile.resolveSibling(baseName(stepFile) + ".result.json");
@@ -230,6 +231,9 @@ public record StepFile(
       case RULES -> {
         rejectKeys(json, kind, "inputs", "closure", "engine", "output", "checks", "explain");
         governance = governance(json, jobDirectory);
+        if (governance.provenance().startsWith(dataset)) {
+          throw new InvalidStepException("provenance must be a file outside the dataset");
+        }
       }
     }
     return new StepFile(
@@ -287,9 +291,10 @@ public record StepFile(
         throw new InvalidStepException("read lists " + graph + " twice");
       }
     }
-    final String provenance = graphIri(requiredString(json, "provenance"), "provenance");
-    if (read.contains(provenance)) {
-      throw new InvalidStepException("provenance must not be one of the graphs the rules read");
+    final Path provenance =
+        insideJob(jobDirectory, requiredString(json, "provenance"), "provenance");
+    if (provenance.equals(jobDirectory) || Files.isDirectory(provenance)) {
+      throw new InvalidStepException("provenance must be a file inside the job directory");
     }
     final JsonValue array = json.get("rules");
     if (array == null || !array.isArray() || array.getAsArray().isEmpty()) {
@@ -306,10 +311,6 @@ public record StepFile(
         if (read.contains(rule.output())) {
           throw new InvalidStepException(
               "rule '" + rule.name() + "' writes " + rule.output() + ", which the rules read");
-        }
-        if (rule.output().equals(provenance)) {
-          throw new InvalidStepException(
-              "rule '" + rule.name() + "' writes the provenance graph " + provenance);
         }
       }
       rules.add(rule);

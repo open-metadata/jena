@@ -57,17 +57,18 @@ import org.slf4j.LoggerFactory;
  * Runs a bundle of governance rules to a fixed point over the working dataset, semi-naively, and
  * writes each rule's conclusions into its output graph with one witness per derived fact.
  *
- * <p>The step first empties its output and provenance graphs, so conclusions are always recomputed
- * from the graphs it reads and never seeded with an earlier run's. Each pass then has two phases.
- * Inside one read transaction, it evaluates the rules and spools their solutions to a bounded file:
- * pass 1 evaluates every rule in full; later passes evaluate, for each rule atom that can match the
- * previous pass's new facts, the variant where that atom matches only them (see {@link
- * CompiledRule}). After the read transaction ends, it reads the spool back and applies the
+ * <p>The step first empties its output graphs and removes its provenance file, so conclusions are
+ * always recomputed from the graphs it reads and never seeded with an earlier run's. Each pass then
+ * has two phases. Inside one read transaction, it evaluates the rules and spools their solutions to
+ * a bounded file: pass 1 evaluates every rule in full; later passes evaluate, for each rule atom
+ * that can match the previous pass's new facts, the variant where that atom matches only them (see
+ * {@link CompiledRule}). After the read transaction ends, it reads the spool back and applies the
  * conclusions in large write transactions: a conclusion already in a graph the rules read is not
  * derived; one already in its rule's graph is a duplicate; otherwise it is added there with its
  * witness, and if no output graph had it, it is a new fact and goes into the next delta graph. The
- * step converges when a pass adds no new fact. Running out of passes, new facts or spool ends it
- * INCOMPLETE; a step that does not converge leaves its graphs partial and writes no run record, and
+ * witnesses go to the step's provenance file, never into the dataset ({@link Provenance}). The step
+ * converges when a pass adds no new fact. Running out of passes, new facts or spool ends it
+ * INCOMPLETE; a step that does not converge leaves its graphs partial and no provenance file, and
  * its dataset must not be published.
  */
 public final class RulesStep implements Step {
@@ -144,8 +145,9 @@ public final class RulesStep implements Step {
     private final Limits limits;
     private final Set<Node> read = new LinkedHashSet<>();
     private final Set<Node> outputs = new LinkedHashSet<>();
-    private final Node provenance;
+    private final Path provenance;
     private final Path spool;
+    private final SpoolBudget budget;
     private final SortedReport report;
     private final Map<String, long[]> perRule = new LinkedHashMap<>();
     private final JsonArray passes = new JsonArray();
@@ -153,6 +155,7 @@ public final class RulesStep implements Step {
     private long derived;
     private long solutions;
     private long peakSpoolBytes;
+    private Provenance.Writer witnesses;
 
     Run(
         final StepFile step,
@@ -169,8 +172,9 @@ public final class RulesStep implements Step {
       step.governance().read().forEach(iri -> read.add(graph(iri)));
       rules.forEach(rule -> outputs.add(rule.output()));
       rules.forEach(rule -> perRule.put(rule.name(), new long[2]));
-      this.provenance = NodeFactory.createURI(step.governance().provenance());
+      this.provenance = step.governance().provenance();
       this.spool = step.path().resolveSibling(step.stepId() + ".spool.tmp");
+      this.budget = new SpoolBudget(limits.maxSpoolBytes());
       this.report = step.report() ? new SortedReport(MAX_REPORT_LINES) : null;
     }
 
@@ -179,7 +183,8 @@ public final class RulesStep implements Step {
       Set<Node> deltaPredicates = Set.of();
       Node delta = null;
       int pass = 0;
-      try {
+      try (Provenance.Writer writer = new Provenance.Writer(provenance, budget)) {
+        witnesses = writer;
         while (true) {
           pass++;
           final long started = System.nanoTime();
@@ -187,7 +192,7 @@ public final class RulesStep implements Step {
           final Pass result;
           try {
             result = pass(pass, delta, deltaPredicates, nextDelta);
-          } catch (final SolutionSpool.Full e) {
+          } catch (final SpoolBudget.Full e) {
             return budget(
                 "SPOOL_BUDGET", "maxSpoolBytes", e.getMessage() + " in pass " + pass, pass);
           } catch (final FactBudget e) {
@@ -209,13 +214,8 @@ public final class RulesStep implements Step {
               result.newFacts);
           if (result.newFacts == 0) {
             final Node last = nextDelta;
-            final int converged = pass;
-            Txn.executeWrite(
-                dataset,
-                () -> {
-                  dataset.deleteAny(last, Node.ANY, Node.ANY, Node.ANY);
-                  Provenance.writeRun(dataset, provenance, List.copyOf(read), rules, converged);
-                });
+            Txn.executeWrite(dataset, () -> dataset.deleteAny(last, Node.ANY, Node.ANY, Node.ANY));
+            writer.finish(List.copyOf(read), rules, pass);
             break;
           }
           if (pass >= limits.maxPasses()) {
@@ -264,15 +264,18 @@ public final class RulesStep implements Step {
           .detail("derived", derived)
           .detail("solutions", solutions)
           .detail("peakSpoolBytes", peakSpoolBytes)
+          .detail("provenanceBytes", witnesses.bytes())
           .detail("rules", perRuleJson)
           .detail("perPass", passes);
     }
 
     /**
-     * Empties the graphs this step writes, so nothing an earlier run derived seeds this one, and
-     * names the graphs to read that hold nothing.
+     * Empties the graphs this step writes and removes its provenance file, so nothing an earlier
+     * run derived seeds this one or is explained from its witnesses, and names the graphs to read
+     * that hold nothing.
      */
-    private List<String> clear() {
+    private List<String> clear() throws IOException {
+      Files.deleteIfExists(provenance);
       final List<String> empty = new ArrayList<>();
       Txn.executeWrite(
           dataset,
@@ -280,7 +283,6 @@ public final class RulesStep implements Step {
             for (final Node output : outputs) {
               dataset.deleteAny(output, Node.ANY, Node.ANY, Node.ANY);
             }
-            dataset.deleteAny(provenance, Node.ANY, Node.ANY, Node.ANY);
             final List<Node> reserved = new ArrayList<>();
             dataset
                 .listGraphNodes()
@@ -306,7 +308,8 @@ public final class RulesStep implements Step {
       final Pass result = new Pass(pass);
       final Set<Node> selection = new HashSet<>(read);
       selection.addAll(outputs);
-      try (SolutionSpool.Writer writer = new SolutionSpool.Writer(spool, limits.maxSpoolBytes())) {
+      final SolutionSpool.Writer writer = new SolutionSpool.Writer(spool, budget);
+      try (writer) {
         dataset.begin(TxnType.READ);
         try {
           final DatasetGraph evaluation = SelectedGraphs.evaluation(dataset, selection, delta);
@@ -322,6 +325,7 @@ public final class RulesStep implements Step {
       }
       peakSpoolBytes = Math.max(peakSpoolBytes, result.spoolBytes);
       apply(pass, delta, nextDelta, result);
+      budget.release(writer.bytes());
       return result;
     }
 
@@ -422,10 +426,11 @@ public final class RulesStep implements Step {
         final Node nextDelta,
         final SelectedGraphs lookup,
         final Set<Node> predicates,
-        final Pass result) {
+        final Pass result)
+        throws IOException {
       final CompiledRule rule = record.rule();
       final Binding solution = record.solution();
-      Node solutionNode = null;
+      long solutionOffset = -1;
       for (final Triple template : rule.template()) {
         final Triple fact = Substitute.substitute(template, solution);
         if (!fact.isConcrete() || fact.getSubject().isLiteral() || !fact.getPredicate().isURI()) {
@@ -451,12 +456,10 @@ public final class RulesStep implements Step {
         derived++;
         result.derived++;
         perRule.get(rule.name())[1]++;
-        if (solutionNode == null) {
-          solutionNode = Provenance.solution(rule, solution);
-          Provenance.writeSolution(dataset, provenance, solutionNode, rule, pass, solution);
+        if (solutionOffset < 0) {
+          solutionOffset = witnesses.solution(rule, pass, solution);
         }
-        dataset.add(
-            provenance, Provenance.witness(rule.output(), fact), Provenance.SOLUTION, solutionNode);
+        witnesses.witness(rule.output(), fact, solutionOffset);
         if (!inOutput) {
           dataset.add(nextDelta, fact.getSubject(), fact.getPredicate(), fact.getObject());
           newFacts++;

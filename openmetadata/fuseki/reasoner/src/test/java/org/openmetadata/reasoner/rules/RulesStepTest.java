@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.openmetadata.reasoner.rules.RuleFixtures.ASSERTED;
 import static org.openmetadata.reasoner.rules.RuleFixtures.om;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -323,7 +324,8 @@ GRAPH <urn:catalog:asserted> { :a :knows :b . :b :knows :c . :c :knows :a . :b :
       final List<JsonObject> bundle,
       final String limits,
       final String outcome,
-      final String limit) {
+      final String limit)
+      throws IOException {
     final Path step = Jobs.write(job, id, RuleFixtures.step(id, bundle, limits, true));
     assertEquals(ExitCodes.BUDGET, Jobs.run(step), () -> Jobs.manifest(step).toString());
     final JsonObject manifest = Jobs.manifest(step);
@@ -338,10 +340,16 @@ GRAPH <urn:catalog:asserted> { :a :knows :b . :b :knows :c . :c :knows :a . :b :
             dataset ->
                 Explanations.explain(
                     dataset,
-                    NodeFactory.createURI(RuleFixtures.PROVENANCE),
+                    job.resolve(RuleFixtures.PROVENANCE),
                     org.apache.jena.graph.Triple.create(Node.ANY, Node.ANY, Node.ANY),
                     Explanations.Bounds.DEFAULT)),
         "an incomplete run records no run that explanations would trust");
+    try (var files = Files.list(job)) {
+      assertEquals(
+          List.of(),
+          files.map(file -> file.getFileName().toString()).filter(n -> n.endsWith(".tmp")).toList(),
+          "nothing half-written is left behind");
+    }
   }
 
   private Set<String> tagged(final String graph) {
