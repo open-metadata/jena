@@ -23,6 +23,7 @@ import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -63,7 +64,7 @@ public final class JobInputs {
   private final Object commit = new Object();
   private final Semaphore slots = new Semaphore(MAX_CONCURRENT_UPLOADS);
 
-  /** Bytes uploads published since the store opened; only ever read or written under commit. */
+  /** Bytes of the published uploads; only ever read or written under commit. */
   private long publishedBytes;
 
   /** What an upload left behind. */
@@ -71,6 +72,24 @@ public final class JobInputs {
 
   JobInputs(final Path reasoningRoot) {
     this.directory = reasoningRoot.resolve(DIRECTORY);
+    this.publishedBytes = publishedOnDisk(directory);
+  }
+
+  private static long publishedOnDisk(final Path directory) {
+    if (!Files.isDirectory(directory)) {
+      return 0;
+    }
+    long total = 0;
+    try (DirectoryStream<Path> files = Files.newDirectoryStream(directory)) {
+      for (final Path file : files) {
+        if (isHex(file.getFileName().toString()) && Files.isRegularFile(file)) {
+          total += Files.size(file);
+        }
+      }
+    } catch (final IOException e) {
+      LOG.warn("Cannot measure the reasoning inputs: {}", e.toString());
+    }
+    return total;
   }
 
   static boolean isHex(final String text) {
@@ -87,16 +106,19 @@ public final class JobInputs {
    * hex} if it hashes to it. A body already held is received and checked like any other and then
    * dropped, so a retry costs the client its bytes but never the store its quota.
    *
-   * <p>The quota is checked twice and the disk is never measured while {@code commit} is held,
-   * since the measure walks every file under the reasoning root. Before the body is read, an upload
-   * that cannot fit, by its {@code declaredBytes} if the client sent them, is refused without
-   * writing a byte. After it is read, the root is measured and the bytes that other uploads
-   * published since the measure began are added, so the last upload to commit sees all the others
-   * and committed state never passes the quota. Both measures count this upload's temporary file.
+   * <p>The quota is checked twice and the disk is never walked: the uploads directory is counted
+   * exactly, in {@code publishedBytes}, and the rest of the root comes from {@code otherBytes},
+   * which may lag the disk by its own bounded staleness. Before the body is read, an upload that
+   * cannot fit, by its {@code declaredBytes} if the client sent them, is refused without writing a
+   * byte. At commit, under the lock that serializes publishes, the bytes already published and this
+   * upload's own are added to the rest, so the last upload to commit sees all the others and
+   * committed state never passes the quota. Bodies still being received are counted only at their
+   * own commit; at most {@link #MAX_CONCURRENT_UPLOADS} of {@code maxUploadBytes} each can sit
+   * unpublished.
    *
    * @param quotaBytes what the reasoning root may use in all; an upload that would leave it above
    *     that is refused and removed
-   * @param usedBytes measures what the reasoning root uses now, temporary files included
+   * @param otherBytes what the reasoning root uses outside the uploads directory
    * @param declaredBytes the body's length as the client sent it, or -1
    */
   Stored put(
@@ -104,10 +126,10 @@ public final class JobInputs {
       final InputStream body,
       final long maxBytes,
       final long quotaBytes,
-      final UsedBytes usedBytes,
+      final OtherBytes otherBytes,
       final long now)
       throws JobService.Refused, IOException {
-    return put(hex, body, -1, maxBytes, quotaBytes, usedBytes, now);
+    return put(hex, body, -1, maxBytes, quotaBytes, otherBytes, now);
   }
 
   Stored put(
@@ -116,7 +138,7 @@ public final class JobInputs {
       final long declaredBytes,
       final long maxBytes,
       final long quotaBytes,
-      final UsedBytes usedBytes,
+      final OtherBytes otherBytes,
       final long now)
       throws JobService.Refused, IOException {
     if (!slots.tryAcquire()) {
@@ -128,7 +150,7 @@ public final class JobInputs {
               .withSubject("maxConcurrentUploads"));
     }
     try {
-      return receiveAndHold(hex, body, declaredBytes, maxBytes, quotaBytes, usedBytes, now);
+      return receiveAndHold(hex, body, declaredBytes, maxBytes, quotaBytes, otherBytes, now);
     } finally {
       slots.release();
     }
@@ -140,13 +162,13 @@ public final class JobInputs {
       final long declaredBytes,
       final long maxBytes,
       final long quotaBytes,
-      final UsedBytes usedBytes,
+      final OtherBytes otherBytes,
       final long now)
       throws JobService.Refused, IOException {
     Files.createDirectories(directory);
     final Path target = directory.resolve(hex);
     if (!Files.isRegularFile(target)) {
-      final long used = usedBytes.get();
+      final long used = otherBytes.get() + publishedBytes();
       if (used >= quotaBytes || (declaredBytes > 0 && used + declaredBytes > quotaBytes)) {
         throw overQuota(used + Math.max(declaredBytes, 0), quotaBytes);
       }
@@ -166,21 +188,17 @@ public final class JobInputs {
                     + hex
                     + " in the path"));
       }
-      final long publishedBefore;
-      synchronized (commit) {
-        publishedBefore = publishedBytes;
-      }
-      final long measured = usedBytes.get();
+      final long other = otherBytes.get();
       synchronized (commit) {
         if (Files.isRegularFile(target)) {
           Files.setLastModifiedTime(target, FileTime.fromMillis(now));
           return new Stored(false, Files.size(target));
         }
-        final long used = measured + (publishedBytes - publishedBefore);
+        final long size = Files.size(temporary);
+        final long used = other + publishedBytes + size;
         if (used > quotaBytes) {
           throw overQuota(used, quotaBytes);
         }
-        final long size = Files.size(temporary);
         Files.setLastModifiedTime(temporary, FileTime.fromMillis(now));
         Files.move(
             temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
@@ -208,9 +226,30 @@ public final class JobInputs {
             .withSubject("maxDiskBytes"));
   }
 
-  /** Measures the bytes the reasoning root uses. */
+  /**
+   * The size of the upload held under {@code hex}, if there is one, which also restarts its hold
+   * (as an upload of the same bytes would) so a client can keep it alive without sending it again.
+   */
+  OptionalLong hold(final String hex, final long now) throws IOException {
+    final Path target = directory.resolve(hex);
+    synchronized (commit) {
+      if (!Files.isRegularFile(target)) {
+        return OptionalLong.empty();
+      }
+      Files.setLastModifiedTime(target, FileTime.fromMillis(now));
+      return OptionalLong.of(Files.size(target));
+    }
+  }
+
+  private long publishedBytes() {
+    synchronized (commit) {
+      return publishedBytes;
+    }
+  }
+
+  /** What the reasoning root uses outside the uploads directory. */
   @FunctionalInterface
-  interface UsedBytes {
+  interface OtherBytes {
     long get() throws IOException;
   }
 
@@ -238,7 +277,10 @@ public final class JobInputs {
         }
         final long modified = Files.getLastModifiedTime(file).toMillis();
         if ((temporary && startup) || modified < now - HOLD_MILLIS) {
-          Files.deleteIfExists(file);
+          final long size = Files.size(file);
+          if (Files.deleteIfExists(file) && !temporary) {
+            publishedBytes -= size;
+          }
         }
       }
     } catch (final IOException e) {

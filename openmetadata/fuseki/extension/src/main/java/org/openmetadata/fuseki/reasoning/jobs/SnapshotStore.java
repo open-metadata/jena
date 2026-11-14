@@ -85,6 +85,7 @@ public final class SnapshotStore implements AutoCloseable {
   private final Path root;
   private final long leaseMillis;
   private final Object lock = new Object();
+  private final Connector connector;
 
   /** One lineage per serving dataset name, which the HTTP layer checks is served. */
   private final Map<String, Lineage> lineages = new HashMap<>();
@@ -114,6 +115,7 @@ public final class SnapshotStore implements AutoCloseable {
     final long generation;
     final Path directory;
     final JsonObject metadata;
+    private final JsonObject description;
     private DatasetGraph database;
     private int leases;
     private boolean retired;
@@ -129,6 +131,7 @@ public final class SnapshotStore implements AutoCloseable {
       this.generation = generation;
       this.directory = directory;
       this.metadata = metadata;
+      this.description = describe(metadata);
     }
 
     String datasetGeneration() {
@@ -147,8 +150,15 @@ public final class SnapshotStore implements AutoCloseable {
       return metadata.getObj("store").getNumber("jobSequence").longValue();
     }
 
-    /** The snapshot's public description, OpenMetadata's rdfReasoningSnapshot.json. */
+    /**
+     * The snapshot's public description, OpenMetadata's rdfReasoningSnapshot.json. It is built once
+     * and shared by every answer, which only serializes it: callers must not modify it.
+     */
     JsonObject description() {
+      return description;
+    }
+
+    private static JsonObject describe(final JsonObject metadata) {
       final JsonObject json = new JsonObject();
       json.put("id", metadata.getString("id"));
       json.put("jobId", metadata.getString("jobId"));
@@ -162,6 +172,9 @@ public final class SnapshotStore implements AutoCloseable {
   private static final class Lineage {
     private Snapshot current;
     private final List<Snapshot> retired = new ArrayList<>();
+
+    /** A publication is doing its slow I/O; another waits for it, so the generation check holds. */
+    private boolean publishing;
   }
 
   /**
@@ -219,17 +232,21 @@ public final class SnapshotStore implements AutoCloseable {
 
     @Override
     public void close() {
+      final boolean dispose;
       synchronized (lock) {
         if (released) {
           return;
         }
         released = true;
         snapshot.leases--;
-        if (snapshot.retired && snapshot.leases == 0) {
-          dispose(snapshot);
+        dispose = snapshot.retired && snapshot.leases == 0;
+        if (dispose) {
           lineages.get(snapshot.dataset).retired.remove(snapshot);
           lock.notifyAll();
         }
+      }
+      if (dispose) {
+        dispose(snapshot);
       }
     }
   }
@@ -239,8 +256,19 @@ public final class SnapshotStore implements AutoCloseable {
    * @param leaseMillis how long a lease can last: the query deadline and a margin
    */
   public SnapshotStore(final Path reasoningRoot, final long leaseMillis) {
+    this(reasoningRoot, leaseMillis, SnapshotStore::connect);
+  }
+
+  /** Opens a snapshot's TDB2 database; a seam for tests of what runs while it is slow. */
+  @FunctionalInterface
+  interface Connector {
+    DatasetGraph connect(Path location);
+  }
+
+  SnapshotStore(final Path reasoningRoot, final long leaseMillis, final Connector connector) {
     this.root = reasoningRoot.resolve(DIRECTORY);
     this.leaseMillis = leaseMillis;
+    this.connector = connector;
   }
 
   /**
@@ -306,7 +334,7 @@ public final class SnapshotStore implements AutoCloseable {
       }
       final Snapshot snapshot = lineage.current;
       if (snapshot.database == null) {
-        snapshot.database = connect(snapshot.directory.resolve(DATABASE));
+        snapshot.database = connector.connect(snapshot.directory.resolve(DATABASE));
       }
       snapshot.leases++;
       return Optional.of(new Lease(snapshot));
@@ -330,69 +358,118 @@ public final class SnapshotStore implements AutoCloseable {
       final Path provenance,
       final long now)
       throws Superseded, IOException, InterruptedException {
+    final Lineage lineage;
     synchronized (lock) {
-      final Lineage lineage = lineages.computeIfAbsent(dataset, name -> new Lineage());
-      check(lineage.current, expectedGeneration, candidate);
+      lineage = lineages.computeIfAbsent(dataset, name -> new Lineage());
       final long waitUntil = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(leaseMillis);
-      while (lineage.retired.size() >= MAX_RETIRED && System.nanoTime() - waitUntil < 0) {
-        lock.wait(Math.max(1, TimeUnit.NANOSECONDS.toMillis(waitUntil - System.nanoTime())));
-      }
-      if (lineage.retired.size() >= MAX_RETIRED) {
-        throw new IOException(
-            MAX_RETIRED + " replaced snapshots of '" + dataset + "' are still being read");
-      }
-      // Waiting released the lock, so another publication may have run meanwhile.
-      check(lineage.current, expectedGeneration, candidate);
-
-      final UUID id = UUID.randomUUID();
-      final long generation = expectedGeneration + 1;
-      final Path directory = Files.createDirectories(root.resolve(dataset)).resolve(id.toString());
-      final JsonObject metadata = metadata(id, generation, candidate, now);
-      DatasetGraph database = null;
-      boolean published = false;
-      try {
-        Files.createDirectories(directory);
-        Files.move(working, directory.resolve(DATABASE), StandardCopyOption.ATOMIC_MOVE);
-        if (provenance != null) {
-          Files.move(provenance, directory.resolve(PROVENANCE), StandardCopyOption.ATOMIC_MOVE);
+      while (true) {
+        check(lineage.current, expectedGeneration, candidate);
+        if (!lineage.publishing && lineage.retired.size() < MAX_RETIRED) {
+          break;
         }
-        database = connect(directory.resolve(DATABASE));
-        database.begin(TxnType.READ);
-        database.end();
-        AtomicFiles.write(directory.resolve(METADATA), JSON.toString(metadata));
-        final JsonObject pointer = new JsonObject();
-        pointer.put("generation", generation);
-        pointer.put("snapshotId", id.toString());
-        AtomicFiles.write(root.resolve(dataset).resolve(POINTER), JSON.toString(pointer));
-        published = true;
-      } finally {
-        if (!published) {
-          if (database != null) {
-            TDBInternal.expel(database);
-          }
-          deleteTree(directory);
+        final long left = waitUntil - System.nanoTime();
+        if (left <= 0) {
+          throw new IOException(
+              lineage.publishing
+                  ? "Another snapshot of '" + dataset + "' is still being published"
+                  : MAX_RETIRED + " replaced snapshots of '" + dataset + "' are still being read");
         }
+        lock.wait(Math.max(1, TimeUnit.NANOSECONDS.toMillis(left)));
       }
-      final Snapshot snapshot = new Snapshot(dataset, id, generation, directory, metadata);
-      snapshot.database = database;
-      final Snapshot previous = lineage.current;
-      lineage.current = snapshot;
-      if (previous != null) {
-        previous.retired = true;
-        if (previous.leases == 0) {
-          dispose(previous);
-        } else {
-          lineage.retired.add(previous);
-        }
-      }
-      LOG.info(
-          "Reasoning snapshot {} of '{}' published as generation {}{}",
-          id,
-          dataset,
-          generation,
-          previous == null ? "" : ", replacing " + previous.id);
-      return snapshot.description();
+      lineage.publishing = true;
     }
+    return publishReserved(
+        lineage, dataset, expectedGeneration, candidate, working, provenance, now);
+  }
+
+  /**
+   * The slow half of a publication: opening the database and the fsynced writes run outside the
+   * lock, which readers need to lease, and only the swap of the current snapshot takes it again.
+   * The reservation in {@code lineage.publishing} is what keeps the generation check valid between
+   * the two, since nothing else publishes to the dataset meanwhile.
+   */
+  private JsonObject publishReserved(
+      final Lineage lineage,
+      final String dataset,
+      final long expectedGeneration,
+      final Candidate candidate,
+      final Path working,
+      final Path provenance,
+      final long now)
+      throws IOException {
+    final UUID id = UUID.randomUUID();
+    final long generation = expectedGeneration + 1;
+    final Path directory = root.resolve(dataset).resolve(id.toString());
+    DatasetGraph database = null;
+    boolean published = false;
+    Snapshot previous = null;
+    final Snapshot snapshot;
+    try {
+      Files.createDirectories(directory);
+      final JsonObject metadata = metadata(id, generation, candidate, now);
+      Files.move(working, directory.resolve(DATABASE), StandardCopyOption.ATOMIC_MOVE);
+      if (provenance != null) {
+        Files.move(provenance, directory.resolve(PROVENANCE), StandardCopyOption.ATOMIC_MOVE);
+      }
+      database = connector.connect(directory.resolve(DATABASE));
+      database.begin(TxnType.READ);
+      database.end();
+      AtomicFiles.write(directory.resolve(METADATA), JSON.toString(metadata));
+      final JsonObject pointer = new JsonObject();
+      pointer.put("generation", generation);
+      pointer.put("snapshotId", id.toString());
+      AtomicFiles.write(root.resolve(dataset).resolve(POINTER), JSON.toString(pointer));
+      published = true;
+      snapshot = new Snapshot(dataset, id, generation, directory, metadata);
+      snapshot.database = database;
+    } finally {
+      if (!published) {
+        if (database != null) {
+          TDBInternal.expel(database);
+        }
+        deleteTree(directory);
+        synchronized (lock) {
+          lineage.publishing = false;
+          lock.notifyAll();
+        }
+      }
+    }
+    final boolean dispose;
+    synchronized (lock) {
+      lineage.publishing = false;
+      if (closed) {
+        // The pointer is durable, so the next start serves this snapshot; nothing here may keep
+        // its database open.
+        TDBInternal.expel(database);
+        snapshot.database = null;
+        lock.notifyAll();
+        return snapshot.description();
+      }
+      previous = lineage.current;
+      lineage.current = snapshot;
+      dispose = previous != null && retire(lineage, previous);
+      lock.notifyAll();
+    }
+    if (dispose) {
+      dispose(previous);
+    }
+    LOG.info(
+        "Reasoning snapshot {} of '{}' published as generation {}{}",
+        id,
+        dataset,
+        generation,
+        previous == null ? "" : ", replacing " + previous.id);
+    return snapshot.description();
+  }
+
+  /** Retires a replaced snapshot; true when no reader holds it, so the caller disposes of it. */
+  private static boolean retire(final Lineage lineage, final Snapshot previous) {
+    previous.retired = true;
+    if (previous.leases == 0) {
+      return true;
+    }
+    lineage.retired.add(previous);
+    return false;
   }
 
   /** Retired snapshots of a dataset still held by a reader. */
@@ -492,12 +569,12 @@ public final class SnapshotStore implements AutoCloseable {
     }
   }
 
-  private static DatasetGraph connect(final Path location) {
+  static DatasetGraph connect(final Path location) {
     return DatabaseMgr.connectDatasetGraph(
         Location.create(location), StoreParams.getSmallStoreParams());
   }
 
-  /** Closes and deletes a snapshot nobody reads any more. Under the lock. */
+  /** Closes and deletes a snapshot nobody reads any more, which no one else can reach. */
   private void dispose(final Snapshot snapshot) {
     if (snapshot.database != null) {
       TDBInternal.expel(snapshot.database);

@@ -71,7 +71,8 @@ public final class Explanations {
    * @param maxDepth premises below the fact explained before they are left unexplained
    * @param maxFacts facts one explanation lists, all levels together
    * @param maxPathLength triples one reconstructed path chain may have
-   * @param maxPathNodes nodes a path reconstruction may visit
+   * @param maxPathNodes nodes a path reconstruction may visit, and the nodes it may reach, which a
+   *     hub's many neighbours would otherwise grow past
    */
   public record Bounds(int maxDepth, int maxFacts, int maxPathLength, int maxPathNodes) {
     public static final Bounds DEFAULT = new Bounds(16, 1_000, 256, 100_000);
@@ -303,6 +304,7 @@ public final class Explanations {
     final Deque<Node> queue = new ArrayDeque<>();
     queue.add(subject);
     int visited = 0;
+    search:
     while (!queue.isEmpty() && visited < bounds.maxPathNodes()) {
       final Node node = queue.poll();
       visited++;
@@ -316,6 +318,9 @@ public final class Explanations {
           final Node next = step.forward() ? edge.getObject() : edge.getSubject();
           if (next.equals(subject) && !next.equals(object) || reachedBy.containsKey(next)) {
             continue;
+          }
+          if (reachedBy.size() >= bounds.maxPathNodes()) {
+            break search;
           }
           reachedBy.put(next, edge);
           if (next.equals(object)) {

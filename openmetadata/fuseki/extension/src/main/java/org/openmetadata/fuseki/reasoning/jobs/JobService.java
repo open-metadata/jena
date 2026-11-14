@@ -19,9 +19,11 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongSupplier;
@@ -54,6 +56,12 @@ public final class JobService implements AutoCloseable {
   /** Thread interruption ends a worker step with SIGKILL and then waits for the worker to exit. */
   private static final long STOP_WAIT_MILLIS = 60_000;
 
+  /** How long an upload may rely on the last walk of the rest of the reasoning root. */
+  static final long DISK_USE_TTL_MILLIS = 5_000;
+
+  /** Parsed job results kept for paging; each can hold up to maxResultRows items. */
+  static final int MAX_CACHED_RESULTS = 4;
+
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
 
   private final ReasoningSettings settings;
@@ -65,6 +73,18 @@ public final class JobService implements AutoCloseable {
   private final LongSupplier clock;
   private final JobStore store;
   private final JobInputs inputs;
+  private final DiskUse diskUse;
+
+  /**
+   * Parsed results by {@link #parsedResult}, least recently read first; at most MAX_CACHED_RESULTS.
+   */
+  private final Map<String, JsonObject> resultCache =
+      new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, JsonObject> eldest) {
+          return size() > MAX_CACHED_RESULTS;
+        }
+      };
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -116,6 +136,16 @@ public final class JobService implements AutoCloseable {
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
     this.inputs = new JobInputs(settings.reasoningRoot());
+    this.diskUse =
+        new DiskUse(
+            settings.reasoningRoot(),
+            clock,
+            DISK_USE_TTL_MILLIS,
+            task -> {
+              final Thread thread = new Thread(task, "openmetadata-reasoning-disk-use");
+              thread.setDaemon(true);
+              thread.start();
+            });
   }
 
   /**
@@ -162,6 +192,7 @@ public final class JobService implements AutoCloseable {
       retain();
       inputs.sweep(uploadsInUse(), clock.getAsLong(), true);
     }
+    diskUse.measure();
     LOG.info(
         "Reasoning jobs: {} kept, {} interrupted by the last shutdown", jobs.size(), interrupted);
   }
@@ -293,8 +324,25 @@ public final class JobService implements AutoCloseable {
         declaredBytes,
         jobSettings.maxUploadBytes(),
         quota,
-        () -> JobStore.sizeOnDisk(root),
+        diskUse::outsideUploads,
         clock.getAsLong());
+  }
+
+  /**
+   * The size of the upload held under {@code hex}, for {@code HEAD /reasoning/inputs/...}. Asking
+   * restarts the hold, as uploading the same bytes would, so a client keeps an input alive without
+   * sending it again.
+   */
+  public OptionalLong heldInput(final String hex) throws Refused, IOException {
+    if (!settings.enabled()) {
+      throw new Refused(
+          503,
+          Problem.of(
+              Problem.Code.NOT_READY,
+              "Reasoning is disabled: " + ReasoningSettings.ENABLED + " is not true"));
+    }
+    sweepInputs();
+    return inputs.hold(hex, clock.getAsLong());
   }
 
   /**
@@ -437,8 +485,33 @@ public final class JobService implements AutoCloseable {
               ? job.problem()
               : Problem.of(Problem.Code.INVALID_REQUEST, "Job " + id + " has no result"));
     }
-    final JsonObject result = JSON.read(file.toString());
-    return Results.page(job.toJson(), result, offset, limit);
+    return Results.page(job.toJson(), parsedResult(id, file), offset, limit);
+  }
+
+  /**
+   * The parsed result.json of a finished job. Paging through a result asks for it once per page, so
+   * the last few are kept, keyed by the file's size and modification time in case the job directory
+   * was replaced; the result is shared and never modified.
+   */
+  private JsonObject parsedResult(final UUID id, final Path file) throws Refused {
+    final String key;
+    try {
+      key = id + ":" + Files.size(file) + ":" + Files.getLastModifiedTime(file).toMillis();
+    } catch (final IOException e) {
+      throw new Refused(
+          404, Problem.of(Problem.Code.INVALID_REQUEST, "Job " + id + " has no readable result"));
+    }
+    synchronized (resultCache) {
+      final JsonObject cached = resultCache.get(key);
+      if (cached != null) {
+        return cached;
+      }
+    }
+    final JsonObject parsed = JSON.read(file.toString());
+    synchronized (resultCache) {
+      resultCache.put(key, parsed);
+    }
+    return parsed;
   }
 
   public Optional<JsonObject> job(final UUID id) {

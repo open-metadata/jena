@@ -14,6 +14,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -24,6 +25,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.dboe.base.file.Location;
@@ -277,6 +285,78 @@ class SnapshotStoreTest {
     final JsonObject exact = query(queries(Map.of(JobSettings.MAX_RESULT_ROWS, "5")), sorted);
     assertEquals(5, subjects(exact).size());
     assertFalse(exact.getBoolean("truncated"), "as many rows as the page holds is not a cut");
+  }
+
+  @Test
+  void leasesAreNotBlockedWhileAPublicationOpensItsDatabase() throws Exception {
+    final CountDownLatch opening = new CountDownLatch(1);
+    final CountDownLatch finish = new CountDownLatch(1);
+    final AtomicInteger opened = new AtomicInteger();
+    store =
+        new SnapshotStore(
+            root,
+            10_000,
+            location -> {
+              final DatasetGraph database = SnapshotStore.connect(location);
+              if (opened.incrementAndGet() == 2) {
+                opening.countDown();
+                await(finish);
+              }
+              return database;
+            });
+    store.open();
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
+    final ExecutorService pool = Executors.newFixedThreadPool(3);
+    try {
+      final Future<JsonObject> second =
+          pool.submit(
+              () ->
+                  store.publish(DATASET, 1, candidate(2, 2), working("two", "urn:x:b"), null, 2L));
+      assertTrue(opening.await(10, TimeUnit.SECONDS));
+
+      final SnapshotStore.Lease during =
+          pool.submit(() -> store.lease(DATASET).orElseThrow()).get(10, TimeUnit.SECONDS);
+      assertEquals(1, during.generation(), "the old snapshot is current until the swap");
+      during.close();
+      assertEquals(1, store.generation(DATASET));
+
+      final Future<JsonObject> rival =
+          pool.submit(
+              () ->
+                  store.publish(
+                      DATASET, 1, candidate(3, 3), working("three", "urn:x:c"), null, 3L));
+      finish.countDown();
+      final String secondId = second.get(10, TimeUnit.SECONDS).getString("id");
+      assertThrows(ExecutionException.class, () -> rival.get(10, TimeUnit.SECONDS));
+      assertEquals(2, store.generation(DATASET), "the rival lost the generation check");
+      try (SnapshotStore.Lease after = store.lease(DATASET).orElseThrow()) {
+        assertEquals(2, after.generation());
+        assertEquals(secondId, after.id().toString());
+      }
+    } finally {
+      finish.countDown();
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void aSnapshotsDescriptionIsBuiltOnceAndMatchesWhatPublishingReturned() throws Exception {
+    store = open();
+    final JsonObject published =
+        store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), null, 1L);
+    try (SnapshotStore.Lease first = store.lease(DATASET).orElseThrow();
+        SnapshotStore.Lease again = store.lease(DATASET).orElseThrow()) {
+      assertEquals(published, first.description());
+      assertSame(first.description(), again.description());
+    }
+  }
+
+  private static void await(final CountDownLatch latch) {
+    try {
+      latch.await();
+    } catch (final InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   private SnapshotStore open() throws Exception {

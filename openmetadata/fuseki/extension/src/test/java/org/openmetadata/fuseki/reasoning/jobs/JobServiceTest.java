@@ -723,6 +723,37 @@ class JobServiceTest {
     return settings.reasoningRoot().resolve("jobs").resolve(id.toString());
   }
 
+  @Test
+  void pagesOfAFinishedJobsResultAreCutFromOneParsedResultThatPagingNeverChanges()
+      throws Exception {
+    final JobService service = service(worker(SUCCEED), Map.of());
+    final UUID id = id(service.submit(request(UUID.randomUUID())));
+    await(service, id, state("SUCCEEDED"));
+    final Path file = jobDirectory(id).resolve(Plans.RESULT);
+    Files.writeString(
+        file,
+        "{\"closures\": [1, 2, 3, 4, 5], \"engine\": \"x\"}",
+        java.nio.charset.StandardCharsets.UTF_8);
+
+    final JsonObject first = service.results(id, 0, 2);
+    assertEquals("[ 1 , 2 ]", JSON.toStringFlat(first.getObj("result").get("closures")));
+    assertEquals(5, first.getObj("page").getNumber("total").intValue());
+    final JsonObject last = service.results(id, 4, 2);
+    assertEquals("[ 5 ]", JSON.toStringFlat(last.getObj("result").get("closures")));
+    assertEquals("x", last.getObj("result").getString("engine"));
+    assertEquals(
+        "[ 1 , 2 ]",
+        JSON.toStringFlat(first.getObj("result").get("closures")),
+        "a later page does not change an earlier answer");
+
+    Files.writeString(file, "{\"closures\": [9], \"engine\": \"y\"}");
+    Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(1_000));
+    assertEquals(
+        "y",
+        service.results(id, 0, 2).getObj("result").getString("engine"),
+        "a result that was replaced is read again");
+  }
+
   private static Predicate<JsonObject> state(final String state) {
     return job -> state.equals(job.getString("state"));
   }

@@ -109,14 +109,7 @@ class JobInputsTest {
     final JobService.Refused refused =
         assertThrows(
             JobService.Refused.class,
-            () ->
-                inputs.put(
-                    hex,
-                    new ByteArrayInputStream(bytes),
-                    ROOMY,
-                    1_000,
-                    () -> JobStore.sizeOnDisk(root) + 1_001,
-                    NOW));
+            () -> inputs.put(hex, new ByteArrayInputStream(bytes), ROOMY, 1_000, () -> 1_001, NOW));
     assertEquals(503, refused.status());
     assertEquals(Problem.Code.LIMIT_EXCEEDED, refused.problem().code());
     assertEquals("maxDiskBytes", refused.problem().subject());
@@ -310,7 +303,7 @@ class JobInputsTest {
                           if (firstCalls.incrementAndGet() == 2) {
                             await(secondMeasuring);
                           }
-                          return 1_000;
+                          return 0;
                         },
                         NOW);
                 firstCommitted.countDown();
@@ -330,7 +323,7 @@ class JobInputsTest {
                           secondMeasuring.countDown();
                           await(firstCommitted);
                         }
-                        return 1_000;
+                        return 0;
                       },
                       NOW));
       assertTrue(a.get(10, TimeUnit.SECONDS).created());
@@ -341,6 +334,66 @@ class JobInputsTest {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  @Test
+  void publishedBytesAreCountedExactlyAcrossSweepsAndReopening() throws Exception {
+    final byte[] first = new byte[600];
+    final byte[] second = new byte[600];
+    second[0] = 1;
+    final long quota = 1_000;
+    assertTrue(
+        inputs
+            .put(Releases.hash(first), new ByteArrayInputStream(first), ROOMY, quota, () -> 0, NOW)
+            .created());
+    final JobService.Refused refused =
+        assertThrows(
+            JobService.Refused.class,
+            () ->
+                inputs.put(
+                    Releases.hash(second),
+                    new ByteArrayInputStream(second),
+                    ROOMY,
+                    quota,
+                    () -> 0,
+                    NOW));
+    assertEquals(503, refused.status());
+
+    final JobInputs reopened = new JobInputs(root);
+    assertThrows(
+        JobService.Refused.class,
+        () ->
+            reopened.put(
+                Releases.hash(second),
+                new ByteArrayInputStream(second),
+                ROOMY,
+                quota,
+                () -> 0,
+                NOW),
+        "the bytes held before the restart still count");
+
+    reopened.sweep(Set.of(), NOW + 2 * JobInputs.HOLD_MILLIS, false);
+    assertTrue(
+        reopened
+            .put(
+                Releases.hash(second), new ByteArrayInputStream(second), ROOMY, quota, () -> 0, NOW)
+            .created(),
+        "a swept upload frees its bytes");
+  }
+
+  @Test
+  void aHeldInputIsReportedByItsSizeAndKeptAliveByAskingAfterIt() throws Exception {
+    final byte[] bytes = bytes("held for a while");
+    final String hex = Releases.hash(bytes);
+    assertTrue(inputs.hold(hex, NOW).isEmpty());
+    put(hex, bytes);
+
+    assertEquals(bytes.length, inputs.hold(hex, NOW + JobInputs.HOLD_MILLIS - 1).getAsLong());
+    inputs.sweep(Set.of(), NOW + JobInputs.HOLD_MILLIS + 1, false);
+    assertEquals(List.of(hex), names(), "asking restarted the hold");
+
+    inputs.sweep(Set.of(), NOW + 3 * JobInputs.HOLD_MILLIS, false);
+    assertTrue(inputs.hold(hex, NOW + 3 * JobInputs.HOLD_MILLIS).isEmpty());
   }
 
   private JobInputs.Stored put(final String hex, final byte[] bytes) throws Exception {
