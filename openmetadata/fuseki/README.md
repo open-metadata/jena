@@ -447,6 +447,7 @@ removed, oldest first. Directories without a `job.json` are never removed.
 | Closure outside OWL 2 DL | `FAILED`, `PROFILE_VIOLATION` |
 | The upload is not held, has another size or hash than `releaseRdf` says, or does not hold exactly one `owl:Ontology` with `owl:versionIRI <urn:openmetadata:ontology-release:{releaseId}>` | `FAILED`, `INPUT_CHANGED`, `subject` the upload's digest, or the `ontologyId` for a wrong header |
 | The release has an `owl:imports`, which nothing can satisfy because no other ontology is in the input | `FAILED`, `MISSING_IMPORT`, `subject` the imported IRI |
+| A term in the upload is longer than 1 MiB (Thrift's string limit, checked while it is read, so a huge literal never has to fit in memory) | `INCOMPLETE`, `LIMIT_EXCEEDED`, `subject` the upload's digest, as for any limit the capture reaches |
 | An upload that is not RDF-Thrift | `FAILED`, `INVALID_REQUEST`, `subject` the upload's digest |
 | A question naming an entity outside the closure | `FAILED`, `INVALID_REQUEST` |
 | Cancelled | `CANCELLED` |
