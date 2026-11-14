@@ -12,6 +12,7 @@
  */
 package org.openmetadata.reasoner.owl;
 
+import java.nio.file.Path;
 import java.util.List;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
@@ -54,91 +55,101 @@ public final class ClassifyStep implements Step {
   public StepResult run(final StepFile step, final Watchdog watchdog) throws Exception {
     final DatasetGraph dataset = WorkingDataset.open(step.dataset());
     try {
-      final ClosureInput input = ClosureInput.read(dataset, step);
-      final List<Classifier.Check> checks =
-          step.checks() == null
-              ? List.of()
-              : input.checks(step.checks(), step.limits().maxChecks());
-      final PropertyValues values = PropertyValues.analyse(input.ontology());
-      final EngineRouter.Route route = EngineRouter.route(input.ontology(), step.engine(), values);
-      final SortedReport report = step.report() ? new SortedReport(MAX_REPORT_LINES) : null;
-      final GraphWriter writer =
-          step.outputGraph() == null ? null : new GraphWriter(dataset, step.outputGraph());
-      final JsonArray unsatisfiable = new JsonArray();
-      final Classifier.Outcome outcome;
-      try {
-        outcome =
-            Classifier.run(
-                input.ontology(),
-                route,
-                values,
-                checks,
-                watchdog,
-                step.limits(),
-                fact -> {
-                  if (fact.kind() == Classification.Kind.UNSATISFIABLE
-                      && unsatisfiable.size() < MAX_LISTED_UNSATISFIABLE) {
-                    unsatisfiable.add(fact.first());
-                  }
-                  if (writer != null) {
-                    writer.write(fact);
-                  }
-                  if (report != null) {
-                    report.add(fact.line());
-                  }
-                });
-        if (writer != null) {
-          writer.commit();
-        }
-      } catch (final Classification.OutputTooLarge e) {
-        throw InputRejectedException.of("LIMIT_EXCEEDED", "OUTPUT_TOO_LARGE", e.getMessage());
-      } finally {
-        if (writer != null) {
-          writer.close();
-        }
-      }
-      final Classification classification = outcome.classification();
-      final String result = classification.isConsistent() ? "CLASSIFIED" : "INCONSISTENT";
-
-      final JsonObject routing = route.toJson();
-      routing.put("engineUsed", outcome.engine().displayName());
-      if (outcome.fallback() != null) {
-        routing.put("fallback", outcome.fallback());
-      }
-      final JsonArray checkResults = new JsonArray();
-      for (int i = 0; i < outcome.checks().size(); i++) {
-        final Classifier.CheckResult check = outcome.checks().get(i);
-        final JsonObject json = new JsonObject();
-        json.put("axiom", check.rendering());
-        json.put("outcome", check.outcome().name());
-        if (check.engine() != null) {
-          json.put("engine", check.engine());
-        }
-        if (check.outcome() == Classifier.CheckOutcome.INVALID) {
-          final String reason = checks.get(i).invalidReason();
-          json.put(
-              "reason", reason != null ? reason : "The engine cannot check this kind of axiom");
-        }
-        checkResults.add(json);
-        if (report != null) {
-          report.add(check.line());
-        }
-      }
-      final JsonObject counts = classification.countsJson();
-      counts.put("outputTriples", writer == null ? 0 : writer.written());
-      final StepResult stepResult =
-          StepResult.succeeded(result)
-              .detail("engine", outcome.engine().toJson())
-              .detail("routing", routing)
-              .detail("closure", input.closureJson())
-              .detail("admission", input.admission().toJson())
-              .detail("entailments", counts)
-              .detail("unsatisfiable", unsatisfiable)
-              .detail("checks", checkResults);
-      return report == null ? stepResult : stepResult.report(report.lines("OUTCOME " + result));
+      return classify(
+          dataset, step, step.jobDirectory().resolve(step.stepId() + ".closure.nt"), watchdog);
     } finally {
       WorkingDataset.release(dataset);
     }
+  }
+
+  /**
+   * Classifies the closure of {@code step} in a dataset the caller opened and releases, so a caller
+   * with several closures opens it once.
+   *
+   * @param document where the closure is exported for OWL API to parse
+   */
+  static StepResult classify(
+      final DatasetGraph dataset, final StepFile step, final Path document, final Watchdog watchdog)
+      throws Exception {
+    final ClosureInput input = ClosureInput.read(dataset, step, document);
+    final List<Classifier.Check> checks =
+        step.checks() == null ? List.of() : input.checks(step.checks(), step.limits().maxChecks());
+    final PropertyValues values = PropertyValues.analyse(input.ontology());
+    final EngineRouter.Route route = EngineRouter.route(input.ontology(), step.engine(), values);
+    final SortedReport report = step.report() ? new SortedReport(MAX_REPORT_LINES) : null;
+    final GraphWriter writer =
+        step.outputGraph() == null ? null : new GraphWriter(dataset, step.outputGraph());
+    final JsonArray unsatisfiable = new JsonArray();
+    final Classifier.Outcome outcome;
+    try {
+      outcome =
+          Classifier.run(
+              input.ontology(),
+              route,
+              values,
+              checks,
+              watchdog,
+              step.limits(),
+              fact -> {
+                if (fact.kind() == Classification.Kind.UNSATISFIABLE
+                    && unsatisfiable.size() < MAX_LISTED_UNSATISFIABLE) {
+                  unsatisfiable.add(fact.first());
+                }
+                if (writer != null) {
+                  writer.write(fact);
+                }
+                if (report != null) {
+                  report.add(fact.line());
+                }
+              });
+      if (writer != null) {
+        writer.commit();
+      }
+    } catch (final Classification.OutputTooLarge e) {
+      throw InputRejectedException.of("LIMIT_EXCEEDED", "OUTPUT_TOO_LARGE", e.getMessage());
+    } finally {
+      if (writer != null) {
+        writer.close();
+      }
+    }
+    final Classification classification = outcome.classification();
+    final String result = classification.isConsistent() ? "CLASSIFIED" : "INCONSISTENT";
+
+    final JsonObject routing = route.toJson();
+    routing.put("engineUsed", outcome.engine().displayName());
+    if (outcome.fallback() != null) {
+      routing.put("fallback", outcome.fallback());
+    }
+    final JsonArray checkResults = new JsonArray();
+    for (int i = 0; i < outcome.checks().size(); i++) {
+      final Classifier.CheckResult check = outcome.checks().get(i);
+      final JsonObject json = new JsonObject();
+      json.put("axiom", check.rendering());
+      json.put("outcome", check.outcome().name());
+      if (check.engine() != null) {
+        json.put("engine", check.engine());
+      }
+      if (check.outcome() == Classifier.CheckOutcome.INVALID) {
+        final String reason = checks.get(i).invalidReason();
+        json.put("reason", reason != null ? reason : "The engine cannot check this kind of axiom");
+      }
+      checkResults.add(json);
+      if (report != null) {
+        report.add(check.line());
+      }
+    }
+    final JsonObject counts = classification.countsJson();
+    counts.put("outputTriples", writer == null ? 0 : writer.written());
+    final StepResult stepResult =
+        StepResult.succeeded(result)
+            .detail("engine", outcome.engine().toJson())
+            .detail("routing", routing)
+            .detail("closure", input.closureJson())
+            .detail("admission", input.admission().toJson())
+            .detail("entailments", counts)
+            .detail("unsatisfiable", unsatisfiable)
+            .detail("checks", checkResults);
+    return report == null ? stepResult : stepResult.report(report.lines("OUTCOME " + result));
   }
 
   /**

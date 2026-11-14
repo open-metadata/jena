@@ -31,7 +31,14 @@ import org.semanticweb.owlapi.model.OWLOntology;
 record ClosureInput(OWLOntology ontology, JsonObject closureJson, Admission admission) {
 
   static ClosureInput read(final DatasetGraph dataset, final StepFile step) throws Exception {
-    final Path document = step.jobDirectory().resolve(step.stepId() + ".closure.nt");
+    return read(dataset, step, step.jobDirectory().resolve(step.stepId() + ".closure.nt"));
+  }
+
+  /**
+   * @param document where the closure is exported for OWL API to parse; removed before returning
+   */
+  static ClosureInput read(final DatasetGraph dataset, final StepFile step, final Path document)
+      throws Exception {
     final ClosureDocument closure;
     final OWLOntology ontology;
     try {

@@ -192,6 +192,7 @@ worker on it. Every path a step names must stay inside its job directory.
 |---|---|
 | `LOAD` | Bulk-loads exported N-Quads or TriG (optionally gzip-compressed) into a fresh private TDB2 dataset |
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
+| `CLASSIFY_ALL` | Classifies several closures one after another in one worker, each as a `CLASSIFY` of its own would be: a refresh's releases, which paid a JVM start each (about 1.1 s) when every release had its own step |
 | `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
 | `COMPACT` | Compacts the dataset before it is published |
 | `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance graph ([Governance rules](#governance-rules)) |
@@ -207,6 +208,29 @@ answered `INVALID` with its `reason`.
 
 A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping cannot consume, or
 over an admission limit is rejected with its problems, never classified with something dropped.
+
+`CLASSIFY_ALL` reads its closures from `closuresFile`, a JSON array in the job directory of at
+most 1,000 objects, each a closure (`root` with `graphs` or `graphsFile`) and the `output` graph
+of its entailments; together they may list 100,000 graphs. No output may be a graph any of the
+closures reads, so the result never depends on their order.
+
+```json
+{"protocol": 1, "stepId": "classify", "kind": "CLASSIFY_ALL", "dataset": "working",
+ "timeoutMillis": 600000, "closuresFile": "classify.closures.json"}
+```
+
+The closures stay as separate as steps of their own were. Closure *n*, counted from 0, is
+classified in its own write transaction on its own output graph and gets its own manifest,
+`<step>-<n>.result.json`, in the shape of a `CLASSIFY` manifest, as soon as it is done. The step
+stops at the first closure that is inconsistent (the step still `SUCCEEDED`, outcome
+`INCONSISTENT`) or rejected (`FAILED`, with that closure's problems); its own manifest then names
+it in `stoppedAt` and counts the closures classified before it, which keep their graphs. A closure
+the deadline, the heap or a kill cut short has no manifest, so the first closure without a
+`SUCCEEDED` manifest is always the one that ended the step. The closures share the step's deadline
+and heap, and `maxNewFacts` bounds what they write together: each may write what the earlier ones
+left of it, up to `maxOutputTriples`. The step file's `protocol` is still 1: a worker without this
+step refuses the file as `INVALID_STEP`, and the image always ships the worker with the extension
+that starts it.
 
 A step file may set any admission limit in `limits`; each must be a positive integer. The limits
 that bound the worker's heap default to a size proportional to it, so raising
@@ -226,7 +250,7 @@ records the limits a step ran with.
 | `maxRules` | 256 rules in one `RULES` bundle, enabled or not | no |
 | `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
 | `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
-| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
+| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs, or the closures of one `CLASSIFY_ALL` to theirs together | no |
 | `maxSpoolBytes` | 4 GiB, the file one `RULES` pass spools its solutions to | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
