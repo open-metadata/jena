@@ -52,6 +52,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_MAX_RESULT_ROWS` | `10000` | Rows one snapshot query or one page of a result returns (`maxResultRows`). At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` | `1000000` | Quads one snapshot query may read from the store; a query that reads more stops with `LIMIT_EXCEEDED` (subject `maxQueryScannedQuads`, not a capabilities limit). At most 9 digits. |
 | `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES` | `4` | Snapshot queries that may run at once; more get HTTP 429. At most 3 digits. |
+| `OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE` | the Fuseki heap / 32 KiB, from 10,000 to 999,999: `131072` with the 4g heap | Nodes each open snapshot keeps decoded in the Fuseki heap for its queries' answers, about 220 bytes each. At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_UPLOAD_BYTES` | `64m` | The largest job input one `PUT /reasoning/inputs/...` may carry, the same as a Graph Store upload's limit. At least `1m`. Reported as the capability limit `maxUploadBytes`. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
@@ -192,6 +193,7 @@ worker on it. Every path a step names must stay inside its job directory.
 |---|---|
 | `LOAD` | Bulk-loads exported N-Quads or TriG (optionally gzip-compressed) into a fresh private TDB2 dataset |
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
+| `CLASSIFY_ALL` | Classifies several closures one after another in one worker, each as a `CLASSIFY` of its own would be: a refresh's releases, which paid a JVM start each (about 1.1 s) when every release had its own step |
 | `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
 | `COMPACT` | Replaces the dataset with a packed copy of it before it is published ([Compaction](#compaction)) |
 | `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance file beside the dataset ([Governance rules](#governance-rules)) |
@@ -207,6 +209,31 @@ answered `INVALID` with its `reason`.
 
 A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping cannot consume, or
 over an admission limit is rejected with its problems, never classified with something dropped.
+
+`CLASSIFY_ALL` reads its closures from `closuresFile`, a JSON array in the job directory of at
+most 1,000 objects, each a closure (`root` with `graphs` or `graphsFile`) and the `output` graph
+of its entailments; together they may list 100,000 graphs. No output may be a graph any of the
+closures reads, so the result never depends on their order.
+
+```json
+{"protocol": 1, "stepId": "classify", "kind": "CLASSIFY_ALL", "dataset": "working",
+ "timeoutMillis": 600000, "closuresFile": "classify.closures.json"}
+```
+
+Each closure has its own admission, its own engine, its own output graph and its own manifest:
+closure *n*, counted from 0, gets `<step>-<n>.result.json`, in the shape of a `CLASSIFY` manifest,
+as soon as it is classified. The step reads and writes inside one write transaction that commits
+after the last closure, so it writes every output graph or none (a commit forces a dozen files to
+disk, far longer than a small closure takes to classify). It stops at the first closure that is
+inconsistent (the step still `SUCCEEDED`, outcome `INCONSISTENT`) or rejected (`FAILED`, with that
+closure's problems); its own manifest then names that closure in `stoppedAt` and counts the
+closures classified before it, and the dataset is left as it was. A closure the deadline, the heap
+or a kill cut short has no manifest, so the first closure without a `SUCCEEDED` manifest is always
+the one that ended the step. The closures share the step's deadline
+and heap, and `maxNewFacts` bounds what they write together: each may write what the earlier ones
+left of it, up to `maxOutputTriples`. The step file's `protocol` is still 1: a worker without this
+step refuses the file as `INVALID_STEP`, and the image always ships the worker with the extension
+that starts it.
 
 A step file may set any admission limit in `limits`; each must be a positive integer. The limits
 that bound the worker's heap default to a size proportional to it, so raising
@@ -226,7 +253,7 @@ records the limits a step ran with.
 | `maxRules` | 256 rules in one `RULES` bundle, enabled or not | no |
 | `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
 | `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
-| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
+| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs, or the closures of one `CLASSIFY_ALL` to theirs together | no |
 | `maxSpoolBytes` | 4 GiB, the files one `RULES` step keeps outside the dataset at once: a pass's solutions, the delta it reads and the one it writes, and the witnesses of every pass so far | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
@@ -492,8 +519,8 @@ removed, oldest first. Directories without a `job.json` are never removed.
 **What a job does in this release.** A `CHECK` runs `capture`, `load` and `classify`; an
 `EXPLAIN` runs `snapshot` (a governance fact is answered there, see
 [Governance explanations](#governance-explanations)), then `capture`, `load` and `explain`; a
-`REFRESH` runs `capture`, `load`, `classify` (one worker step per release), `rules`, `compact` and
-`publish` ([Refresh](#refresh)). The outcome of a check or explanation is the protocol's answer:
+`REFRESH` runs `capture`, `load`, `classify` (one worker step for all the releases), `rules`,
+`compact` and `publish` ([Refresh](#refresh)). The outcome of a check or explanation is the protocol's answer:
 
 | Result | Job |
 |---|---|
@@ -616,7 +643,7 @@ through the same entry point.
    of another release because the ontology was activated again since the request was made, fails
    the job `INPUT_CHANGED` with the `ontologyId` as subject, and the next refresh sees the new
    release. An `owl:imports` is `MISSING_IMPORT`, as for a `CHECK`, since no other ontology is in
-   the input. Each release is one closure with a `CLASSIFY` step of its own; at most 1,000;
+   the input. Each release is one closure; at most 1,000;
 2. streams the catalog: every quad whose predicate a rule can match, read predicate by predicate
    from TDB2's predicate-first index (a rule with a variable predicate or a negated property set
    reads everything), from every graph but the store's own (`urn:openmetadata:`) and the paths
@@ -632,20 +659,23 @@ revision is older than the current snapshot's (same dataset generation, lower wa
 before capturing with `SUPERSEDED`. A refresh with no releases still runs the rules over the
 catalog.
 
-**Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY` step per closure into
-`urn:openmetadata:entailments:<release id>`; `rules` runs the rules to a fixed point (`maxPasses`
-64) reading the catalog graphs, the closures' graphs and their entailments, writing each rule's
-conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to the file `provenance` in the
-job directory; `compact` replaces the working dataset with a packed copy
-([Compaction](#compaction)); `publish` makes the two the dataset's current snapshot. The closures'
-entailments and the rules' new facts together may not pass `maxDerivedTriples`: each `CLASSIFY` gets
-what is left as `maxOutputTriples`, and `RULES` gets the rest as `maxNewFacts`; the spool of a pass
-gets what the disk quota leaves. A refresh publishes complete results or none: a limit, the
-deadline, the worker's heap, a release outside OWL 2 DL or an inconsistent release
-(`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the protocol's limit names
-(`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as subjects, and the
-previous snapshot stays current. A `SUCCEEDED` refresh has `snapshotId`, and `input.engines` names
-the engines that computed it.
+**Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY_ALL` step, a single
+worker that classifies each closure in turn into `urn:openmetadata:entailments:<release id>`;
+`rules` runs the rules to a fixed point (`maxPasses` 64) reading the catalog graphs, the closures'
+graphs and their entailments, writing each rule's conclusions to `urn:openmetadata:inferred:<rule>`
+and its witnesses to the file `provenance` in the job directory; `compact` replaces the working
+dataset with a packed copy ([Compaction](#compaction)); `publish` makes the two the dataset's
+current snapshot. The closures' entailments and the rules' new facts together may not pass
+`maxDerivedTriples`: each closure gets what the ones before it left, and `RULES` gets the rest as
+`maxNewFacts`; the spool of a pass gets what the disk quota leaves. A refresh publishes complete
+results or none: a limit, the deadline, the worker's heap, a release outside OWL 2 DL or an
+inconsistent release (`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the protocol's
+limit names (`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as subjects,
+and the previous snapshot stays current. A problem with one release has the step `classify-<n>`,
+*n* the release's position in `ontologyReleases` counted from 0, whether the release was
+inconsistent or rejected or the deadline or the heap ran out while it was classified;
+`classify-<n>.result.json` in the job directory is that release's result. A `SUCCEEDED` refresh has
+`snapshotId`, and `input.engines` names the engines that computed it.
 
 ### Snapshots
 
@@ -675,8 +705,9 @@ every publication. The database holds what queries read and nothing else.
 - **Isolation.** Snapshots are never registered as Fuseki datasets, and inferred results never go
   to the serving dataset: OpenMetadata's phase 0 graphs `{base}graph/inferred/*` are not read by a
   refresh and are OpenMetadata's to remove after cutover. The Fuseki JVM opens a snapshot only after
-  the worker that wrote it has exited, lazily and with TDB2's small store parameters, so its caches
-  stay small in the server heap.
+  the worker that wrote it has exited, lazily and with TDB2's small store parameters but for the
+  cache of decoded nodes, which holds `OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE` entries: by
+  default about 29 MiB a snapshot in a 4 GiB heap, under a hundredth of it.
 - **Format.** `snapshot.json` names the snapshot's layout in `store.format`, now 2. Format 1 kept
   the witnesses in the graph `urn:openmetadata:provenance` of the database, which every query had
   to be kept from. A snapshot of any other format is removed at startup like one that is not
@@ -760,6 +791,20 @@ The column descriptions no rule reads were never captured. What bounds each figu
 
 A snapshot query for the 4,200 PII columns of the larger catalog took 59 ms.
 
+The table was measured before one worker classified every release and before the worker's node caches were sized from its heap; those changes were measured on their own:
+
+On the larger catalog a snapshot query for the 4,200 PII columns took 57 ms the first time and
+11 ms repeated. A full page of 10,000 two-column rows, 11,000 nodes, took 88 to 107 ms the first
+time and, repeated, 29 to 36 ms with the 131,072-entry node cache a 4 GiB Fuseki heap gets
+(`-Dreasoning.performance.snapshotNodeCache=`) against 50 to 51 ms with 10,000 entries.
+
+Releases cost about 12 ms each after the worker's start, since one worker classifies them all and
+commits once: with 1,000 tables and releases of 100 classes each
+(`-Dreasoning.performance.releases=` and `-Dreasoning.performance.terms=`), `classify` took 1.8
+to 2.1 s for 50 releases, 3.5 to 3.8 s for 200 and 12.6 s for 1,000. With a worker per release it
+took 58 to 60 s for 50 and 219 to 230 s for 200, 1.1 s a release, nearly all of it starting a JVM
+and opening the dataset.
+
 ### Memory budget
 
 A worker shares the container's memory limit with Fuseki. To keep a worker's out-of-memory a Java
@@ -780,6 +825,14 @@ container memory limit >= (H_f + O_f + H_w + O_w + C_min) / 0.9
 
 The limit is read from cgroup v2 `memory.max`, else cgroup v1, else physical memory when the
 container has no limit.
+
+Inside its heap the worker sizes TDB2's node caches, which TDB2 bounds by entries: one decoded
+node for every 4 KiB of heap, from 10,000 to 1,000,000 (262,144 in a 1 GiB heap, 524,288 in the
+default 2 GiB), and a quarter as many in the node-to-id cache, to 200,000. A cached node measured
+about 220 bytes on a catalog, so the caches are about a twentieth of the heap; a long literal
+costs its length. `LOAD`, `RULES` and `COMPACT` open the working dataset that way. The steps that
+run an OWL engine (`CLASSIFY`, `CLASSIFY_ALL`, `EXPLAIN`) keep 10,000 entries, since their
+admission limits were measured with them and the engine needs the heap.
 
 `O_f` and `O_w` were measured with Native Memory Tracking (committed memory outside the heap) on
 Apple M4 Max hardware, in a `linux/arm64` container limited to 4 CPUs and 16 GiB:

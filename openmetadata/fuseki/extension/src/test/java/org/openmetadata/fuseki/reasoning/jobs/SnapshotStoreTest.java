@@ -40,6 +40,7 @@ import org.apache.jena.riot.RDFParser;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.system.Txn;
 import org.apache.jena.tdb2.DatabaseMgr;
+import org.apache.jena.tdb2.params.StoreParams;
 import org.apache.jena.tdb2.sys.TDBInternal;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -53,6 +54,7 @@ import org.junit.jupiter.api.io.TempDir;
 class SnapshotStoreTest {
   private static final String DATASET = "openmetadata";
   private static final String GENERATION = "9d72cf3b-3657-4ee3-809c-5bc70b9308bd";
+  private static final int NODE_CACHE = 25_000;
 
   @TempDir Path root;
   private SnapshotStore store;
@@ -296,8 +298,10 @@ class SnapshotStoreTest {
         new SnapshotStore(
             root,
             10_000,
+            NODE_CACHE,
             location -> {
-              final DatasetGraph database = SnapshotStore.connect(location);
+              final DatasetGraph database =
+                  SnapshotStore.connect(location, StoreParams.getSmallStoreParams());
               if (opened.incrementAndGet() == 2) {
                 opening.countDown();
                 await(finish);
@@ -359,8 +363,22 @@ class SnapshotStoreTest {
     }
   }
 
+  @Test
+  void aSnapshotIsOpenedWithTheNodeCacheTheStoreWasGiven() throws Exception {
+    store = open();
+    store.publish(DATASET, 0, candidate(10, 1), working("one", "urn:x:a"), null, 1L);
+    try (SnapshotStore.Lease lease = store.lease(DATASET).orElseThrow()) {
+      final StoreParams params = TDBInternal.getDatasetGraphTDB(lease.database()).getStoreParams();
+      assertEquals(NODE_CACHE, params.getNodeId2NodeCacheSize());
+      assertEquals(
+          StoreParams.getSmallStoreParams().getNode2NodeIdCacheSize(),
+          params.getNode2NodeIdCacheSize(),
+          "the rest stays TDB2's small store parameters");
+    }
+  }
+
   private SnapshotStore open() throws Exception {
-    final SnapshotStore opened = new SnapshotStore(root, 1_000);
+    final SnapshotStore opened = new SnapshotStore(root, 1_000, NODE_CACHE);
     opened.open();
     return opened;
   }

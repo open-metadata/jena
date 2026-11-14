@@ -63,7 +63,7 @@ import org.apache.jena.sparql.core.Quad;
  * job's deadline and cancellation. A read transaction never blocks Fuseki's writer.
  */
 public final class RefreshCapture {
-  /** Releases one refresh classifies, each in a worker step of its own. */
+  /** Releases one refresh classifies: the closures of its one CLASSIFY_ALL worker step. */
   public static final int MAX_CLOSURES = 1_000;
 
   /** Graphs the catalog part of a capture may span; OpenMetadata writes it into a few. */
@@ -98,7 +98,7 @@ public final class RefreshCapture {
   /** One release the request lists. */
   public record Release(String ontologyId, String releaseId, String contentDigest) {}
 
-  /** One captured release: what its classify step reads and where its entailments go. */
+  /** One captured release: what classifying it reads and where its entailments go. */
   public record Closure(
       int index,
       String ontologyId,

@@ -57,7 +57,7 @@ public final class ExplainStep implements Step {
   @Override
   public StepResult run(final StepFile step, final Watchdog watchdog) throws Exception {
     final ClosureInput input;
-    final DatasetGraph dataset = WorkingDataset.open(step.dataset());
+    final DatasetGraph dataset = WorkingDataset.openForReasoner(step.dataset());
     try {
       input = ClosureInput.read(dataset, step);
     } finally {

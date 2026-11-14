@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.jena.atlas.json.JSON;
+import org.openmetadata.reasoner.owl.ClassifyAllStep;
 import org.openmetadata.reasoner.owl.ClassifyStep;
 import org.openmetadata.reasoner.owl.ExplainStep;
 import org.openmetadata.reasoner.rules.RulesStep;
@@ -138,10 +139,31 @@ public final class StepRunner {
     return switch (kind) {
       case LOAD -> new LoadStep();
       case CLASSIFY -> new ClassifyStep();
+      case CLASSIFY_ALL -> new ClassifyAllStep();
       case EXPLAIN -> new ExplainStep();
       case COMPACT -> new CompactStep();
       case RULES -> new RulesStep();
     };
+  }
+
+  /**
+   * Writes the result manifest of a part of the running step that a step of its own would otherwise
+   * have run, such as one closure of a CLASSIFY_ALL step: where that step's manifest would be, with
+   * the details every manifest has. The file is replaced atomically but not forced to disk: its
+   * reader is the caller of the running step, in the same container.
+   */
+  public static void writePartResult(
+      final StepFile part, final StepResult result, final long startNanos, final Watchdog watchdog)
+      throws IOException {
+    result.detail("limits", part.limits().toJson());
+    result.detail("worker", watchdog.workerJson());
+    final long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    final Path path = StepFile.resultPath(part.path());
+    final Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+    Files.writeString(
+        temporary, JSON.toString(result.toJson(part.stepId(), part.kind().name(), elapsed)) + "\n");
+    Files.move(
+        temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
   }
 
   /** The report of a step that produced no answer: its outcome and the distinct problem codes. */

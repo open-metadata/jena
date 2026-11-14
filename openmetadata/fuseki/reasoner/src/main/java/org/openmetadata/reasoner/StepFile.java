@@ -53,6 +53,7 @@ public record StepFile(
     Path checks,
     Explain explain,
     Governance governance,
+    List<BatchClosure> closures,
     Limits limits) {
 
   public static final int PROTOCOL = 1;
@@ -72,6 +73,7 @@ public record StepFile(
           "output",
           "checks",
           "explain",
+          "closuresFile",
           "read",
           "readFile",
           "rules",
@@ -109,6 +111,17 @@ public record StepFile(
   public static final int MAX_CLOSURE_GRAPHS = 10_000;
 
   private static final long MAX_GRAPHS_FILE_BYTES = 64L << 20;
+
+  /**
+   * One closure of a CLASSIFY_ALL step: what a CLASSIFY step of its own would name, and the step id
+   * its result manifest is written under, {@code <step id>-<position>}.
+   */
+  public record BatchClosure(String stepId, Closure closure, String outputGraph) {}
+
+  /** Closures one CLASSIFY_ALL step classifies: the releases the extension's refresh admits. */
+  public static final int MAX_BATCH_CLOSURES = 1_000;
+
+  private static final long MAX_CLOSURES_FILE_BYTES = 16L << 20;
 
   /**
    * What to justify: one entailed axiom, in OWL 2 functional syntax, or the inconsistency; and how
@@ -184,8 +197,12 @@ public record StepFile(
     Path checks = null;
     Explain explain = null;
     Governance governance = null;
+    List<BatchClosure> closures = List.of();
     if (kind != StepKind.RULES) {
       rejectKeys(json, kind, "read", "readFile", "rules", "provenance");
+    }
+    if (kind != StepKind.CLASSIFY_ALL) {
+      rejectKeys(json, kind, "closuresFile");
     }
     switch (kind) {
       case LOAD -> {
@@ -226,6 +243,18 @@ public record StepFile(
           explain = explain(json.get("explain"));
         }
       }
+      case CLASSIFY_ALL -> {
+        // Each closure names its own output; a report would repeat every output graph.
+        rejectKeys(json, kind, "inputs", "closure", "output", "checks", "explain", "report");
+        if (json.hasKey("engine")) {
+          engine = enumValue(EngineChoice.class, requiredString(json, "engine"), "engine");
+        }
+        closures =
+            closures(
+                insideJob(jobDirectory, requiredString(json, "closuresFile"), "closuresFile"),
+                stepId,
+                jobDirectory);
+      }
       case COMPACT ->
           rejectKeys(json, kind, "inputs", "closure", "engine", "output", "checks", "explain");
       case RULES -> {
@@ -251,7 +280,33 @@ public record StepFile(
         checks,
         explain,
         governance,
+        closures,
         limits);
+  }
+
+  /**
+   * One closure of this CLASSIFY_ALL step as the CLASSIFY step it would otherwise have had: the
+   * same dataset, engine choice and limits, the closure's own id and output graph, and what the
+   * closures before it left of the output budget.
+   */
+  public StepFile forClosure(final BatchClosure one, final long maxOutputTriples) {
+    return new StepFile(
+        jobDirectory.resolve(one.stepId() + ".json"),
+        jobDirectory,
+        one.stepId(),
+        StepKind.CLASSIFY,
+        dataset,
+        timeoutMillis,
+        false,
+        List.of(),
+        one.closure(),
+        engine,
+        one.outputGraph(),
+        null,
+        null,
+        null,
+        List.of(),
+        limits.withMaxOutputTriples(maxOutputTriples));
   }
 
   /** Graphs a RULES step's read file may list: a refresh's catalog graphs and closure graphs. */
@@ -480,6 +535,92 @@ public record StepFile(
       }
     }
     return new Closure(root, List.copyOf(names), false);
+  }
+
+  /**
+   * The closures of a CLASSIFY_ALL step, from a JSON array in the job directory: a refresh may
+   * classify a thousand releases, whose IRIs would not all fit a step file. Every closure is
+   * validated before any is classified. An output graph may be no closure's input, or a closure's
+   * entailments would depend on the order the closures ran in.
+   */
+  private static List<BatchClosure> closures(
+      final Path file, final String stepId, final Path jobDirectory) throws InvalidStepException {
+    final JsonValue parsed;
+    try {
+      if (!Files.isRegularFile(file)) {
+        throw new InvalidStepException("Closures file " + file.getFileName() + " is missing");
+      }
+      if (Files.size(file) > MAX_CLOSURES_FILE_BYTES) {
+        throw new InvalidStepException(
+            "Closures file "
+                + file.getFileName()
+                + " is larger than "
+                + MAX_CLOSURES_FILE_BYTES
+                + " bytes");
+      }
+      try (InputStream in = Files.newInputStream(file)) {
+        parsed = JSON.parseAny(in);
+      }
+    } catch (final IOException | JsonException e) {
+      throw new InvalidStepException("Cannot read closures file: " + e.getMessage());
+    }
+    if (!parsed.isArray() || parsed.getAsArray().isEmpty()) {
+      throw new InvalidStepException("closuresFile must hold a non-empty array of closures");
+    }
+    if (parsed.getAsArray().size() > MAX_BATCH_CLOSURES) {
+      throw new InvalidStepException(
+          "closuresFile lists "
+              + parsed.getAsArray().size()
+              + " closures, more than "
+              + MAX_BATCH_CLOSURES);
+    }
+    final List<BatchClosure> closures = new ArrayList<>();
+    final Set<String> outputs = new LinkedHashSet<>();
+    long graphs = 0;
+    for (final JsonValue value : parsed.getAsArray()) {
+      if (!value.isObject()) {
+        throw new InvalidStepException("closuresFile must contain objects");
+      }
+      final String id = stepId + "-" + closures.size();
+      if (!STEP_ID.matcher(id).matches()) {
+        throw new InvalidStepException("stepId is too long to name its closures' results");
+      }
+      final JsonObject closureJson = new JsonObject();
+      String output = null;
+      for (final String key : value.getAsObject().keys()) {
+        if (key.equals("output")) {
+          output = iri(requiredString(value.getAsObject(), "output"), id + " output");
+        } else {
+          closureJson.put(key, value.getAsObject().get(key));
+        }
+      }
+      if (output == null) {
+        throw new InvalidStepException("closure " + id + " needs an output graph");
+      }
+      if (!outputs.add(output)) {
+        throw new InvalidStepException("closuresFile writes " + output + " twice");
+      }
+      final Closure closure = closure(closureJson, jobDirectory);
+      if (closure.allGraphs()) {
+        // With allGraphs the output graphs of earlier closures would join later ones.
+        throw new InvalidStepException("closure.allGraphs is not allowed in CLASSIFY_ALL");
+      }
+      graphs += closure.graphs().size();
+      if (graphs > MAX_READ_GRAPHS) {
+        throw new InvalidStepException(
+            "closuresFile lists more than " + MAX_READ_GRAPHS + " graphs in all");
+      }
+      closures.add(new BatchClosure(id, closure, output));
+    }
+    for (final BatchClosure closure : closures) {
+      for (final String graph : closure.closure().graphs()) {
+        if (outputs.contains(graph)) {
+          throw new InvalidStepException(
+              "output " + graph + " is one of the graphs of closure " + closure.stepId());
+        }
+      }
+    }
+    return List.copyOf(closures);
   }
 
   /** The graphs a graphs file lists, one IRI per line; blank lines are ignored. */

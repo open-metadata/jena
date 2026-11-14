@@ -134,7 +134,8 @@ public final class Operations implements AutoCloseable {
     this.snapshots =
         new SnapshotStore(
             settings.reasoningRoot(),
-            TimeUnit.SECONDS.toMillis(jobSettings.maxQuerySeconds()) + LEASE_MARGIN_MILLIS);
+            TimeUnit.SECONDS.toMillis(jobSettings.maxQuerySeconds()) + LEASE_MARGIN_MILLIS,
+            jobSettings.snapshotNodeCache());
     this.ruleCode = settings.enabled() ? RuleCode.load(reasoner) : Optional.empty();
     this.queries = new SnapshotQueries(snapshots, jobSettings);
   }

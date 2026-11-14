@@ -84,6 +84,7 @@ public final class SnapshotStore implements AutoCloseable {
 
   private final Path root;
   private final long leaseMillis;
+  private final StoreParams storeParams;
   private final Object lock = new Object();
   private final Connector connector;
 
@@ -254,9 +255,10 @@ public final class SnapshotStore implements AutoCloseable {
   /**
    * @param reasoningRoot the reasoning root; snapshots live in its {@value #DIRECTORY}
    * @param leaseMillis how long a lease can last: the query deadline and a margin
+   * @param nodeCache nodes each open snapshot keeps decoded for its queries' answers
    */
-  public SnapshotStore(final Path reasoningRoot, final long leaseMillis) {
-    this(reasoningRoot, leaseMillis, SnapshotStore::connect);
+  public SnapshotStore(final Path reasoningRoot, final long leaseMillis, final int nodeCache) {
+    this(reasoningRoot, leaseMillis, nodeCache, null);
   }
 
   /** Opens a snapshot's TDB2 database; a seam for tests of what runs while it is slow. */
@@ -265,10 +267,19 @@ public final class SnapshotStore implements AutoCloseable {
     DatasetGraph connect(Path location);
   }
 
-  SnapshotStore(final Path reasoningRoot, final long leaseMillis, final Connector connector) {
+  SnapshotStore(
+      final Path reasoningRoot,
+      final long leaseMillis,
+      final int nodeCache,
+      final Connector connector) {
     this.root = reasoningRoot.resolve(DIRECTORY);
     this.leaseMillis = leaseMillis;
-    this.connector = connector;
+    // Set explicitly: only an explicit value overrides the one the worker recorded in the dataset.
+    this.storeParams =
+        StoreParams.builder("snapshot", StoreParams.getSmallStoreParams())
+            .nodeId2NodeCacheSize(nodeCache)
+            .build();
+    this.connector = connector == null ? location -> connect(location, storeParams) : connector;
   }
 
   /**
@@ -569,9 +580,8 @@ public final class SnapshotStore implements AutoCloseable {
     }
   }
 
-  static DatasetGraph connect(final Path location) {
-    return DatabaseMgr.connectDatasetGraph(
-        Location.create(location), StoreParams.getSmallStoreParams());
+  static DatasetGraph connect(final Path location, final StoreParams params) {
+    return DatabaseMgr.connectDatasetGraph(Location.create(location), params);
   }
 
   /** Closes and deletes a snapshot nobody reads any more, which no one else can reach. */

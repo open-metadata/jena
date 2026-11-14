@@ -53,10 +53,12 @@ import org.openmetadata.fuseki.reasoning.ReasoningSettings;
  * Measures a REFRESH of a catalog-sized serving dataset: 5,000 tables (or {@code
  * -Dreasoning.performance.tables}) of 10 columns with lineage from each table to the next, tags on
  * schemas, tables and source columns, and a description on every column that no rule reads; and one
- * active release of 1,000 classes in its ontology's graph. A reader and a writer use the serving
- * dataset for ten seconds before the refresh and all through it; their slowest operations in each
- * period are recorded. Run with {@code -Dreasoning.performance=true}; it writes
- * target/refresh-performance.json.
+ * active release (or {@code -Dreasoning.performance.releases}) of 1,000 classes (or {@code
+ * -Dreasoning.performance.terms}), each in its ontology's graph. A reader and a writer use the
+ * serving dataset for ten seconds before the refresh and all through it; their slowest operations
+ * in each period are recorded. Run with {@code -Dreasoning.performance=true}; it writes
+ * target/refresh-performance-<tables>.json, with {@code -r<releases>x<terms>} before the extension
+ * for any other release input.
  */
 @EnabledIfSystemProperty(named = "reasoning.performance", matches = "true")
 class RefreshPerformanceIT {
@@ -66,13 +68,14 @@ class RefreshPerformanceIT {
   private static final String OM = "https://open-metadata.org/ontology/";
   private static final String C = "https://open-metadata.org/catalog/";
   private static final String KNOWLEDGE = BASE + "graph/knowledge";
-  private static final String ONTOLOGY_IRI = BASE + "ontology/business";
-  private static final String ONTOLOGY_ID = "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b";
-  private static final String RELEASE_ID = "8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d";
   private static final int TABLES = Integer.getInteger("reasoning.performance.tables", 5_000);
+  private static final int RELEASES = Integer.getInteger("reasoning.performance.releases", 1);
+  private static final int TERMS = Integer.getInteger("reasoning.performance.terms", 1_000);
+  private static final String SNAPSHOT_NODE_CACHE =
+      System.getProperty("reasoning.performance.snapshotNodeCache");
+  private static final int QUERY_REPEATS = 5;
   private static final long BASELINE_MILLIS = 10_000;
   private static final int COLUMNS = 10;
-  private static final int TERMS = 1_000;
 
   @TempDir Path root;
 
@@ -92,7 +95,12 @@ class RefreshPerformanceIT {
 
     final ImageLayout image = ImageLayout.create(root.resolve("image"), FUSEKI_SERVER, REASONER);
     final ReasoningSettings settings = image.settings("1g");
-    final Operations operations = new Operations(settings, JobSettings.fromEnvironment(Map.of()));
+    final JobSettings jobSettings =
+        JobSettings.fromEnvironment(
+            SNAPSHOT_NODE_CACHE == null
+                ? Map.of()
+                : Map.of(JobSettings.SNAPSHOT_NODE_CACHE, SNAPSHOT_NODE_CACHE));
+    final Operations operations = new Operations(settings, jobSettings);
     final JobService service =
         new JobService(
             operations,
@@ -168,16 +176,15 @@ class RefreshPerformanceIT {
           JSON.parse(
               "{\"datasetGeneration\": \"9d72cf3b-3657-4ee3-809c-5bc70b9308bd\","
                   + " \"liveWriteWatermark\": 1}"));
-      request.put(
-          "ontologyReleases",
-          JSON.parseAny(
-              "[{\"ontologyId\": \""
-                  + ONTOLOGY_ID
-                  + "\", \"releaseId\": \""
-                  + RELEASE_ID
-                  + "\", \"contentDigest\": \""
-                  + "0".repeat(64)
-                  + "\"}]"));
+      final JsonArray releases = new JsonArray();
+      for (int r = 0; r < RELEASES; r++) {
+        final JsonObject release = new JsonObject();
+        release.put("ontologyId", id("ontology", r));
+        release.put("releaseId", id("release", r));
+        release.put("contentDigest", "0".repeat(64));
+        releases.add(release);
+      }
+      request.put("ontologyReleases", releases);
       request.put("rules", rules);
       request.put("ruleBundleDigest", Bundles.digest(rules));
       final long start = System.nanoTime();
@@ -215,6 +222,8 @@ class RefreshPerformanceIT {
       final Path directory = settings.reasoningRoot().resolve("jobs").resolve(id.toString());
       final JsonObject report = new JsonObject();
       report.put("servingTriples", loaded);
+      report.put("releases", RELEASES);
+      report.put("termsPerRelease", TERMS);
       report.put("jobMillis", jobMillis);
       final JsonObject steps = new JsonObject();
       stepMillis.forEach(steps::put);
@@ -224,14 +233,22 @@ class RefreshPerformanceIT {
       capture.remove("closures");
       report.put("capture", capture);
       final JsonObject workers = new JsonObject();
-      for (final String name : List.of("load", "classify-0", "rules", "compact")) {
+      for (final String name : List.of("load", "classify", "rules", "compact")) {
         final JsonObject manifest = JSON.read(directory.resolve(name + ".result.json").toString());
         final JsonObject worker = manifest.getObj("worker");
         final JsonObject entry = new JsonObject();
         entry.put("heapPeakAfterGcBytes", worker.get("heapPeakAfterGcBytes"));
         entry.put("heapMaxBytes", worker.get("heapMaxBytes"));
         for (final String key :
-            List.of("datasetBytes", "quads", "passes", "newFacts", "bytesBefore", "bytesAfter")) {
+            List.of(
+                "datasetBytes",
+                "quads",
+                "closures",
+                "outputTriples",
+                "passes",
+                "newFacts",
+                "bytesBefore",
+                "bytesAfter")) {
           if (manifest.hasKey(key)) {
             entry.put(key, manifest.get(key));
           }
@@ -252,28 +269,30 @@ class RefreshPerformanceIT {
       report.put("servingReads", reads.get());
       report.put("slowestServingReadMillis", TimeUnit.NANOSECONDS.toMillis(slowestRead.get()));
       report.put("slowestServingWriteMillis", TimeUnit.NANOSECONDS.toMillis(slowestWrite.get()));
+      report.put("snapshotNodeCache", jobSettings.snapshotNodeCache());
+      final String pii = "SELECT ?c WHERE { ?c <" + OM + "hasTag> <" + C + "pii> }";
       final long queryStart = System.nanoTime();
-      final JsonObject answer =
-          JSON.parse(
-              new String(
-                  operations
-                      .queries()
-                      .run(
-                          "openmetadata",
-                          ("{\"query\": \"SELECT ?c WHERE { ?c <"
-                                  + OM
-                                  + "hasTag> <"
-                                  + C
-                                  + "pii> }\"}")
-                              .getBytes(StandardCharsets.UTF_8))
-                      .body(),
-                  StandardCharsets.UTF_8));
+      final JsonObject answer = query(operations, pii);
       report.put(
           "snapshotQueryMillis", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - queryStart));
       report.put("snapshotQueryRows", answer.get("rows"));
       report.put("snapshotQueryTruncated", answer.get("truncated"));
+      report.put("snapshotQueryRepeatMicros", fastestRepeat(operations, pii));
+      // A full page of two columns: more nodes than TDB2's small cache of 10,000 holds.
+      final String page = "SELECT ?t ?c WHERE { ?t <" + OM + "hasColumn> ?c }";
+      final long pageStart = System.nanoTime();
+      final JsonObject pageAnswer = query(operations, page);
+      report.put(
+          "snapshotPageMillis", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pageStart));
+      report.put("snapshotPageRows", pageAnswer.get("rows"));
+      report.put("snapshotPageRepeatMicros", fastestRepeat(operations, page));
       Files.writeString(
-          Path.of("target", "refresh-performance-" + TABLES + ".json"),
+          Path.of(
+              "target",
+              "refresh-performance-"
+                  + TABLES
+                  + (RELEASES == 1 && TERMS == 1_000 ? "" : "-r" + RELEASES + "x" + TERMS)
+                  + ".json"),
           JSON.toString(report) + "\n");
       System.out.println(JSON.toString(report));
     } finally {
@@ -281,6 +300,31 @@ class RefreshPerformanceIT {
       service.close();
       TDBInternal.expel(serving);
     }
+  }
+
+  private static JsonObject query(final Operations operations, final String sparql)
+      throws Exception {
+    final JsonObject request = new JsonObject();
+    request.put("query", sparql);
+    return JSON.parse(
+        new String(
+            operations
+                .queries()
+                .run("openmetadata", JSON.toString(request).getBytes(StandardCharsets.UTF_8))
+                .body(),
+            StandardCharsets.UTF_8));
+  }
+
+  /** The fastest of a few more runs of a query the snapshot has already answered, in µs. */
+  private static long fastestRepeat(final Operations operations, final String sparql)
+      throws Exception {
+    long fastest = Long.MAX_VALUE;
+    for (int i = 0; i < QUERY_REPEATS; i++) {
+      final long start = System.nanoTime();
+      query(operations, sparql);
+      fastest = Math.min(fastest, System.nanoTime() - start);
+    }
+    return TimeUnit.NANOSECONDS.toMicros(fastest);
   }
 
   /** Writes and bulk-loads the catalog and the term graphs; returns the triple count. */
@@ -337,38 +381,8 @@ class RefreshPerformanceIT {
           }
         }
       }
-      final String graph = " <" + Capture.ONTOLOGY_GRAPH_PREFIX + ONTOLOGY_ID + "> .\n";
-      out.write(
-          "<"
-              + ONTOLOGY_IRI
-              + "> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
-              + " <http://www.w3.org/2002/07/owl#Ontology>"
-              + graph);
-      out.write(
-          "<"
-              + ONTOLOGY_IRI
-              + "> <http://www.w3.org/2002/07/owl#versionIRI> <"
-              + Capture.RELEASE_IRI_PREFIX
-              + RELEASE_ID
-              + ">"
-              + graph);
-      triples += 2;
-      for (int t = 0; t < TERMS; t++) {
-        final String term = "<" + BASE + "business#Term" + t + ">";
-        out.write(
-            term
-                + " <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
-                + " <http://www.w3.org/2002/07/owl#Class>"
-                + graph);
-        out.write(
-            term
-                + " <http://www.w3.org/2000/01/rdf-schema#subClassOf> <"
-                + BASE
-                + "business#Term"
-                + (t / 10)
-                + ">"
-                + graph);
-        triples += 2;
+      for (int r = 0; r < RELEASES; r++) {
+        triples += release(out, r);
       }
     }
     final DatasetGraph loading = DatabaseMgr.connectDatasetGraph(Location.create(location));
@@ -379,6 +393,46 @@ class RefreshPerformanceIT {
     TDBInternal.expel(loading);
     Files.delete(nquads);
     return triples;
+  }
+
+  /** Writes one release, a hierarchy of classes under its header; returns its triple count. */
+  private static long release(final BufferedWriter out, final int index) throws Exception {
+    final String suffix = index == 0 ? "" : "-" + index;
+    final String ontology = "<" + BASE + "ontology/business" + suffix + ">";
+    final String terms = BASE + "business" + suffix + "#Term";
+    final String graph = " <" + Capture.ONTOLOGY_GRAPH_PREFIX + id("ontology", index) + "> .\n";
+    out.write(
+        ontology
+            + " <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
+            + " <http://www.w3.org/2002/07/owl#Ontology>"
+            + graph);
+    out.write(
+        ontology
+            + " <http://www.w3.org/2002/07/owl#versionIRI> <"
+            + Capture.RELEASE_IRI_PREFIX
+            + id("release", index)
+            + ">"
+            + graph);
+    for (int t = 0; t < TERMS; t++) {
+      final String term = "<" + terms + t + ">";
+      out.write(
+          term
+              + " <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
+              + " <http://www.w3.org/2002/07/owl#Class>"
+              + graph);
+      out.write(
+          term
+              + " <http://www.w3.org/2000/01/rdf-schema#subClassOf> <"
+              + terms
+              + (t / 10)
+              + ">"
+              + graph);
+    }
+    return 2 + 2L * TERMS;
+  }
+
+  private static String id(final String kind, final int index) {
+    return UUID.nameUUIDFromBytes((kind + "-" + index).getBytes(StandardCharsets.UTF_8)).toString();
   }
 
   private static Thread loop(

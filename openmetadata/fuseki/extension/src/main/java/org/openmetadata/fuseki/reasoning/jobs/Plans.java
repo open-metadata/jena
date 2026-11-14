@@ -46,11 +46,12 @@ import org.slf4j.LoggerFactory;
  * with a governance rule is answered from that snapshot's witnesses instead.
  *
  * <p>A REFRESH captures every active release from the serving dataset and the catalog triples the
- * rules read; loads them; classifies each release into its entailment graph; runs the request's
- * rules to a fixed point; compacts; and publishes the working dataset as the dataset's new snapshot
- * ({@link SnapshotStore}). Every step is bounded by the job's deadline and the disk quota, the
- * classify and rules steps together by maxDerivedTriples, and the rules by maxRulePasses; a refresh
- * that reaches any of them, or meets an inconsistent release, fails and publishes nothing.
+ * rules read; loads them; classifies each release into its entailment graph, all in one worker;
+ * runs the request's rules to a fixed point; compacts; and publishes the working dataset as the
+ * dataset's new snapshot ({@link SnapshotStore}). Every step is bounded by the job's deadline and
+ * the disk quota, the classify and rules steps together by maxDerivedTriples, and the rules by
+ * maxRulePasses; a refresh that reaches any of them, or meets an inconsistent release, fails and
+ * publishes nothing.
  *
  * <p>A job has {@link JobSettings#maxJobSeconds()} from its start: each worker step gets what is
  * left as its deadline. A check that reaches a limit or its time answers INCOMPLETE with the
@@ -63,6 +64,8 @@ final class Plans {
   static final String RESULT = "result.json";
   static final String WORKING = "working";
   static final String CHECK_FILE = "check.ofn";
+  static final String CLASSIFY = "classify";
+  static final String CLASSIFY_CLOSURES = "classify.closures.json";
 
   /** Rule problems a refused bundle reports in its message, the first in bundle order. */
   static final int MAX_REPORTED_RULE_PROBLEMS = 10;
@@ -383,62 +386,67 @@ final class Plans {
   }
 
   /**
-   * Classifies each captured closure into its entailment graph, one worker step per closure, in the
-   * shared working dataset. An inconsistent closure fails the refresh: its consequences would be
-   * arbitrary, so nothing is published.
+   * Classifies each captured closure into its entailment graph, in one worker step over the shared
+   * working dataset: starting a worker per closure cost about a second each. The worker classifies
+   * the closures in turn and writes each one's result as {@code classify-<n>.result.json} when it
+   * is done, so the first closure without a completed result is the one that ended the step, and a
+   * problem names that closure's step and ontology as it did when each had a step of its own. An
+   * inconsistent closure fails the refresh: its consequences would be arbitrary, so nothing is
+   * published.
    */
   private static Stage classifyClosures(final Operations operations, final long deadline) {
+    final WorkerStage worker =
+        new WorkerStage(
+            CLASSIFY,
+            context -> {
+              final JsonObject step = step("CLASSIFY_ALL", deadline);
+              step.put("closuresFile", CLASSIFY_CLOSURES);
+              final JsonObject limits = limits(operations, context);
+              // What the closures may write together; the worker gives each what is left of it.
+              limits.put("maxNewFacts", operations.workerLimits().maxNewFacts());
+              step.put("limits", limits);
+              return step;
+            });
     return stage(
-        "classify",
+        CLASSIFY,
         context -> {
-          final JsonObject capture = json(context, CAPTURE_RESULT);
-          final long maxDerived = operations.workerLimits().maxNewFacts();
-          long derived = 0;
-          final JsonArray outcomes = new JsonArray();
-          final JsonArray engines = new JsonArray();
-          for (final JsonValue value : capture.get("closures").getAsArray()) {
-            final RefreshCapture.Closure closure =
-                RefreshCapture.Closure.fromJson(value.getAsObject());
-            final String name = "classify-" + closure.index();
+          final List<RefreshCapture.Closure> closures = new ArrayList<>();
+          for (final JsonValue value : json(context, CAPTURE_RESULT).get("closures").getAsArray()) {
+            closures.add(RefreshCapture.Closure.fromJson(value.getAsObject()));
+          }
+          Stage.Result ran = Stage.Result.completed();
+          if (!closures.isEmpty()) {
             if (context.cancelled().getAsBoolean()) {
               return Stage.Result.stopped();
             }
             if (System.nanoTime() - deadline >= 0) {
-              return Stage.Result.failed(outOfTime().atStep(name));
+              return Stage.Result.failed(outOfTime().atStep(closureStep(0)));
             }
-            final long left = maxDerived - derived;
-            final WorkerStage worker =
-                new WorkerStage(
-                    name,
-                    ctx -> {
-                      final JsonObject step = step("CLASSIFY", deadline);
-                      final JsonObject closureJson = new JsonObject();
-                      closureJson.put("root", closure.ontologyIri());
-                      closureJson.put("graphsFile", closure.graphsFile());
-                      step.put("closure", closureJson);
-                      step.put("output", closure.entailments());
-                      final JsonObject limits = limits(operations, ctx);
-                      limits.put(
-                          "maxOutputTriples",
-                          Math.max(
-                              1, Math.min(operations.workerLimits().maxOutputTriples(), left)));
-                      step.put("limits", limits);
-                      return step;
-                    });
-            final Stage.Result ran = worker.run(context);
+            final JsonArray inputs = new JsonArray();
+            for (final RefreshCapture.Closure closure : closures) {
+              final JsonObject input = new JsonObject();
+              input.put("root", closure.ontologyIri());
+              input.put("graphsFile", closure.graphsFile());
+              input.put("output", closure.entailments());
+              inputs.add(input);
+            }
+            AtomicFiles.write(
+                context.directory().resolve(CLASSIFY_CLOSURES), JSON.toString(inputs));
+            ran = worker.run(context);
             if (ran.cancelled()) {
               return ran;
             }
-            if (ran.problem() != null) {
-              Problem problem = ran.problem();
-              if (problem.code() == Problem.Code.LIMIT_EXCEEDED && problem.subject() == null) {
-                problem = problem.withSubject("maxDerivedTriples");
-              } else if (problem.subject() == null) {
-                problem = problem.withSubject(closure.ontologyIri());
-              }
-              return Stage.Result.failed(problem);
+          }
+          long derived = 0;
+          final JsonArray outcomes = new JsonArray();
+          final JsonArray engines = new JsonArray();
+          for (int i = 0; i < closures.size(); i++) {
+            final RefreshCapture.Closure closure = closures.get(i);
+            final String name = closureStep(i);
+            final JsonObject manifest = completed(context, name);
+            if (manifest == null) {
+              return Stage.Result.failed(unfinished(ran.problem(), closure).atStep(name));
             }
-            final JsonObject manifest = manifest(context, name);
             final JsonObject entailments = manifest.getObj("entailments");
             if (!entailments.getBoolean("consistent")) {
               return Stage.Result.failed(
@@ -464,6 +472,11 @@ final class Plans {
             outcomes.add(outcome);
             addEngine(engines, manifest);
           }
+          if (ran.problem() != null) {
+            // Every closure was classified and the step still did not complete: its deadline
+            // passed as the last one ended.
+            return Stage.Result.failed(ran.problem());
+          }
           final JsonObject classified = new JsonObject();
           classified.put("closures", outcomes);
           classified.put("derived", derived);
@@ -472,6 +485,39 @@ final class Plans {
               context.directory().resolve("classify.json"), JSON.toString(classified));
           return Stage.Result.completed().withEngines(engines);
         });
+  }
+
+  /** The id the worker gives the closure at this position of a CLASSIFY_ALL step. */
+  private static String closureStep(final int position) {
+    return CLASSIFY + "-" + position;
+  }
+
+  /** A closure's result manifest, or null when the worker did not complete the closure. */
+  private static JsonObject completed(final Stage.Context context, final String step) {
+    final Path file = context.directory().resolve(step + ".result.json");
+    if (!Files.isRegularFile(file)) {
+      return null;
+    }
+    final JsonObject manifest = JSON.read(file.toString());
+    return "SUCCEEDED".equals(manifest.getString("status")) ? manifest : null;
+  }
+
+  /**
+   * Why a closure has no completed result: the problem that ended the worker step, about this
+   * closure. A limit without a subject is the output budget the closures share.
+   */
+  private static Problem unfinished(final Problem ended, final RefreshCapture.Closure closure) {
+    if (ended == null) {
+      return Problem.of(
+              Problem.Code.WORKER_LOST,
+              "The worker completed without a result for <" + closure.ontologyIri() + ">")
+          .withSubject(closure.ontologyIri());
+    }
+    if (ended.subject() != null) {
+      return ended;
+    }
+    return ended.withSubject(
+        ended.code() == Problem.Code.LIMIT_EXCEEDED ? "maxDerivedTriples" : closure.ontologyIri());
   }
 
   /**
