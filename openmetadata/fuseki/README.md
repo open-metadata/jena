@@ -227,7 +227,7 @@ records the limits a step ran with.
 | `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
 | `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
 | `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
-| `maxSpoolBytes` | 4 GiB, the files one `RULES` step keeps outside the dataset at once: a pass's solutions and the witnesses of every pass so far | no |
+| `maxSpoolBytes` | 4 GiB, the files one `RULES` step keeps outside the dataset at once: a pass's solutions, the delta it reads and the one it writes, and the witnesses of every pass so far | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
 transitive containment hierarchy with its inverse and three assertions each (297,000 triples,
@@ -315,7 +315,7 @@ over a working dataset that `LOAD` (and `CLASSIFY`, for ontology conclusions) fi
 - `provenance` names the file the step writes its witnesses to, in the job directory and outside
   the dataset. It is not RDF in the dataset, so no rule and no query can read it.
 - No output graph may be read, and no graph under `urn:openmetadata:reasoner:` may be named: the
-  step keeps its delta graphs there.
+  step names its delta there in the dataset a pass evaluates over.
 
 **Admission.** Every rule, enabled or not, is checked on its SPARQL algebra before anything runs, and
 one invalid rule rejects the bundle (`INVALID_RULES`, every problem listed with its rule). The step
@@ -331,22 +331,32 @@ named by an IRI; and a rule has at most 16,384 characters, 32 template triples, 
 patterns and 32 levels of nesting.
 
 **Evaluation.** The step first empties its output graphs and removes its provenance file, so it
-always recomputes from what it reads: a premise deleted since the last run takes every conclusion that only it supported
-with it, including conclusions around a cycle, and a conclusion with another support stays. It then
-runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later pass evaluates, for every
-triple pattern that can match the previous pass's new facts, the rule with that one pattern matching
-only them (a delta graph) and the rest matching everything, and with UNION branches that do not hold
-the pattern dropped. A solution that uses a new fact is found that way; one that does not was found
-before. A rule whose property path or EXISTS condition reads a predicate the delta holds is
-evaluated in full in that pass instead. A pass evaluates inside one read transaction and spools its
-solutions to a file in the job directory, bounded by `maxSpoolBytes`; it then reads the file back
-and applies the conclusions in write transactions of up to 500,000 solutions, never upgrading a read
-transaction. A conclusion already in a graph the rules read is not stored; one already in its rule's
-graph is a duplicate; any other goes into its rule's graph with a witness and, if no output graph
-had it, into the next delta. The step converges when a pass adds no new fact, and reports
-`CONVERGED` with per-pass and per-rule counts. Running out of passes, new facts or spool ends it
-`INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a step that does not converge leaves its
-output graphs partial and writes no run record, so its dataset must not be published.
+always recomputes from what it reads: a premise deleted since the last run takes every conclusion
+that only it supported with it, including conclusions around a cycle, and a conclusion with another
+support stays. It then runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later
+pass evaluates, for every triple pattern that can match the previous pass's new facts (the delta),
+the rule with that one pattern matching only them and the rest matching everything, and with UNION
+branches that do not hold the pattern dropped. A solution that uses a new fact is found that way;
+one that does not was found before.
+
+The delta is a flat file of the job directory, written by one pass and read by the next: it has no
+index, so each read of it is one scan of the file. A variant therefore puts the delta pattern first
+in its block, where it is read once and drives the join. A rule is evaluated in full in a pass
+instead when a property path or EXISTS condition of it reads a predicate the delta holds, or when
+one of its delta patterns is not on the leftmost path of the rule's algebra (it follows a property
+path or `VALUES` in its group, or sits in a nested group that is joined to patterns before it) and
+would be looked up once per solution of what precedes it. Full evaluation finds the same facts in
+the same passes.
+
+A pass evaluates inside one read transaction and spools its solutions to a file in the job
+directory; it then reads the file back and applies the conclusions in write transactions of up to
+500,000 solutions, never upgrading a read transaction. A conclusion already in a graph the rules
+read is not stored; one already in its rule's graph is a duplicate; any other goes into its rule's
+graph with a witness and, if no output graph had it, into the next delta. The step converges when a
+pass adds no new fact, and reports `CONVERGED` with per-pass and per-rule counts. Running out of
+passes, new facts or spool ends it `INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a
+step that does not converge leaves its output graphs partial and no provenance file, so its dataset
+must not be published.
 
 The starter rules ship with `transitive-lineage-closure` disabled: it stores every
 ancestor/descendant pair, which grows quadratically with lineage depth.

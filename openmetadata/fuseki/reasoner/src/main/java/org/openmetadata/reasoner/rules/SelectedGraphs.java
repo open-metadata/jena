@@ -16,6 +16,7 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import org.apache.jena.atlas.iterator.Iter;
+import org.apache.jena.graph.Graph;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.Triple;
 import org.apache.jena.graph.impl.GraphBase;
@@ -41,13 +42,16 @@ final class SelectedGraphs extends GraphBase {
     this.graphs = Set.copyOf(graphs.stream().map(SelectedGraphs::normalize).toList());
   }
 
-  /** The dataset a rule's pattern is evaluated over: these graphs as its default graph. */
+  /**
+   * The dataset a rule's pattern is evaluated over: these graphs as its default graph and, for a
+   * pass after the first, the previous pass's new facts as the one named graph {@code deltaName}.
+   */
   static DatasetGraph evaluation(
-      final DatasetGraph dataset, final Set<Node> graphs, final Node delta) {
+      final DatasetGraph dataset, final Set<Node> graphs, final Node deltaName, final Graph delta) {
     final DatasetGraph evaluation =
         DatasetGraphFactory.createGeneral(new SelectedGraphs(dataset, graphs));
     if (delta != null) {
-      evaluation.addGraph(delta, dataset.getGraph(delta));
+      evaluation.addGraph(deltaName, delta);
     }
     return evaluation;
   }

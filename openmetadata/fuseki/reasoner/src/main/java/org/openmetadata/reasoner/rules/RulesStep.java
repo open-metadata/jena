@@ -15,6 +15,7 @@ package org.openmetadata.reasoner.rules;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -65,11 +66,11 @@ import org.slf4j.LoggerFactory;
  * {@link CompiledRule}). After the read transaction ends, it reads the spool back and applies the
  * conclusions in large write transactions: a conclusion already in a graph the rules read is not
  * derived; one already in its rule's graph is a duplicate; otherwise it is added there with its
- * witness, and if no output graph had it, it is a new fact and goes into the next delta graph. The
- * witnesses go to the step's provenance file, never into the dataset ({@link Provenance}). The step
- * converges when a pass adds no new fact. Running out of passes, new facts or spool ends it
- * INCOMPLETE; a step that does not converge leaves its graphs partial and no provenance file, and
- * its dataset must not be published.
+ * witness, and if no output graph had it, it is a new fact and goes into the next delta. The deltas
+ * and the witnesses are files of the step, never graphs of the dataset ({@link DeltaSpool}, {@link
+ * Provenance}). The step converges when a pass adds no new fact. Running out of passes, new facts
+ * or spool ends it INCOMPLETE; a step that does not converge leaves its graphs partial and no
+ * provenance file, and its dataset must not be published.
  */
 public final class RulesStep implements Step {
   private static final Logger LOG = LoggerFactory.getLogger(RulesStep.class);
@@ -84,6 +85,12 @@ public final class RulesStep implements Step {
   static final int MAX_DELTA_PREDICATES = 4_096;
 
   static final int MAX_REPORT_LINES = 100_000;
+
+  /**
+   * The name a variant's delta pattern reads the previous pass's new facts by. It names a graph of
+   * the dataset a pass evaluates over, never one of the working dataset.
+   */
+  private static final Node DELTA = NodeFactory.createURI(StepFile.RESERVED_GRAPH_PREFIX + "delta");
 
   @Override
   public StepResult run(final StepFile step, final Watchdog watchdog) throws Exception {
@@ -147,6 +154,8 @@ public final class RulesStep implements Step {
     private final Set<Node> outputs = new LinkedHashSet<>();
     private final Path provenance;
     private final Path spool;
+    private final Path deltaFile;
+    private final Path nextDeltaFile;
     private final SpoolBudget budget;
     private final SortedReport report;
     private final Map<String, long[]> perRule = new LinkedHashMap<>();
@@ -174,6 +183,8 @@ public final class RulesStep implements Step {
       rules.forEach(rule -> perRule.put(rule.name(), new long[2]));
       this.provenance = step.governance().provenance();
       this.spool = step.path().resolveSibling(step.stepId() + ".spool.tmp");
+      this.deltaFile = step.path().resolveSibling(step.stepId() + ".delta.tmp");
+      this.nextDeltaFile = step.path().resolveSibling(step.stepId() + ".delta.next.tmp");
       this.budget = new SpoolBudget(limits.maxSpoolBytes());
       this.report = step.report() ? new SortedReport(MAX_REPORT_LINES) : null;
     }
@@ -181,17 +192,16 @@ public final class RulesStep implements Step {
     StepResult execute() throws Exception {
       final List<String> emptyReadGraphs = clear();
       Set<Node> deltaPredicates = Set.of();
-      Node delta = null;
+      long deltaBytes = 0;
       int pass = 0;
       try (Provenance.Writer writer = new Provenance.Writer(provenance, budget)) {
         witnesses = writer;
         while (true) {
           pass++;
           final long started = System.nanoTime();
-          final Node nextDelta = Provenance.deltaGraph(pass);
           final Pass result;
           try {
-            result = pass(pass, delta, deltaPredicates, nextDelta);
+            result = pass(pass, deltaPredicates);
           } catch (final SpoolBudget.Full e) {
             return budget(
                 "SPOOL_BUDGET", "maxSpoolBytes", e.getMessage() + " in pass " + pass, pass);
@@ -213,8 +223,6 @@ public final class RulesStep implements Step {
               result.derived,
               result.newFacts);
           if (result.newFacts == 0) {
-            final Node last = nextDelta;
-            Txn.executeWrite(dataset, () -> dataset.deleteAny(last, Node.ANY, Node.ANY, Node.ANY));
             writer.finish(List.copyOf(read), rules, pass);
             break;
           }
@@ -229,11 +237,15 @@ public final class RulesStep implements Step {
                     + " new facts",
                 pass);
           }
-          delta = nextDelta;
+          Files.move(nextDeltaFile, deltaFile, StandardCopyOption.REPLACE_EXISTING);
+          budget.release(deltaBytes);
+          deltaBytes = result.deltaBytes;
           deltaPredicates = result.predicates;
         }
       } finally {
         Files.deleteIfExists(spool);
+        Files.deleteIfExists(deltaFile);
+        Files.deleteIfExists(nextDeltaFile);
       }
       final StepResult result =
           details(StepResult.succeeded("CONVERGED"), pass)
@@ -283,16 +295,6 @@ public final class RulesStep implements Step {
             for (final Node output : outputs) {
               dataset.deleteAny(output, Node.ANY, Node.ANY, Node.ANY);
             }
-            final List<Node> reserved = new ArrayList<>();
-            dataset
-                .listGraphNodes()
-                .forEachRemaining(
-                    graph -> {
-                      if (graph.isURI() && graph.getURI().startsWith(Provenance.PREFIX)) {
-                        reserved.add(graph);
-                      }
-                    });
-            reserved.forEach(graph -> dataset.deleteAny(graph, Node.ANY, Node.ANY, Node.ANY));
             for (final Node graph : read) {
               if (!dataset.find(graph, Node.ANY, Node.ANY, Node.ANY).hasNext()) {
                 empty.add(graph.getURI());
@@ -302,9 +304,8 @@ public final class RulesStep implements Step {
       return empty;
     }
 
-    private Pass pass(
-        final int pass, final Node delta, final Set<Node> deltaPredicates, final Node nextDelta)
-        throws IOException {
+    /** One pass: reads the delta the previous pass left in {@link #deltaFile}, writes the next. */
+    private Pass pass(final int pass, final Set<Node> deltaPredicates) throws IOException {
       final Pass result = new Pass(pass);
       final Set<Node> selection = new HashSet<>(read);
       selection.addAll(outputs);
@@ -312,9 +313,11 @@ public final class RulesStep implements Step {
       try (writer) {
         dataset.begin(TxnType.READ);
         try {
-          final DatasetGraph evaluation = SelectedGraphs.evaluation(dataset, selection, delta);
+          final DatasetGraph evaluation =
+              SelectedGraphs.evaluation(
+                  dataset, selection, DELTA, pass == 1 ? null : DeltaSpool.graph(deltaFile));
           for (final CompiledRule rule : rules) {
-            for (final Op op : plan(rule, pass, delta, deltaPredicates, result)) {
+            for (final Op op : plan(rule, pass, deltaPredicates, result)) {
               evaluate(rule, op, evaluation, writer, result);
             }
           }
@@ -324,25 +327,30 @@ public final class RulesStep implements Step {
         result.spoolBytes = writer.bytes();
       }
       peakSpoolBytes = Math.max(peakSpoolBytes, result.spoolBytes);
-      apply(pass, delta, nextDelta, result);
+      apply(pass, result);
       budget.release(writer.bytes());
       return result;
     }
 
-    /** What to evaluate for a rule in this pass: its pattern in full, or its delta variants. */
+    /**
+     * What to evaluate for a rule in this pass: its pattern in full, or its delta variants. A
+     * variant scans the whole delta wherever it reads it, so a rule gets variants only if each
+     * reads the delta once; otherwise it is evaluated in full, which finds the same facts.
+     */
     private List<Op> plan(
         final CompiledRule rule,
         final int pass,
-        final Node delta,
         final Set<Node> deltaPredicates,
         final Pass result) {
-      if (pass == 1 || rule.opaquePartsRead(deltaPredicates)) {
+      if (pass == 1
+          || rule.opaquePartsRead(deltaPredicates)
+          || !rule.deltaDrives(deltaPredicates)) {
         result.fullEvaluations++;
         return List.of(rule.pattern());
       }
       final List<Op> variants = new ArrayList<>();
       for (final CompiledRule.Atom atom : rule.deltaAtoms(deltaPredicates)) {
-        variants.add(rule.variant(atom.index(), delta));
+        variants.add(rule.variant(atom.index(), DELTA));
       }
       result.variants += variants.size();
       return variants;
@@ -377,21 +385,18 @@ public final class RulesStep implements Step {
     /**
      * Applies the spooled solutions: instantiates each rule's template and keeps the conclusions
      * that are derived and not duplicates, with their witnesses, in write transactions of at most
-     * {@link #APPLY_BATCH} solutions. The first one also drops the delta this pass read.
+     * {@link #APPLY_BATCH} solutions, and spools the new facts as the next pass's delta.
      */
-    private void apply(final int pass, Node delta, final Node nextDelta, final Pass result)
-        throws IOException {
+    private void apply(final int pass, final Pass result) throws IOException {
       final Set<Node> predicates = new HashSet<>();
       final SelectedGraphs lookup = new SelectedGraphs(dataset, Set.of());
-      try (SolutionSpool.Reader reader = new SolutionSpool.Reader(spool, rules)) {
+      final DeltaSpool.Writer nextDelta = new DeltaSpool.Writer(nextDeltaFile, budget);
+      try (nextDelta;
+          SolutionSpool.Reader reader = new SolutionSpool.Reader(spool, rules)) {
         boolean more = true;
         while (more) {
           dataset.begin(TxnType.WRITE);
           try {
-            if (delta != null) {
-              dataset.deleteAny(delta, Node.ANY, Node.ANY, Node.ANY);
-              delta = null;
-            }
             int applied = 0;
             while (applied < APPLY_BATCH) {
               final SolutionSpool.Record record = reader.next();
@@ -414,6 +419,7 @@ public final class RulesStep implements Step {
           }
         }
       }
+      result.deltaBytes = nextDelta.bytes();
       result.predicates =
           predicates.size() > MAX_DELTA_PREDICATES
               ? Set.of(CompiledRule.ANY)
@@ -423,7 +429,7 @@ public final class RulesStep implements Step {
     private void applyOne(
         final SolutionSpool.Record record,
         final int pass,
-        final Node nextDelta,
+        final DeltaSpool.Writer nextDelta,
         final SelectedGraphs lookup,
         final Set<Node> predicates,
         final Pass result)
@@ -461,7 +467,7 @@ public final class RulesStep implements Step {
         }
         witnesses.witness(rule.output(), fact, solutionOffset);
         if (!inOutput) {
-          dataset.add(nextDelta, fact.getSubject(), fact.getPredicate(), fact.getObject());
+          nextDelta.write(fact);
           newFacts++;
           result.newFacts++;
           if (predicates.size() <= MAX_DELTA_PREDICATES) {
@@ -509,6 +515,7 @@ public final class RulesStep implements Step {
     private long spoolBytes;
     private long derived;
     private long newFacts;
+    private long deltaBytes;
     private Set<Node> predicates = Set.of();
 
     Pass(final int number) {

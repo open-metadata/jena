@@ -17,9 +17,10 @@ import java.io.IOException;
 import java.io.OutputStream;
 
 /**
- * The bytes a RULES step holds in its files outside the dataset at once: a pass's solutions and the
- * witnesses of every pass so far. Those files hold terms as text, so unlike the dataset they grow
- * with every repetition of a long literal; writing past the budget fails with {@link Full}.
+ * The bytes a RULES step holds in its files outside the dataset at once: a pass's solutions, the
+ * delta it reads and the one it writes, and the witnesses of every pass so far. Those files hold
+ * terms as text, so unlike the dataset they grow with every repetition of a long literal; writing
+ * past the budget fails with {@link Full}.
  */
 final class SpoolBudget {
   private final long maxBytes;
@@ -33,7 +34,9 @@ final class SpoolBudget {
   static final class Full extends IOException {
     Full(final long maxBytes) {
       super(
-          "The step's spooled solutions and witnesses exceed the limit of " + maxBytes + " bytes");
+          "The step's spooled solutions, deltas and witnesses exceed the limit of "
+              + maxBytes
+              + " bytes");
     }
   }
 

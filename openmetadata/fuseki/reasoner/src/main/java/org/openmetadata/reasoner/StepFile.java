@@ -90,7 +90,7 @@ public record StepFile(
           "tags",
           "output");
 
-  /** Graphs the RULES step creates for itself; no caller may name one. */
+  /** Graph names the RULES step keeps for itself; no caller may name one. */
   public static final String RESERVED_GRAPH_PREFIX = "urn:openmetadata:reasoner:";
 
   /**

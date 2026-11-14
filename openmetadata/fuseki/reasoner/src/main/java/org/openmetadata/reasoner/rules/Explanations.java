@@ -184,7 +184,7 @@ public final class Explanations {
     run.rules().values().forEach(rule -> outputs.add(rule.output()));
     final Set<Node> selection = new HashSet<>(read);
     selection.addAll(outputs);
-    this.evaluation = SelectedGraphs.evaluation(dataset, selection, null);
+    this.evaluation = SelectedGraphs.evaluation(dataset, selection, null, null);
   }
 
   /**

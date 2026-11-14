@@ -39,7 +39,9 @@ import org.openmetadata.reasoner.Jobs;
  * Semi-naive evaluation derives exactly what naive evaluation does: every rule run over everything
  * until nothing changes, here with Jena's own CONSTRUCT over an in-memory graph. The rules join
  * derived predicates, use UNION, a variable predicate, VALUES, BIND, a property path and an EXISTS
- * over derived predicates, on random graphs.
+ * over derived predicates, on random graphs. Three of them read a derived predicate where the delta
+ * cannot drive the join (after VALUES, after a property path, and in the right operand of a join),
+ * so the step evaluates them in full instead of scanning the delta once per solution.
  */
 class SemiNaiveAgreementTest {
   private static final String PREFIXES = "PREFIX : <http://example.org/> ";
@@ -52,7 +54,9 @@ class SemiNaiveAgreementTest {
           "CONSTRUCT { ?y :u ?k } WHERE { VALUES ?k { :n0 :n1 :n2 } ?k :t ?y BIND(STR(?y) AS"
               + " ?label) FILTER(STRLEN(?label) > 3) }",
           "CONSTRUCT { ?x :p ?y } WHERE { ?x ?pred ?y . ?pred :sub :p }",
-          "CONSTRUCT { ?x :e ?y } WHERE { ?x :u ?y }");
+          "CONSTRUCT { ?x :e ?y } WHERE { ?x :u ?y }",
+          "CONSTRUCT { ?x :v ?z } WHERE { ?x :link+ ?y . ?y :q ?z }",
+          "CONSTRUCT { ?x :w ?z } WHERE { ?x :link ?y { { ?y :q ?z } UNION { ?y :v ?z } } }");
 
   @TempDir Path job;
 

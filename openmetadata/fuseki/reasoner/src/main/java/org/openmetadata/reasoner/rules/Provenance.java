@@ -74,7 +74,6 @@ import org.apache.jena.sparql.engine.binding.BindingBuilder;
  * converged, so a step that does not converge leaves no file that explanations would trust.
  */
 public final class Provenance {
-  static final String PREFIX = "urn:openmetadata:reasoner:";
   static final String CONVERGED = "CONVERGED";
   static final int KEY_BYTES = 16;
   static final int ENTRY_BYTES = KEY_BYTES + Long.BYTES;
@@ -83,10 +82,6 @@ public final class Provenance {
   private static final int TRAILER_BYTES = 3 * Long.BYTES + Integer.BYTES + CLOSING.length;
 
   private Provenance() {}
-
-  static Node deltaGraph(final int pass) {
-    return NodeFactory.createURI(PREFIX + "delta:" + pass);
-  }
 
   /** A run as its record describes it. */
   record Run(int passes, List<Node> read, Map<String, RuleRecord> rules) {}
