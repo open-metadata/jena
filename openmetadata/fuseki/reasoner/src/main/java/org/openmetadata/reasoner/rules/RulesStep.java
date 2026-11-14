@@ -60,23 +60,25 @@ import org.slf4j.LoggerFactory;
  *
  * <p>The step first empties its output graphs and removes its provenance file, so conclusions are
  * always recomputed from the graphs it reads and never seeded with an earlier run's. Each pass then
- * has two phases. Inside one read transaction, it evaluates the rules and spools their solutions to
- * a bounded file: pass 1 evaluates every rule in full; later passes evaluate, for each rule atom
- * that can match the previous pass's new facts, the variant where that atom matches only them (see
- * {@link CompiledRule}). After the read transaction ends, it reads the spool back and applies the
- * conclusions in large write transactions: a conclusion already in a graph the rules read is not
- * derived; one already in its rule's graph is a duplicate; otherwise it is added there with its
- * witness, and if no output graph had it, it is a new fact and goes into the next delta. The deltas
- * and the witnesses are files of the step, never graphs of the dataset ({@link DeltaSpool}, {@link
- * Provenance}). The step converges when a pass adds no new fact. Running out of passes, new facts
- * or spool ends it INCOMPLETE; a step that does not converge leaves its graphs partial and no
- * provenance file, and its dataset must not be published.
+ * has two phases. First it evaluates the rules and spools their solutions to a bounded file: pass 1
+ * evaluates every rule in full; later passes evaluate, for each rule atom that can match the
+ * previous pass's new facts, the variant where that atom matches only them (see {@link
+ * CompiledRule}). No evaluation is open when it then reads the spool back and applies the
+ * conclusions: a conclusion already in a graph the rules read is not derived; one already in its
+ * rule's graph is a duplicate; otherwise it is added there with its witness, and if no output graph
+ * had it, it is a new fact and goes into the next delta. The deltas and the witnesses are files of
+ * the step, never graphs of the dataset ({@link DeltaSpool}, {@link Provenance}). The step
+ * converges when a pass adds no new fact. Running out of passes, new facts or spool ends it
+ * INCOMPLETE; a step that does not converge leaves its graphs partial and no provenance file, and
+ * its dataset must not be published.
+ *
+ * <p>All passes share one write transaction, committed when the step converges or runs out of a
+ * budget. Nothing reads the working dataset while a step runs and a failed step's dataset is thrown
+ * away, so a commit per pass bought no safety: it cost a sync of every index file, and TDB2 copies
+ * a block again in each transaction that changes it, which grew the files with every pass.
  */
 public final class RulesStep implements Step {
   private static final Logger LOG = LoggerFactory.getLogger(RulesStep.class);
-
-  /** Conclusions applied in one write transaction: few, large commits, as TDB2 grows per commit. */
-  static final int APPLY_BATCH = 500_000;
 
   /**
    * Predicates the step tracks in a delta; a delta with more counts as having every predicate, so
@@ -164,6 +166,7 @@ public final class RulesStep implements Step {
     private long derived;
     private long solutions;
     private long peakSpoolBytes;
+    private int pass;
     private Provenance.Writer witnesses;
 
     Run(
@@ -191,75 +194,97 @@ public final class RulesStep implements Step {
 
     StepResult execute() throws Exception {
       final List<String> emptyReadGraphs = clear();
-      Set<Node> deltaPredicates = Set.of();
-      long deltaBytes = 0;
-      int pass = 0;
       try (Provenance.Writer writer = new Provenance.Writer(provenance, budget)) {
         witnesses = writer;
-        while (true) {
-          pass++;
-          final long started = System.nanoTime();
-          final Pass result;
-          try {
-            result = pass(pass, deltaPredicates);
-          } catch (final SpoolBudget.Full e) {
-            return budget(
-                "SPOOL_BUDGET", "maxSpoolBytes", e.getMessage() + " in pass " + pass, pass);
-          } catch (final FactBudget e) {
-            return budget(
-                "FACT_BUDGET",
-                "maxNewFacts",
-                "The rules derived more than "
-                    + limits.maxNewFacts()
-                    + " facts (maxNewFacts) by pass "
-                    + pass,
-                pass);
-          }
-          passes.add(result.toJson(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)));
-          LOG.info(
-              "Pass {}: {} solutions, {} derived, {} new facts",
-              pass,
-              result.solutions,
-              result.derived,
-              result.newFacts);
-          if (result.newFacts == 0) {
-            writer.finish(List.copyOf(read), rules, pass);
-            break;
-          }
-          if (pass >= limits.maxPasses()) {
-            return budget(
-                "PASS_BUDGET",
-                "maxPasses",
-                "The rules did not reach a fixed point within "
-                    + limits.maxPasses()
-                    + " passes (maxPasses); the last pass derived "
-                    + result.newFacts
-                    + " new facts",
-                pass);
-          }
-          Files.move(nextDeltaFile, deltaFile, StandardCopyOption.REPLACE_EXISTING);
-          budget.release(deltaBytes);
-          deltaBytes = result.deltaBytes;
-          deltaPredicates = result.predicates;
+        final StepResult stopped = inOneTransaction();
+        if (stopped != null) {
+          return stopped;
         }
+        writer.finish(List.copyOf(read), rules, pass);
       } finally {
         Files.deleteIfExists(spool);
         Files.deleteIfExists(deltaFile);
         Files.deleteIfExists(nextDeltaFile);
       }
       final StepResult result =
-          details(StepResult.succeeded("CONVERGED"), pass)
+          details(StepResult.succeeded("CONVERGED"))
               .detail("emptyReadGraphs", strings(emptyReadGraphs));
       return report == null ? result : result.report(report.lines("OUTCOME CONVERGED"));
     }
 
-    private StepResult budget(
-        final String outcome, final String limit, final String message, final int pass) {
-      LOG.warn("Step {} stopped: {}", step.stepId(), message);
-      return details(StepResult.budget(outcome, limit, message), pass);
+    /**
+     * Runs the passes and commits what they derived, also when a budget stopped them; a failure
+     * leaves the output graphs empty.
+     *
+     * @return the budget that stopped the passes, or null if they reached a fixed point
+     */
+    private StepResult inOneTransaction() throws IOException {
+      dataset.begin(TxnType.WRITE);
+      try {
+        final StepResult stopped = passes();
+        dataset.commit();
+        return stopped;
+      } catch (final IOException | RuntimeException e) {
+        dataset.abort();
+        throw e;
+      } finally {
+        dataset.end();
+      }
     }
 
-    private StepResult details(final StepResult result, final int pass) {
+    private StepResult passes() throws IOException {
+      Set<Node> deltaPredicates = Set.of();
+      long deltaBytes = 0;
+      while (true) {
+        pass++;
+        final long started = System.nanoTime();
+        final Pass result;
+        try {
+          result = pass(deltaPredicates);
+        } catch (final SpoolBudget.Full e) {
+          return budget("SPOOL_BUDGET", "maxSpoolBytes", e.getMessage() + " in pass " + pass);
+        } catch (final FactBudget e) {
+          return budget(
+              "FACT_BUDGET",
+              "maxNewFacts",
+              "The rules derived more than "
+                  + limits.maxNewFacts()
+                  + " facts (maxNewFacts) by pass "
+                  + pass);
+        }
+        passes.add(result.toJson(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)));
+        LOG.info(
+            "Pass {}: {} solutions, {} derived, {} new facts",
+            pass,
+            result.solutions,
+            result.derived,
+            result.newFacts);
+        if (result.newFacts == 0) {
+          return null;
+        }
+        if (pass >= limits.maxPasses()) {
+          return budget(
+              "PASS_BUDGET",
+              "maxPasses",
+              "The rules did not reach a fixed point within "
+                  + limits.maxPasses()
+                  + " passes (maxPasses); the last pass derived "
+                  + result.newFacts
+                  + " new facts");
+        }
+        Files.move(nextDeltaFile, deltaFile, StandardCopyOption.REPLACE_EXISTING);
+        budget.release(deltaBytes);
+        deltaBytes = result.deltaBytes;
+        deltaPredicates = result.predicates;
+      }
+    }
+
+    private StepResult budget(final String outcome, final String limit, final String message) {
+      LOG.warn("Step {} stopped: {}", step.stepId(), message);
+      return details(StepResult.budget(outcome, limit, message));
+    }
+
+    private StepResult details(final StepResult result) {
       final JsonArray perRuleJson = new JsonArray();
       for (final CompiledRule rule : rules) {
         final JsonObject json = new JsonObject();
@@ -305,29 +330,24 @@ public final class RulesStep implements Step {
     }
 
     /** One pass: reads the delta the previous pass left in {@link #deltaFile}, writes the next. */
-    private Pass pass(final int pass, final Set<Node> deltaPredicates) throws IOException {
+    private Pass pass(final Set<Node> deltaPredicates) throws IOException {
       final Pass result = new Pass(pass);
       final Set<Node> selection = new HashSet<>(read);
       selection.addAll(outputs);
       final SolutionSpool.Writer writer = new SolutionSpool.Writer(spool, budget);
       try (writer) {
-        dataset.begin(TxnType.READ);
-        try {
-          final DatasetGraph evaluation =
-              SelectedGraphs.evaluation(
-                  dataset, selection, DELTA, pass == 1 ? null : DeltaSpool.graph(deltaFile));
-          for (final CompiledRule rule : rules) {
-            for (final Op op : plan(rule, pass, deltaPredicates, result)) {
-              evaluate(rule, op, evaluation, writer, result);
-            }
+        final DatasetGraph evaluation =
+            SelectedGraphs.evaluation(
+                dataset, selection, DELTA, pass == 1 ? null : DeltaSpool.graph(deltaFile));
+        for (final CompiledRule rule : rules) {
+          for (final Op op : plan(rule, deltaPredicates, result)) {
+            evaluate(rule, op, evaluation, writer, result);
           }
-        } finally {
-          dataset.end();
         }
         result.spoolBytes = writer.bytes();
       }
       peakSpoolBytes = Math.max(peakSpoolBytes, result.spoolBytes);
-      apply(pass, result);
+      apply(result);
       budget.release(writer.bytes());
       return result;
     }
@@ -338,10 +358,7 @@ public final class RulesStep implements Step {
      * reads the delta once; otherwise it is evaluated in full, which finds the same facts.
      */
     private List<Op> plan(
-        final CompiledRule rule,
-        final int pass,
-        final Set<Node> deltaPredicates,
-        final Pass result) {
+        final CompiledRule rule, final Set<Node> deltaPredicates, final Pass result) {
       if (pass == 1
           || rule.opaquePartsRead(deltaPredicates)
           || !rule.deltaDrives(deltaPredicates)) {
@@ -384,39 +401,20 @@ public final class RulesStep implements Step {
 
     /**
      * Applies the spooled solutions: instantiates each rule's template and keeps the conclusions
-     * that are derived and not duplicates, with their witnesses, in write transactions of at most
-     * {@link #APPLY_BATCH} solutions, and spools the new facts as the next pass's delta.
+     * that are derived and not duplicates, with their witnesses, and spools the new facts as the
+     * next pass's delta.
      */
-    private void apply(final int pass, final Pass result) throws IOException {
+    private void apply(final Pass result) throws IOException {
       final Set<Node> predicates = new HashSet<>();
       final SelectedGraphs lookup = new SelectedGraphs(dataset, Set.of());
       final DeltaSpool.Writer nextDelta = new DeltaSpool.Writer(nextDeltaFile, budget);
       try (nextDelta;
           SolutionSpool.Reader reader = new SolutionSpool.Reader(spool, rules)) {
-        boolean more = true;
-        while (more) {
-          dataset.begin(TxnType.WRITE);
-          try {
-            int applied = 0;
-            while (applied < APPLY_BATCH) {
-              final SolutionSpool.Record record = reader.next();
-              if (record == null) {
-                more = false;
-                break;
-              }
-              if (watchdog.expired()) {
-                throw new IllegalStateException("The step's deadline passed");
-              }
-              applyOne(record, pass, nextDelta, lookup, predicates, result);
-              applied++;
-            }
-            dataset.commit();
-          } catch (final IOException | RuntimeException e) {
-            dataset.abort();
-            throw e;
-          } finally {
-            dataset.end();
+        for (SolutionSpool.Record record = reader.next(); record != null; record = reader.next()) {
+          if (watchdog.expired()) {
+            throw new IllegalStateException("The step's deadline passed");
           }
+          applyOne(record, nextDelta, lookup, predicates, result);
         }
       }
       result.deltaBytes = nextDelta.bytes();
@@ -428,7 +426,6 @@ public final class RulesStep implements Step {
 
     private void applyOne(
         final SolutionSpool.Record record,
-        final int pass,
         final DeltaSpool.Writer nextDelta,
         final SelectedGraphs lookup,
         final Set<Node> predicates,

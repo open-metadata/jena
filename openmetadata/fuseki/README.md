@@ -348,10 +348,12 @@ path or `VALUES` in its group, or sits in a nested group that is joined to patte
 would be looked up once per solution of what precedes it. Full evaluation finds the same facts in
 the same passes.
 
-A pass evaluates inside one read transaction and spools its solutions to a file in the job
-directory; it then reads the file back and applies the conclusions in write transactions of up to
-500,000 solutions, never upgrading a read transaction. A conclusion already in a graph the rules
-read is not stored; one already in its rule's graph is a duplicate; any other goes into its rule's
+A pass evaluates the rules and spools their solutions to a file in the job directory; it then reads
+the file back and applies the conclusions, so nothing is evaluated while the dataset changes. All
+passes run in one write transaction, committed when the step converges or runs out of a budget:
+nothing else reads the working dataset, and TDB2 copies an index page again in every transaction
+that changes it, so a commit per pass grew the files and synced them with every pass. A conclusion
+already in a graph the rules read is not stored; one already in its rule's graph is a duplicate; any other goes into its rule's
 graph with a witness and, if no output graph had it, into the next delta. The step converges when a
 pass adds no new fact, and reports `CONVERGED` with per-pass and per-rule counts. Running out of
 passes, new facts or spool ends it `INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a

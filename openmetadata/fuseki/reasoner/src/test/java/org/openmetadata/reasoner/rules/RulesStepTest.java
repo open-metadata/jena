@@ -244,6 +244,10 @@ GRAPH <urn:catalog:asserted> { :a :knows :b . :b :knows :c . :c :knows :a . :b :
     load(chain.append("}\n").toString());
     final List<JsonObject> bundle = List.of(RuleFixtures.starter("pii-propagation-via-lineage"));
     assertBudget("passes", bundle, "{\"maxPasses\": 5}", "PASS_BUDGET", "maxPasses");
+    assertEquals(
+        Set.of("c1", "c2", "c3", "c4", "c5"),
+        tagged(RuleFixtures.output("pii-propagation-via-lineage")),
+        "a step out of budget keeps what its passes derived");
     assertBudget("facts", bundle, "{\"maxNewFacts\": 7}", "FACT_BUDGET", "maxNewFacts");
     assertBudget("spool", bundle, "{\"maxSpoolBytes\": 64}", "SPOOL_BUDGET", "maxSpoolBytes");
     final Path enough =
