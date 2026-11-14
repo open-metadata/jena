@@ -13,7 +13,6 @@
 package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.util.List;
-import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
@@ -30,9 +29,14 @@ final class Results {
 
   private Results() {}
 
+  /**
+   * The page, built without copying the result: it shares every value of {@code result}, which is
+   * read-only here, so one parsed result can serve any number of pages.
+   */
   static JsonObject page(
       final JsonObject job, final JsonObject result, final int offset, final int limit) {
-    final JsonObject copy = JSON.copy(result).getAsObject();
+    final JsonObject copy = new JsonObject();
+    result.forEach(copy::put);
     final JsonObject page = new JsonObject();
     page.put("offset", offset);
     page.put("limit", limit);

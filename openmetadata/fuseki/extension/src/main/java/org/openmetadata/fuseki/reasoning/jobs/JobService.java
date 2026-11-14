@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -58,6 +59,9 @@ public final class JobService implements AutoCloseable {
   /** How long an upload may rely on the last walk of the rest of the reasoning root. */
   static final long DISK_USE_TTL_MILLIS = 5_000;
 
+  /** Parsed job results kept for paging; each can hold up to maxResultRows items. */
+  static final int MAX_CACHED_RESULTS = 4;
+
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
 
   private final ReasoningSettings settings;
@@ -70,6 +74,17 @@ public final class JobService implements AutoCloseable {
   private final JobStore store;
   private final JobInputs inputs;
   private final DiskUse diskUse;
+
+  /**
+   * Parsed results by {@link #parsedResult}, least recently read first; at most MAX_CACHED_RESULTS.
+   */
+  private final Map<String, JsonObject> resultCache =
+      new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, JsonObject> eldest) {
+          return size() > MAX_CACHED_RESULTS;
+        }
+      };
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -470,8 +485,33 @@ public final class JobService implements AutoCloseable {
               ? job.problem()
               : Problem.of(Problem.Code.INVALID_REQUEST, "Job " + id + " has no result"));
     }
-    final JsonObject result = JSON.read(file.toString());
-    return Results.page(job.toJson(), result, offset, limit);
+    return Results.page(job.toJson(), parsedResult(id, file), offset, limit);
+  }
+
+  /**
+   * The parsed result.json of a finished job. Paging through a result asks for it once per page, so
+   * the last few are kept, keyed by the file's size and modification time in case the job directory
+   * was replaced; the result is shared and never modified.
+   */
+  private JsonObject parsedResult(final UUID id, final Path file) throws Refused {
+    final String key;
+    try {
+      key = id + ":" + Files.size(file) + ":" + Files.getLastModifiedTime(file).toMillis();
+    } catch (final IOException e) {
+      throw new Refused(
+          404, Problem.of(Problem.Code.INVALID_REQUEST, "Job " + id + " has no readable result"));
+    }
+    synchronized (resultCache) {
+      final JsonObject cached = resultCache.get(key);
+      if (cached != null) {
+        return cached;
+      }
+    }
+    final JsonObject parsed = JSON.read(file.toString());
+    synchronized (resultCache) {
+      resultCache.put(key, parsed);
+    }
+    return parsed;
   }
 
   public Optional<JsonObject> job(final UUID id) {
