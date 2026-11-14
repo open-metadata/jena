@@ -768,15 +768,17 @@ while a reader and a writer used the serving dataset. Each figure is the median 
 
 | Catalog | Captured | Derived | Job | Steps (capture, load, classify, rules, compact) | Worker heap after GC | Server heap after GC | Snapshot | Peak reasoning disk | Slowest serving read / write, before and during |
 |---|---|---|---|---|---|---|---|---|---|
-| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 13.0 s (11.5 to 13.1) | 0.6, 3.0, 1.7, 5.2, 2.2 s | 43 MiB at most | 37 MiB | 216 MB | 0.47 GB | 121 / 228 ms before, 127 / 284 ms during |
-| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 19.7 s (19.5 to 20.8) | 1.9, 4.3, 1.5, 9.9, 2.2 s | 54 MiB at most | 60 MiB | 363 MB | 0.80 GB | 105 / 223 ms before, 131 / 298 ms during |
+| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 8.6 s (8.3 to 8.9) | 0.5, 2.0, 1.1, 3.4, 1.5 s | 55 MiB at most | 12 MiB | 216 MB | 0.47 GB | 73 / 155 ms before, 113 / 236 ms during |
+| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 18.6 s (15.2 to 19.0) | 1.6, 3.2, 1.2, 10.3, 2.1 s | 72 MiB at most | 60 MiB | 363 MB | 0.82 GB | 75 / 136 ms before, 157 / 358 ms during |
 
-The laptop was running other builds during these runs (load average 7 to 23), so the times are
+The laptop was running other builds during these runs (load average 12 to 19), so the times are
 upper bounds and the serving latencies say only that a refresh does not add to them by much; sizes
-and counts do not depend on load. Runs of the build before the provenance file, the delta file, the
-single RULES transaction and the packed copy were interleaved with them: 28.8 s (25.7 to 32.2) and
-69.6 s (65.6 to 75.8), of which RULES took 15.2 and 33.9 s and COMPACT 8.4 and 25.6 s; snapshots of
-416 MB and 1.14 to 1.16 GB; 1.01 and 2.9 to 3.0 GB of disk at the peak.
+and counts do not depend on load. Before the provenance file, the delta file, the single RULES
+transaction, the packed copy, one classify worker and heap-sized worker caches, the same refreshes
+took 28.8 s (25.7 to 32.2) and 69.6 s (65.6 to 75.8), of which RULES took 15.2 and 33.9 s and
+COMPACT 8.4 and 25.6 s, for snapshots of 416 MB and 1.14 to 1.16 GB and 1.01 and 2.9 to 3.0 GB of
+disk at the peak; those runs were interleaved with the first measurements of the new layout, under
+the same load.
 
 The column descriptions no rule reads were never captured. What bounds each figure:
 
@@ -788,10 +790,6 @@ The column descriptions no rule reads were never captured. What bounds each figu
   million quads of the larger catalog. The provenance file adds 150 bytes per derived fact (12 and
   49 MB).
 - **Peak disk.** The working dataset and its packed copy exist at once, beside the provenance file.
-
-A snapshot query for the 4,200 PII columns of the larger catalog took 59 ms.
-
-The table was measured before one worker classified every release and before the worker's node caches were sized from its heap; those changes were measured on their own:
 
 On the larger catalog a snapshot query for the 4,200 PII columns took 57 ms the first time and
 11 ms repeated. A full page of 10,000 two-column rows, 11,000 nodes, took 88 to 107 ms the first
