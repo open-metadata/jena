@@ -64,7 +64,8 @@ public final class ClassifyStep implements Step {
 
   /**
    * Classifies the closure of {@code step} in a dataset the caller opened and releases, so a caller
-   * with several closures opens it once.
+   * with several closures opens it once. A caller that holds a write transaction keeps it: the
+   * closure is read and its output graph replaced inside it, and nothing is committed here.
    *
    * @param document where the closure is exported for OWL API to parse
    */
@@ -154,17 +155,22 @@ public final class ClassifyStep implements Step {
 
   /**
    * Replaces the output graph inside one write transaction, opened before the first fact so the old
-   * contents are dropped in the same transaction.
+   * contents are dropped in the same transaction. When the caller already holds a write
+   * transaction, the graph is replaced inside that one, which the caller commits or aborts.
    */
   private static final class GraphWriter implements AutoCloseable {
     private final DatasetGraph dataset;
     private final Node graph;
+    private final boolean joined;
     private long written;
 
     GraphWriter(final DatasetGraph dataset, final String graphIri) {
       this.dataset = dataset;
       this.graph = NodeFactory.createURI(graphIri);
-      dataset.begin(TxnType.WRITE);
+      this.joined = dataset.isInTransaction();
+      if (!joined) {
+        dataset.begin(TxnType.WRITE);
+      }
       dataset.deleteAny(graph, Node.ANY, Node.ANY, Node.ANY);
     }
 
@@ -180,11 +186,16 @@ public final class ClassifyStep implements Step {
     }
 
     void commit() {
-      dataset.commit();
+      if (!joined) {
+        dataset.commit();
+      }
     }
 
     @Override
     public void close() {
+      if (joined) {
+        return;
+      }
       if (dataset.isInTransaction()) {
         dataset.abort();
       }

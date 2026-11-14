@@ -219,14 +219,16 @@ closures reads, so the result never depends on their order.
  "timeoutMillis": 600000, "closuresFile": "classify.closures.json"}
 ```
 
-The closures stay as separate as steps of their own were. Closure *n*, counted from 0, is
-classified in its own write transaction on its own output graph and gets its own manifest,
-`<step>-<n>.result.json`, in the shape of a `CLASSIFY` manifest, as soon as it is done. The step
-stops at the first closure that is inconsistent (the step still `SUCCEEDED`, outcome
-`INCONSISTENT`) or rejected (`FAILED`, with that closure's problems); its own manifest then names
-it in `stoppedAt` and counts the closures classified before it, which keep their graphs. A closure
-the deadline, the heap or a kill cut short has no manifest, so the first closure without a
-`SUCCEEDED` manifest is always the one that ended the step. The closures share the step's deadline
+Each closure has its own admission, its own engine, its own output graph and its own manifest:
+closure *n*, counted from 0, gets `<step>-<n>.result.json`, in the shape of a `CLASSIFY` manifest,
+as soon as it is classified. The step reads and writes inside one write transaction that commits
+after the last closure, so it writes every output graph or none (a commit forces a dozen files to
+disk, far longer than a small closure takes to classify). It stops at the first closure that is
+inconsistent (the step still `SUCCEEDED`, outcome `INCONSISTENT`) or rejected (`FAILED`, with that
+closure's problems); its own manifest then names that closure in `stoppedAt` and counts the
+closures classified before it, and the dataset is left as it was. A closure the deadline, the heap
+or a kill cut short has no manifest, so the first closure without a `SUCCEEDED` manifest is always
+the one that ended the step. The closures share the step's deadline
 and heap, and `maxNewFacts` bounds what they write together: each may write what the earlier ones
 left of it, up to `maxOutputTriples`. The step file's `protocol` is still 1: a worker without this
 step refuses the file as `INVALID_STEP`, and the image always ships the worker with the extension

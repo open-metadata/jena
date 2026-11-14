@@ -36,7 +36,7 @@ import org.junit.jupiter.api.io.TempDir;
  * CLASSIFY_ALL classifies several closures in one process and keeps them apart as steps of their
  * own were: each closure has its own entailment graph and its own result manifest, and the first
  * closure that is inconsistent, rejected, over the shared output budget or past the deadline ends
- * the step, leaving the closures before it complete and the ones after it untouched.
+ * the step. The manifests then say how far it got, and the dataset is as it was before the step.
  */
 class ClassifyAllStepTest {
   private static final String PREFIXES =
@@ -104,7 +104,7 @@ class ClassifyAllStepTest {
     assertEquals("INCONSISTENT", part("all-1").getString("outcome"));
     assertFalse(part("all-1").getObj("entailments").getBoolean("consistent"));
     assertFalse(Files.exists(job.resolve("all-2.result.json")), "a later closure never ran");
-    assertEquals(2, subjects("urn:a:entailments").size(), "the closure before it is complete");
+    assertEquals(Set.of(), subjects("urn:a:entailments"), "every output graph or none");
     assertEquals(Set.of(), subjects("urn:bad:entailments"));
     assertEquals(Set.of(), subjects("urn:c:entailments"));
   }
@@ -134,7 +134,7 @@ class ClassifyAllStepTest {
         "MISSING_IMPORT",
         rejected.get("problems").getAsArray().get(0).getAsObject().getString("code"));
     assertEquals("SUCCEEDED", part("all-0").getString("status"));
-    assertEquals(2, subjects("urn:a:entailments").size());
+    assertEquals(Set.of(), subjects("urn:a:entailments"), "every output graph or none");
   }
 
   @Test
@@ -156,7 +156,7 @@ class ClassifyAllStepTest {
   }
 
   @Test
-  void aClosurePastTheDeadlineEndsTheStepAndKeepsTheOnesBeforeIt() throws Exception {
+  void aClosurePastTheDeadlineEndsTheStepAndIsTheFirstWithoutAResult() throws Exception {
     load(hierarchy("a", 3) + Jobs.hardOntology(200));
     final Path step =
         step(
@@ -176,20 +176,22 @@ class ClassifyAllStepTest {
         elapsed < 3_000 + Watchdog.UNWIND_GRACE_MILLIS + 2_000, "elapsed " + elapsed + " ms");
     assertEquals("SUCCEEDED", part("all-0").getString("status"));
     assertFalse(Files.exists(job.resolve("all-1.result.json")), "the closure it interrupted");
-    assertEquals(2, subjects("urn:a:entailments").size());
+    assertEquals(Set.of(), subjects("urn:a:entailments"), "every output graph or none");
     assertEquals(Set.of(), subjects("urn:hard:entailments"));
     assertFalse(Files.exists(job.resolve("all.closure.nt")));
   }
 
   @Test
-  void aSecondRunReplacesTheResultsOfTheFirst() throws Exception {
+  void aSecondRunReplacesTheResultsAndTheGraphsOfTheFirst() throws Exception {
     load(hierarchy("a", 3) + hierarchy("b", 5));
     final Path both = step(60_000, "", closure("a"), closure("b"));
     assertEquals(ExitCodes.COMPLETED, Jobs.run(both));
-    assertTrue(Files.exists(job.resolve("all-1.result.json")));
-    final Path one = step(60_000, "", closure("b"));
+    assertEquals(2, subjects("urn:a:entailments").size());
+    final Path one =
+        step(60_000, "", closure("b").replace("urn:b:entailments", "urn:a:entailments"));
     assertEquals(ExitCodes.COMPLETED, Jobs.run(one));
     assertEquals("http://example.org/b", part("all-0").getObj("closure").getString("root"));
+    assertEquals(4, subjects("urn:a:entailments").size(), "replaced, not added to");
   }
 
   @Test
