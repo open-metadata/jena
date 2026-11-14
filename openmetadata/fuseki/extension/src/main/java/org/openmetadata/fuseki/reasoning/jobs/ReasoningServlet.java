@@ -20,8 +20,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -66,16 +70,17 @@ public final class ReasoningServlet extends HttpServlet {
     CAPABILITIES("GET"),
     JOBS("POST"),
     JOB("GET", "DELETE"),
-    INPUT("PUT"),
+    INPUT("PUT", "HEAD"),
     RESULTS("GET"),
     QUERY("POST");
 
     private final Set<String> methods;
 
     Resource(final String... methods) {
-      this.methods = Set.of(methods);
+      this.methods = Collections.unmodifiableSet(new LinkedHashSet<>(List.of(methods)));
     }
 
+    /** In the order the Allow header lists them. */
     Set<String> methods() {
       return methods;
     }
@@ -137,7 +142,13 @@ public final class ReasoningServlet extends HttpServlet {
     switch (route.resource()) {
       case CAPABILITIES -> send(response, 200, jobs.capabilities());
       case JOBS -> submit(request, response);
-      case INPUT -> upload(request, response, route.digest());
+      case INPUT -> {
+        if (method.equals("HEAD")) {
+          heldInput(response, route.digest());
+        } else {
+          upload(request, response, route.digest());
+        }
+      }
       case JOB -> {
         final Optional<JsonObject> job =
             method.equals("GET") ? jobs.job(route.id()) : jobs.cancel(route.id());
@@ -271,6 +282,22 @@ public final class ReasoningServlet extends HttpServlet {
       final String id = submission.job().getString("id");
       response.setHeader("Location", request.getContextPath() + "/reasoning/jobs/" + id);
       send(response, submission.created() ? 202 : 200, submission.job());
+    } catch (final JobService.Refused e) {
+      send(response, e.status(), e.problem().toJson());
+    }
+  }
+
+  private void heldInput(final HttpServletResponse response, final String hex) throws IOException {
+    try {
+      final OptionalLong size = jobs.heldInput(hex);
+      if (size.isEmpty()) {
+        problem(response, 404, "No input sha256:" + hex + " is held");
+        return;
+      }
+      response.setStatus(200);
+      response.setContentType(JobRequest.RELEASE_MEDIA_TYPE);
+      response.setHeader("Cache-Control", "no-store");
+      response.setContentLengthLong(size.getAsLong());
     } catch (final JobService.Refused e) {
       send(response, e.status(), e.problem().toJson());
     }

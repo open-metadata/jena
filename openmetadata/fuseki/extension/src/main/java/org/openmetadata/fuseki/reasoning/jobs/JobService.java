@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongSupplier;
@@ -54,6 +55,9 @@ public final class JobService implements AutoCloseable {
   /** Thread interruption ends a worker step with SIGKILL and then waits for the worker to exit. */
   private static final long STOP_WAIT_MILLIS = 60_000;
 
+  /** How long an upload may rely on the last walk of the rest of the reasoning root. */
+  static final long DISK_USE_TTL_MILLIS = 5_000;
+
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
 
   private final ReasoningSettings settings;
@@ -65,6 +69,7 @@ public final class JobService implements AutoCloseable {
   private final LongSupplier clock;
   private final JobStore store;
   private final JobInputs inputs;
+  private final DiskUse diskUse;
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -116,6 +121,16 @@ public final class JobService implements AutoCloseable {
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
     this.inputs = new JobInputs(settings.reasoningRoot());
+    this.diskUse =
+        new DiskUse(
+            settings.reasoningRoot(),
+            clock,
+            DISK_USE_TTL_MILLIS,
+            task -> {
+              final Thread thread = new Thread(task, "openmetadata-reasoning-disk-use");
+              thread.setDaemon(true);
+              thread.start();
+            });
   }
 
   /**
@@ -162,6 +177,7 @@ public final class JobService implements AutoCloseable {
       retain();
       inputs.sweep(uploadsInUse(), clock.getAsLong(), true);
     }
+    diskUse.measure();
     LOG.info(
         "Reasoning jobs: {} kept, {} interrupted by the last shutdown", jobs.size(), interrupted);
   }
@@ -293,8 +309,25 @@ public final class JobService implements AutoCloseable {
         declaredBytes,
         jobSettings.maxUploadBytes(),
         quota,
-        () -> JobStore.sizeOnDisk(root),
+        diskUse::outsideUploads,
         clock.getAsLong());
+  }
+
+  /**
+   * The size of the upload held under {@code hex}, for {@code HEAD /reasoning/inputs/...}. Asking
+   * restarts the hold, as uploading the same bytes would, so a client keeps an input alive without
+   * sending it again.
+   */
+  public OptionalLong heldInput(final String hex) throws Refused, IOException {
+    if (!settings.enabled()) {
+      throw new Refused(
+          503,
+          Problem.of(
+              Problem.Code.NOT_READY,
+              "Reasoning is disabled: " + ReasoningSettings.ENABLED + " is not true"));
+    }
+    sweepInputs();
+    return inputs.hold(hex, clock.getAsLong());
   }
 
   /**
