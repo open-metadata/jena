@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.openmetadata.fuseki.reasoning.jobs.RefreshCapture;
 import org.openmetadata.reasoner.ExitCodes;
 import org.openmetadata.reasoner.InvalidStepException;
 import org.openmetadata.reasoner.Limits;
@@ -41,6 +42,12 @@ class LauncherContractTest {
     assertEquals(ExitCodes.INPUT_REJECTED, WorkerExitCodes.INPUT_REJECTED);
     assertEquals(ExitCodes.TIME_BUDGET, WorkerExitCodes.TIME_BUDGET);
     assertEquals(ExitCodes.BUDGET, WorkerExitCodes.BUDGET);
+  }
+
+  /** A refresh hands every release it admits to one CLASSIFY_ALL step. */
+  @Test
+  void oneStepTakesEveryReleaseARefreshAdmits() {
+    assertEquals(RefreshCapture.MAX_CLOSURES, StepFile.MAX_BATCH_CLOSURES);
   }
 
   /** Capabilities report the extension's copy of the limits; the worker enforces its own. */

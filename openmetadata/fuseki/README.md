@@ -460,8 +460,8 @@ removed, oldest first. Directories without a `job.json` are never removed.
 **What a job does in this release.** A `CHECK` runs `capture`, `load` and `classify`; an
 `EXPLAIN` runs `snapshot` (a governance fact is answered there, see
 [Governance explanations](#governance-explanations)), then `capture`, `load` and `explain`; a
-`REFRESH` runs `capture`, `load`, `classify` (one worker step per release), `rules`, `compact` and
-`publish` ([Refresh](#refresh)). The outcome of a check or explanation is the protocol's answer:
+`REFRESH` runs `capture`, `load`, `classify` (one worker step for all the releases), `rules`,
+`compact` and `publish` ([Refresh](#refresh)). The outcome of a check or explanation is the protocol's answer:
 
 | Result | Job |
 |---|---|
@@ -583,7 +583,7 @@ through the same entry point.
    of another release because the ontology was activated again since the request was made, fails
    the job `INPUT_CHANGED` with the `ontologyId` as subject, and the next refresh sees the new
    release. An `owl:imports` is `MISSING_IMPORT`, as for a `CHECK`, since no other ontology is in
-   the input. Each release is one closure with a `CLASSIFY` step of its own; at most 1,000;
+   the input. Each release is one closure; at most 1,000;
 2. streams the catalog: every quad whose predicate a rule can match, read predicate by predicate
    from TDB2's predicate-first index (a rule with a variable predicate or a negated property set
    reads everything), from every graph but the store's own (`urn:openmetadata:`) and the paths
@@ -599,19 +599,23 @@ revision is older than the current snapshot's (same dataset generation, lower wa
 before capturing with `SUPERSEDED`. A refresh with no releases still runs the rules over the
 catalog.
 
-**Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY` step per closure into
-`urn:openmetadata:entailments:<release id>`; `rules` runs the rules to a fixed point
+**Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY_ALL` step, a single
+worker that classifies each closure in turn into `urn:openmetadata:entailments:<release id>`;
+`rules` runs the rules to a fixed point
 (`maxPasses` 64) reading the catalog graphs, the closures' graphs and their entailments, writing
 each rule's conclusions to `urn:openmetadata:inferred:<rule>` and its witnesses to
 `urn:openmetadata:provenance`; `compact` compacts the working dataset; `publish` makes it the
 dataset's current snapshot. The closures' entailments and the rules' new facts together may not
-pass `maxDerivedTriples`: each `CLASSIFY` gets what is left as `maxOutputTriples`, and `RULES` gets
+pass `maxDerivedTriples`: each closure gets what the ones before it left, and `RULES` gets
 the rest as `maxNewFacts`; the spool of a pass gets what the disk quota leaves. A refresh publishes
 complete results or none: a limit, the deadline, the worker's heap, a release outside OWL 2 DL or
 an inconsistent release (`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the
 protocol's limit names (`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as
-subjects, and the previous snapshot stays current. A `SUCCEEDED` refresh has `snapshotId`, and
-`input.engines` names the engines that computed it.
+subjects, and the previous snapshot stays current. A problem with one release has the step
+`classify-<n>`, *n* the release's position in `ontologyReleases` counted from 0, whether the
+release was inconsistent or rejected or the deadline or the heap ran out while it was classified;
+`classify-<n>.result.json` in the job directory is that release's result. A `SUCCEEDED` refresh has
+`snapshotId`, and `input.engines` names the engines that computed it.
 
 ### Snapshots
 
@@ -701,6 +705,13 @@ The column descriptions no rule reads were never captured. Disk, not memory, is 
 costs: a snapshot holds the captured input, the derived facts and one witness per fact in six TDB2
 quad indexes, and a refresh needs the working dataset and its compacted copy at once. A snapshot
 query for the 4,200 PII columns of the larger catalog took 157 ms.
+
+Releases cost about 12 ms each after the worker's start, since one worker classifies them all and
+commits once: with 1,000 tables and releases of 100 classes each
+(`-Dreasoning.performance.releases=` and `-Dreasoning.performance.terms=`), `classify` took 1.8
+to 2.1 s for 50 releases, 3.5 to 3.8 s for 200 and 12.6 s for 1,000. With a worker per release it
+took 58 to 60 s for 50 and 219 to 230 s for 200, 1.1 s a release, nearly all of it starting a JVM
+and opening the dataset.
 
 ### Memory budget
 

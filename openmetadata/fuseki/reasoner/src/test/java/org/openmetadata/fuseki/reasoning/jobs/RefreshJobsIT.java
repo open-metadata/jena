@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.openmetadata.fuseki.reasoning.ImageLayout;
 import org.openmetadata.fuseki.reasoning.ReasoningSettings;
+import org.openmetadata.reasoner.Jobs;
 
 /**
  * REFRESH, QUERY, RESULTS and governance EXPLAIN end to end, with the packaged worker started by
@@ -123,7 +124,11 @@ GRAPH <https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
   }
 
   private void startService() throws Exception {
-    operations = new Operations(settings, JobSettings.fromEnvironment(Map.of()));
+    startService(Map.of());
+  }
+
+  private void startService(final Map<String, String> jobSettings) throws Exception {
+    operations = new Operations(settings, JobSettings.fromEnvironment(jobSettings));
     service =
         new JobService(
             operations,
@@ -322,6 +327,122 @@ GRAPH <https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
     assertEquals(0, operations.snapshots().generation(DATASET), "nothing was published");
   }
 
+  /**
+   * Every release of a refresh is classified by one worker, and stays as separate as when each had
+   * a worker of its own: its own entailment graph, its own result and its own place in the answer.
+   */
+  @Test
+  void theReleasesOfARefreshAreClassifiedByOneWorkerEachIntoItsOwnGraph() throws Exception {
+    final Releases.Release risk =
+        release(
+            "risk",
+            """
+            <https://open-metadata.org/risk#Exposure> a owl:Class .
+            <https://open-metadata.org/risk#Credit> a owl:Class ;
+                rdfs:subClassOf <https://open-metadata.org/risk#Exposure> .
+            """);
+    Releases.activate(serving, risk);
+    final JsonObject job = run(refresh(10, finance, risk));
+    assertEquals("SUCCEEDED", job.getString("state"), job.toString());
+
+    final String subClassOf = "<http://www.w3.org/2000/01/rdf-schema#subClassOf>";
+    final String financeGraph = RefreshCapture.entailmentGraph(finance.releaseId().toString());
+    final String riskGraph = RefreshCapture.entailmentGraph(risk.releaseId().toString());
+    assertEquals(
+        Set.of(F + "Loan"),
+        select("SELECT ?c WHERE { GRAPH <" + financeGraph + "> { ?c " + subClassOf + " ?d } }"));
+    assertEquals(
+        Set.of("https://open-metadata.org/risk#Credit"),
+        select("SELECT ?c WHERE { GRAPH <" + riskGraph + "> { ?c " + subClassOf + " ?d } }"));
+
+    final JsonArray closures =
+        service.results(id(job), 0, 10).getObj("result").get("closures").getAsArray();
+    assertEquals(2, closures.size());
+    assertEquals(financeGraph, closures.get(0).getAsObject().getString("entailmentGraph"));
+    assertEquals(ROOT, closures.get(0).getAsObject().getString("ontologyIri"));
+    assertEquals(riskGraph, closures.get(1).getAsObject().getString("entailmentGraph"));
+    assertEquals(
+        "https://open-metadata.org/ontology/risk",
+        closures.get(1).getAsObject().getString("ontologyIri"));
+    assertEquals(1, closures.get(1).getAsObject().getNumber("entailedTriples").intValue());
+
+    final JsonObject step = file(job, "classify.result.json");
+    assertEquals("CLASSIFY_ALL", step.getString("kind"));
+    assertEquals(2, step.getObj("closures").getNumber("classified").intValue());
+    assertEquals("CLASSIFY", file(job, "classify-0.result.json").getString("kind"));
+    assertEquals(
+        "https://open-metadata.org/ontology/risk",
+        file(job, "classify-1.result.json").getObj("closure").getString("root"));
+    assertTrue(Files.exists(directory(job).resolve("classify.log")), "the one worker's log");
+    assertTrue(Files.notExists(directory(job).resolve("classify-1.log")), "no worker of its own");
+  }
+
+  @Test
+  void anInconsistentReleaseAmongOthersIsTheOneTheProblemNames() throws Exception {
+    final Releases.Release broken =
+        release(
+            "broken",
+            """
+            <https://open-metadata.org/broken#A> a owl:Class .
+            <https://open-metadata.org/broken#B> a owl:Class ;
+                owl:disjointWith <https://open-metadata.org/broken#A> .
+            <https://open-metadata.org/broken#i> a owl:NamedIndividual ,
+                <https://open-metadata.org/broken#A> , <https://open-metadata.org/broken#B> .
+            """);
+    Releases.activate(serving, broken);
+    final Releases.Release later =
+        release("later", "<https://open-metadata.org/later#A> a owl:Class .\n");
+    Releases.activate(serving, later);
+    final JsonObject job = run(refresh(1, finance, broken, later));
+    assertEquals("FAILED", job.getString("state"), job.toString());
+    assertEquals("INCONSISTENT_ONTOLOGY", job.getObj("problem").getString("code"));
+    assertEquals(
+        "https://open-metadata.org/ontology/broken", job.getObj("problem").getString("subject"));
+    assertEquals("classify-1", job.getObj("problem").getString("step"));
+    assertEquals("CLASSIFIED", file(job, "classify-0.result.json").getString("outcome"));
+    assertEquals("INCONSISTENT", file(job, "classify-1.result.json").getString("outcome"));
+    assertTrue(Files.notExists(directory(job).resolve("classify-2.result.json")), "never reached");
+    assertEquals(0, operations.snapshots().generation(DATASET), "nothing was published");
+  }
+
+  /**
+   * A release the job's time runs out on ends the one worker at the job's deadline, as its own
+   * worker ended then: the job fails naming that release's step, and the release classified before
+   * it kept its result.
+   */
+  @Test
+  void aReleaseTheJobsTimeRunsOutOnFailsTheJobNamingItsStep() throws Exception {
+    service.close();
+    startService(Map.of(JobSettings.MAX_JOB_SECONDS, "12"));
+    final String hard = Jobs.hardOntology(200);
+    final String header = "a owl:Ontology .\n";
+    final Releases.Release endless =
+        release(
+            "endless",
+            hard.substring(hard.indexOf(header) + header.length(), hard.lastIndexOf('}')));
+    Releases.activate(serving, endless);
+    final JsonObject job = run(refresh(1, finance, endless));
+    assertEquals("FAILED", job.getString("state"), job.toString());
+    assertEquals("LIMIT_EXCEEDED", job.getObj("problem").getString("code"), job.toString());
+    assertEquals("maxJobSeconds", job.getObj("problem").getString("subject"));
+    assertEquals("classify-1", job.getObj("problem").getString("step"));
+    assertEquals("SUCCEEDED", file(job, "classify-0.result.json").getString("status"));
+    assertTrue(Files.notExists(directory(job).resolve("classify-1.result.json")));
+    assertEquals("TIME_BUDGET", file(job, "classify.result.json").getString("outcome"));
+    assertEquals(0, operations.snapshots().generation(DATASET), "nothing was published");
+  }
+
+  /** A release of a new ontology named {@code https://open-metadata.org/ontology/<name>}. */
+  private static Releases.Release release(final String name, final String members) {
+    final UUID releaseId = UUID.randomUUID();
+    return Releases.raw(
+        UUID.randomUUID(),
+        releaseId,
+        "<https://open-metadata.org/ontology/%s> a owl:Ontology ; owl:versionIRI <%s%s> .\n"
+                .formatted(name, Capture.RELEASE_IRI_PREFIX, releaseId)
+            + members);
+  }
+
   private static JsonArray rules(final RuleBundle.Rule... rules) {
     final JsonArray array = new JsonArray();
     for (final RuleBundle.Rule rule : rules) {
@@ -395,7 +516,7 @@ GRAPH <https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
     return refresh(watermark, finance);
   }
 
-  private JsonObject refresh(final long watermark, final Releases.Release release) {
+  private JsonObject refresh(final long watermark, final Releases.Release... active) {
     final JsonObject request = new JsonObject();
     request.put("requestId", UUID.randomUUID().toString());
     request.put("operation", "REFRESH");
@@ -408,7 +529,9 @@ GRAPH <https://open-metadata.org/graph/inferred/pii-propagation-via-lineage> {
                 + watermark
                 + "}"));
     final JsonArray releases = new JsonArray();
-    releases.add(release.ref());
+    for (final Releases.Release release : active) {
+      releases.add(release.ref());
+    }
     request.put("ontologyReleases", releases);
     final JsonArray rules =
         rules(

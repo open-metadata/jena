@@ -225,14 +225,22 @@ class RefreshPerformanceIT {
       capture.remove("closures");
       report.put("capture", capture);
       final JsonObject workers = new JsonObject();
-      for (final String name : List.of("load", "classify-0", "rules", "compact")) {
+      for (final String name : List.of("load", "classify", "rules", "compact")) {
         final JsonObject manifest = JSON.read(directory.resolve(name + ".result.json").toString());
         final JsonObject worker = manifest.getObj("worker");
         final JsonObject entry = new JsonObject();
         entry.put("heapPeakAfterGcBytes", worker.get("heapPeakAfterGcBytes"));
         entry.put("heapMaxBytes", worker.get("heapMaxBytes"));
         for (final String key :
-            List.of("datasetBytes", "quads", "passes", "newFacts", "bytesBefore", "bytesAfter")) {
+            List.of(
+                "datasetBytes",
+                "quads",
+                "closures",
+                "outputTriples",
+                "passes",
+                "newFacts",
+                "bytesBefore",
+                "bytesAfter")) {
           if (manifest.hasKey(key)) {
             entry.put(key, manifest.get(key));
           }
