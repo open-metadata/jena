@@ -74,13 +74,13 @@ class OntologyJobsIT {
     final ImageLayout image = ImageLayout.create(root, FUSEKI_SERVER, REASONER);
     settings = image.settings("512m");
     final JobSettings jobs = JobSettings.fromEnvironment(Map.of());
+    final Operations operations = new Operations(settings, jobs);
     service =
         new JobService(
-            settings,
-            jobs,
+            operations,
             image.launcher(settings),
             image.launcher(settings)::readiness,
-            Plans.current(new Operations(settings, jobs)),
+            Plans.current(operations, name -> null),
             System::currentTimeMillis);
     service.open();
     service.start();

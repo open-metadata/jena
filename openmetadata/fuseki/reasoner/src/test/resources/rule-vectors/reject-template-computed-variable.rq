@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/>
+CONSTRUCT { ?x :q ?n } WHERE { ?x :p ?y BIND(STR(?y) AS ?n) }

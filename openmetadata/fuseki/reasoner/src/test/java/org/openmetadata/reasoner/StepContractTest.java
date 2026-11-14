@@ -338,6 +338,38 @@ GRAPH <urn:c> {
     assertInvalidStep(Jobs.load("fresh", "input.trig").replace("}", ", \"rules\": []}"));
   }
 
+  @Test
+  void aClosureOrARulesStepMayListItsGraphsInAFileOfTheJob() {
+    Jobs.file(job, "closure.graphs", "urn:c\n\n");
+    final String classify =
+        "{\"protocol\": 1, \"stepId\": \"%s\", \"kind\": \"CLASSIFY\", \"dataset\":"
+            + " \"working\", \"timeoutMillis\": 60000, \"output\": \"urn:out\","
+            + " \"closure\": {\"root\": \"http://example.org/c\", %s}}";
+    final Path listed =
+        Jobs.write(
+            job, "listed", classify.formatted("listed", "\"graphsFile\": \"closure.graphs\""));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(listed), () -> Jobs.manifest(listed).toString());
+    assertTrue(outputTriples(listed) > 0);
+    assertInvalidStep(classify.formatted("invalid", "\"graphsFile\": \"absent.graphs\""));
+    assertInvalidStep(classify.formatted("invalid", "\"graphsFile\": \"../closure.graphs\""));
+    assertInvalidStep(
+        classify.formatted(
+            "invalid", "\"graphsFile\": \"closure.graphs\", \"graphs\": [\"urn:c\"]"));
+
+    Jobs.file(job, "rules.read", "urn:c\n");
+    final String rules =
+        "{\"protocol\": 1, \"stepId\": \"r\", \"kind\": \"RULES\", \"dataset\": \"working\","
+            + " \"timeoutMillis\": 60000, %s \"provenance\": \"urn:prov\", \"rules\": [{\"name\":"
+            + " \"copy-p\", \"ruleBody\": \"CONSTRUCT { ?s <urn:q> ?o } WHERE { ?s <urn:p> ?o }\","
+            + " \"output\": \"urn:rule-out\"}]}";
+    final Path read = Jobs.write(job, "r", rules.formatted("\"readFile\": \"rules.read\","));
+    assertEquals(ExitCodes.COMPLETED, Jobs.run(read), () -> Jobs.manifest(read).toString());
+    assertEquals("CONVERGED", Jobs.outcome(read));
+    assertInvalidStep(rules.formatted("\"readFile\": \"rules.read\", \"read\": [\"urn:c\"],"));
+    Jobs.file(job, "reserved.read", "urn:openmetadata:reasoner:delta:1\n");
+    assertInvalidStep(rules.formatted("\"readFile\": \"reserved.read\","));
+  }
+
   private void assertInvalidStep(final String json) {
     final Path step = Jobs.write(job, "invalid", json);
     assertEquals(ExitCodes.INVALID_STEP, Jobs.run(step), json);

@@ -28,7 +28,12 @@ public record WorkerLimits(
     long maxExpressionDepth,
     long maxOutputTriples,
     long maxChecks,
-    long maxExplainChecks) {
+    long maxExplainChecks,
+    long maxRules,
+    long maxRulePatterns,
+    long maxPasses,
+    long maxNewFacts,
+    long maxSpoolBytes) {
 
   private static final double GIB = 1L << 30;
 
@@ -42,14 +47,23 @@ public record WorkerLimits(
         32,
         scaled(500_000, gib),
         1_000,
-        1_000);
+        1_000,
+        256,
+        64,
+        64,
+        10_000_000,
+        4L << 30);
   }
 
   private static long scaled(final long perGib, final double gib) {
     return Math.max(1, Math.round(perGib * gib));
   }
 
-  /** The step file's {@code limits} object, with the input size capped at {@code maxInputBytes}. */
+  /**
+   * The step file's {@code limits} object, with the input size capped at {@code maxInputBytes}. The
+   * RULES limits are left to the worker's defaults, which are the same; a REFRESH sets them on its
+   * RULES step itself.
+   */
   public JsonObject toJson(final long inputBytes) {
     final JsonObject json = new JsonObject();
     json.put("maxInputBytes", Math.max(1, Math.min(maxInputBytes, inputBytes)));
