@@ -1,14 +1,18 @@
-Copied unchanged from open-metadata/OpenMetadata at commit 1728d000a5cdd9de0b0489680569517dd2380498
-(branch feat/rdf-reasoning-protocol-gaps, 2026-10-14, not yet on main when copied):
+Copied unchanged from open-metadata/OpenMetadata at commit 6f7e64bb9bca5cd0932db5d6f8980e2a34e926a0
+(branch feat/rdf-reasoning-release-input, 2026-11-10, not yet on main when copied):
 
   schema/*.json    openmetadata-spec/src/main/resources/json/schema/api/rdf/
   examples/*.json  openmetadata-service/src/test/resources/rdf/reasoning/
 
 They define the reasoning protocol this extension implements without OpenMetadata's classes; the
-tests load them to pin the wire format. That commit adds the capabilities' operations list, the
-per-operation limit rules and the NOT_IMPLEMENTED problem code
-(ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces in
-OpenMetadata); the request schema's per-operation rules come from OpenMetadata pull request 35199.
+tests load them to pin the wire format. That commit names ontology releases in requests, jobs and
+snapshots (ontologyReleases), has a CHECK or EXPLAIN name the one release it reasons over as
+uploaded RDF (releaseRdf), requires a REFRESH to carry its rules inline, and adds the INPUT_CHANGED
+problem code and the maxUploadBytes limit
+(ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules in OpenMetadata). It
+builds on the capabilities' operations list, the per-operation limit rules and the NOT_IMPLEMENTED
+problem code (ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces).
 Contract applies the schemas' allOf/if/then and contains rules to the documents the store writes;
 JobRequestTest checks the request rules against the store's own validator. Refresh these files when
-the protocol changes, and keep the commit above current.
+the protocol changes, and keep the commit above current: once that commit is on main, cite the
+main commit instead.

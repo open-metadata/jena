@@ -13,6 +13,7 @@
 package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -21,9 +22,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonNumber;
 import org.apache.jena.atlas.json.JsonObject;
@@ -57,8 +60,10 @@ public final class JobService implements AutoCloseable {
   private final WorkerLauncher launcher;
   private final Supplier<Readiness> readiness;
   private final Stage.Planner planner;
+  private final Operations operations;
   private final LongSupplier clock;
   private final JobStore store;
+  private final JobInputs inputs;
 
   private final Object lock = new Object();
   private final Map<UUID, Job> jobs = new HashMap<>();
@@ -102,8 +107,10 @@ public final class JobService implements AutoCloseable {
     this.launcher = launcher;
     this.readiness = readiness;
     this.planner = planner;
+    this.operations = new Operations(settings, jobSettings);
     this.clock = clock;
     this.store = new JobStore(settings.reasoningRoot());
+    this.inputs = new JobInputs(settings.reasoningRoot());
   }
 
   /** The service the Fuseki module runs, with the container's memory and this JVM's heap. */
@@ -115,7 +122,7 @@ public final class JobService implements AutoCloseable {
         jobs,
         new WorkerLauncher(settings, memory, fusekiHeap, false),
         () -> Readiness.evaluate(settings, memory, fusekiHeap, false, false),
-        Plans.current(),
+        Plans.current(new Operations(settings, jobs)),
         System::currentTimeMillis);
   }
 
@@ -142,6 +149,7 @@ public final class JobService implements AutoCloseable {
         byRequest.put(job.requestId(), job);
       }
       retain();
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), true);
     }
     LOG.info(
         "Reasoning jobs: {} kept, {} interrupted by the last shutdown", jobs.size(), interrupted);
@@ -198,11 +206,21 @@ public final class JobService implements AutoCloseable {
       json.put("readiness", settings.enabled() ? "NOT_READY" : "DISABLED");
       reasons.add("The memory budget cannot be evaluated: " + e.getMessage());
     }
+    long quota = -1;
+    try {
+      quota = jobSettings.diskQuota(settings.reasoningRoot());
+    } catch (final RuntimeException e) {
+      LOG.warn("Cannot resolve the reasoning disk quota: {}", e.toString());
+      if (settings.enabled()) {
+        json.put("readiness", "NOT_READY");
+        reasons.add("The reasoning disk quota cannot be resolved: " + e.getMessage());
+      }
+    }
     json.put("reasons", reasons);
-    json.put("operations", Plans.operations());
-    // No operation reaches an engine until input capture exists, so none is claimed.
-    json.put("engines", new JsonArray());
-    json.put("coverage", new JsonArray());
+    // Without the quota maxDiskBytes cannot be listed, and the protocol then forbids AVAILABLE.
+    json.put("operations", operations.operations(quota > 0));
+    json.put("engines", operations.engines());
+    json.put("coverage", Operations.coverage());
     if (budget != null) {
       final JsonObject memory = new JsonObject();
       memory.put("containerLimitBytes", budget.availableBytes());
@@ -215,17 +233,58 @@ public final class JobService implements AutoCloseable {
       memory.put("safetyMargin", JsonNumber.valueDecimal("0.1"));
       json.put("memoryBudget", memory);
     }
-    // Only the limits this build enforces. The protocol requires the rest before the operations
-    // that need them may be AVAILABLE, not before readiness may be READY.
-    final JsonObject limits = new JsonObject();
-    limits.put("maxQueuedJobs", jobSettings.maxQueuedJobs());
-    try {
-      limits.put("maxDiskBytes", jobSettings.diskQuota(settings.reasoningRoot()));
-    } catch (final RuntimeException e) {
-      LOG.warn("Cannot resolve the reasoning disk quota: {}", e.toString());
-    }
+    final JsonObject limits = operations.limits(quota);
     json.put("limits", limits);
     return json;
+  }
+
+  /**
+   * Holds an input that a job will name, for {@code PUT /reasoning/inputs/sha256:{hex}}: refused
+   * over {@code maxUploadBytes}, when its bytes do not hash to {@code hex}, or when holding it
+   * would put the reasoning data over its disk quota.
+   */
+  public long maxUploadBytes() {
+    return jobSettings.maxUploadBytes();
+  }
+
+  public JobInputs.Stored upload(final String hex, final InputStream body)
+      throws Refused, IOException {
+    if (!settings.enabled()) {
+      throw new Refused(
+          503,
+          Problem.of(
+              Problem.Code.NOT_READY,
+              "Reasoning is disabled: " + ReasoningSettings.ENABLED + " is not true"));
+    }
+    final Path root = settings.reasoningRoot();
+    final long quota;
+    try {
+      quota = jobSettings.diskQuota(root);
+    } catch (final RuntimeException e) {
+      throw new Refused(
+          503,
+          Problem.of(Problem.Code.NOT_READY, "Disk use cannot be measured: " + e.getMessage()));
+    }
+    synchronized (lock) {
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
+    }
+    return inputs.put(
+        hex,
+        body,
+        jobSettings.maxUploadBytes(),
+        quota,
+        () -> JobStore.sizeOnDisk(root),
+        clock.getAsLong());
+  }
+
+  /**
+   * The digests, as stored, of the uploads that queued and running jobs will read. Under the lock.
+   */
+  private Set<String> uploadsInUse() {
+    return jobs.values().stream()
+        .filter(job -> !job.state().finished())
+        .flatMap(job -> job.uploadDigest().stream())
+        .collect(Collectors.toSet());
   }
 
   public Submission submit(final JobRequest request) throws Refused {
@@ -457,6 +516,18 @@ public final class JobService implements AutoCloseable {
         end(job, Job.State.CANCELLED, null, null);
         return;
       }
+      if (result.engines() != null) {
+        synchronized (lock) {
+          job.recordEngines(result.engines());
+        }
+      }
+      if (result.answered()) {
+        synchronized (lock) {
+          job.progress(stage.name(), i + 1);
+        }
+        end(job, Job.State.SUCCEEDED, result.outcome(), result.problem());
+        return;
+      }
       if (result.problem() != null) {
         end(job, Job.State.FAILED, null, result.problem());
         return;
@@ -492,6 +563,7 @@ public final class JobService implements AutoCloseable {
     synchronized (lock) {
       finish(job, state, outcome, problem);
       retain();
+      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
     }
     LOG.info(
         "Reasoning job {} {}{}",

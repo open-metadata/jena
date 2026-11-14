@@ -42,6 +42,8 @@ import org.apache.jena.fuseki.server.DataAccessPointRegistry;
  *                                            with the existing job for a known request ID
  *   GET    /reasoning/jobs/{id}              the job's state
  *   DELETE /reasoning/jobs/{id}              request cancellation: 202 while it stops, else 200
+ *   PUT    /reasoning/inputs/sha256:{hex}    hold an input a job will name by that digest: 201 when
+ *                                            new, 200 when the same bytes were already held
  *   GET    /reasoning/results/{id}           501 until snapshots exist
  *   POST   /reasoning/query                  501 until snapshots exist
  * </pre>
@@ -62,6 +64,7 @@ public final class ReasoningServlet extends HttpServlet {
     CAPABILITIES("GET"),
     JOBS("POST"),
     JOB("GET", "DELETE"),
+    INPUT("PUT"),
     RESULTS("GET"),
     QUERY("POST");
 
@@ -76,7 +79,11 @@ public final class ReasoningServlet extends HttpServlet {
     }
   }
 
-  record Route(Resource resource, UUID id) {}
+  record Route(Resource resource, UUID id, String digest) {
+    Route(final Resource resource, final UUID id) {
+      this(resource, id, null);
+    }
+  }
 
   /** The resource a path below /reasoning names, or empty when it names none. */
   static Optional<Route> route(final String pathInfo) {
@@ -91,6 +98,12 @@ public final class ReasoningServlet extends HttpServlet {
         case "query" -> Optional.of(new Route(Resource.QUERY, null));
         default -> Optional.empty();
       };
+    }
+    if (parts.length == 3 && parts[1].equals("inputs")) {
+      final String prefix = "sha256:";
+      return parts[2].startsWith(prefix) && JobInputs.isHex(parts[2].substring(prefix.length()))
+          ? Optional.of(new Route(Resource.INPUT, null, parts[2].substring(prefix.length())))
+          : Optional.empty();
     }
     if (parts.length == 3) {
       final Optional<UUID> id = uuid(parts[2]);
@@ -122,6 +135,7 @@ public final class ReasoningServlet extends HttpServlet {
     switch (route.resource()) {
       case CAPABILITIES -> send(response, 200, jobs.capabilities());
       case JOBS -> submit(request, response);
+      case INPUT -> upload(request, response, route.digest());
       case JOB -> {
         final Optional<JsonObject> job =
             method.equals("GET") ? jobs.job(route.id()) : jobs.cancel(route.id());
@@ -136,12 +150,12 @@ public final class ReasoningServlet extends HttpServlet {
           send(
               response,
               501,
-              Problem.of(Problem.Code.NOT_IMPLEMENTED, Plans.RESULTS_MISSING).toJson());
+              Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.RESULTS_MISSING).toJson());
       case QUERY ->
           send(
               response,
               501,
-              Problem.of(Problem.Code.NOT_IMPLEMENTED, Plans.QUERY_MISSING).toJson());
+              Problem.of(Problem.Code.NOT_IMPLEMENTED, Operations.QUERY_MISSING).toJson());
     }
   }
 
@@ -185,6 +199,35 @@ public final class ReasoningServlet extends HttpServlet {
       final String id = submission.job().getString("id");
       response.setHeader("Location", request.getContextPath() + "/reasoning/jobs/" + id);
       send(response, submission.created() ? 202 : 200, submission.job());
+    } catch (final JobService.Refused e) {
+      send(response, e.status(), e.problem().toJson());
+    }
+  }
+
+  private void upload(
+      final HttpServletRequest request, final HttpServletResponse response, final String hex)
+      throws IOException {
+    final String contentType = request.getContentType();
+    if (contentType == null || !contentType.equalsIgnoreCase(JobRequest.RELEASE_MEDIA_TYPE)) {
+      problem(response, 415, "A job input is " + JobRequest.RELEASE_MEDIA_TYPE);
+      return;
+    }
+    final long limit = jobs.maxUploadBytes();
+    if (request.getContentLengthLong() > limit) {
+      send(
+          response,
+          413,
+          Problem.of(Problem.Code.LIMIT_EXCEEDED, "An upload is at most " + limit + " bytes")
+              .withSubject("maxUploadBytes")
+              .toJson());
+      return;
+    }
+    try {
+      final JobInputs.Stored stored = jobs.upload(hex, request.getInputStream());
+      final JsonObject body = new JsonObject();
+      body.put("digest", "sha256:" + hex);
+      body.put("byteSize", stored.bytes());
+      send(response, stored.created() ? 201 : 200, body);
     } catch (final JobService.Refused e) {
       send(response, e.status(), e.problem().toJson());
     }

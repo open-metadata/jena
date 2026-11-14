@@ -56,23 +56,31 @@ public final class ImageLayout {
 
   /** The launcher the extension would build, with this worker heap and two CPUs. */
   public WorkerLauncher launcher(final String heap) {
-    final ReasoningSettings settings =
-        ReasoningSettings.fromEnvironment(
-            Map.of(
-                ReasoningSettings.ENABLED,
-                "true",
-                ReasoningSettings.HEAP,
-                heap,
-                ReasoningSettings.PAGE_CACHE_FLOOR,
-                "0",
-                ReasoningSettings.CPUS,
-                "2",
-                "FUSEKI_HEAP",
-                "1g",
-                "FUSEKI_BASE",
-                base.toString(),
-                "FUSEKI_HOME",
-                home.toString()));
+    return launcher(settings(heap));
+  }
+
+  /** The reasoning settings of this image with this worker heap and two CPUs. */
+  public ReasoningSettings settings(final String heap) {
+    return ReasoningSettings.fromEnvironment(
+        Map.of(
+            ReasoningSettings.ENABLED,
+            "true",
+            ReasoningSettings.HEAP,
+            heap,
+            ReasoningSettings.PAGE_CACHE_FLOOR,
+            "0",
+            ReasoningSettings.CPUS,
+            "2",
+            "FUSEKI_HEAP",
+            "1g",
+            "FUSEKI_BASE",
+            base.toString(),
+            "FUSEKI_HOME",
+            home.toString()));
+  }
+
+  /** The launcher the extension would build with these settings. */
+  public WorkerLauncher launcher(final ReasoningSettings settings) {
     return new WorkerLauncher(
         settings,
         new ContainerMemory(cgroupRoot),

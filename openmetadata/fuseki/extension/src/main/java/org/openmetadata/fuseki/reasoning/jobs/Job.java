@@ -12,8 +12,10 @@
  */
 package org.openmetadata.fuseki.reasoning.jobs;
 
+import java.util.Optional;
 import java.util.UUID;
 import org.apache.jena.atlas.json.JSON;
+import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
 
@@ -99,6 +101,16 @@ public final class Job {
     return dataset;
   }
 
+  /** The hex digest of the uploaded input this job reads, if its request named one. */
+  Optional<String> uploadDigest() {
+    final JsonValue upload = input.get("releaseRdf");
+    if (upload == null || !upload.isObject()) {
+      return Optional.empty();
+    }
+    final String digest = upload.getAsObject().getString("digest");
+    return Optional.of(digest.substring(digest.indexOf(':') + 1));
+  }
+
   String requestDigest() {
     return requestDigest;
   }
@@ -128,6 +140,11 @@ public final class Job {
   void progress(final String stepName, final int completed) {
     step = stepName;
     completedSteps = completed;
+  }
+
+  /** The engine builds that computed the job's answer, as rdfReasoningSnapshot.json's input. */
+  void recordEngines(final JsonArray engines) {
+    input.put("engines", JSON.copy(engines));
   }
 
   void requestCancel() {

@@ -48,10 +48,11 @@ import org.openmetadata.reasoner.StepFile;
  * N-Triples document that OWL API parses. The closure is the union of the listed named graphs.
  *
  * <p>Imports are resolved here, never by OWL API: every {@code owl:imports} target must be the IRI
- * or version IRI of an ontology header inside the closure, or the closure is rejected. The document
- * then carries only the root's header and no {@code owl:imports} triples at all, so OWL API has
- * nothing to fetch. Headers of imported ontologies lose only their typing and version triples;
- * their annotations, like everything else, pass through unchanged.
+ * or version IRI of an ontology header inside the closure, or the name of one of its graphs, the
+ * location the import was read from, or the closure is rejected. The document then carries only the
+ * root's header and no {@code owl:imports} triples at all, so OWL API has nothing to fetch. Headers
+ * of imported ontologies lose only their typing and version triples; their annotations, like
+ * everything else, pass through unchanged.
  */
 final class ClosureDocument {
   private static final Node TYPE = RDF.type.asNode();
@@ -100,15 +101,20 @@ final class ClosureDocument {
   private final long triples;
   private final String root;
   private final TreeMap<String, TreeSet<String>> imports;
+  private final int graphs;
 
   private ClosureDocument(
-      final long triples, final String root, final TreeMap<String, TreeSet<String>> imports) {
+      final long triples,
+      final String root,
+      final TreeMap<String, TreeSet<String>> imports,
+      final int graphs) {
     this.triples = triples;
     this.root = root;
     this.imports = imports;
+    this.graphs = graphs;
   }
 
-  JsonObject toJson(final int graphs) {
+  JsonObject toJson() {
     final JsonObject json = new JsonObject();
     json.put("root", root);
     json.put("graphs", graphs);
@@ -146,6 +152,12 @@ final class ClosureDocument {
       throws InputRejectedException, IOException {
     final List<Problem> problems = new ArrayList<>();
     final List<Node> graphs = new ArrayList<>();
+    if (closure.allGraphs()) {
+      dataset.listGraphNodes().forEachRemaining(graphs::add);
+      if (graphs.isEmpty()) {
+        problems.add(new Problem("MISSING_GRAPH", "The working dataset has no named graph"));
+      }
+    }
     for (final String name : closure.graphs()) {
       final Node graph = NodeFactory.createURI(name);
       if (!dataset.containsGraph(graph)) {
@@ -158,7 +170,8 @@ final class ClosureDocument {
     }
 
     final Set<Node> headers = new HashSet<>();
-    final Set<Node> names = new HashSet<>();
+    // A graph's name is where its document was read from, so an import may name it.
+    final Set<Node> names = new HashSet<>(graphs);
     final List<Triple> importTriples = new ArrayList<>();
     final Set<Node> referencedBlankNodes = new HashSet<>();
     final Set<Node> expressionBlankNodes = new HashSet<>();
@@ -275,7 +288,7 @@ final class ClosureDocument {
       }
       writer.finish();
     }
-    return new ClosureDocument(triples, closure.root(), imports);
+    return new ClosureDocument(triples, closure.root(), imports, graphs.size());
   }
 
   private static boolean isImportStructure(

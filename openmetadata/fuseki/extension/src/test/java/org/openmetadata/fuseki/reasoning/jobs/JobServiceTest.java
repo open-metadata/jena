@@ -265,19 +265,104 @@ class JobServiceTest {
   }
 
   @Test
-  void everyOperationFailsAtCaptureUntilCaptureExists() throws Exception {
-    final JobService service = service(Plans.current(), Map.of());
-    for (final String example :
-        List.of("refresh-request", "check-subsumption-request", "explain-request")) {
+  void aRefreshFailsAtCaptureUntilSnapshotsExist() throws Exception {
+    final JobService service = service(plans(), Map.of());
+    final JsonObject failed =
+        await(service, id(service.submit(request("refresh-request"))), state("FAILED"));
+    final JsonObject problem = failed.getObj("problem");
+    assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
+    assertEquals("capture", problem.getString("step"));
+    assertEquals(Operations.REFRESH_MISSING, problem.getString("message"));
+    assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
+    assertConforms(failed);
+  }
+
+  @Test
+  void aCheckWhoseUploadIsNotHeldFailsAtCaptureAsInputChanged() throws Exception {
+    final JobService service = service(plans(), Map.of());
+    for (final String example : List.of("check-subsumption-request", "explain-request")) {
       final JsonObject failed =
           await(service, id(service.submit(request(example))), state("FAILED"));
       final JsonObject problem = failed.getObj("problem");
-      assertEquals("NOT_IMPLEMENTED", problem.getString("code"));
+      assertEquals("INPUT_CHANGED", problem.getString("code"), failed.toString());
       assertEquals("capture", problem.getString("step"));
-      assertEquals(Plans.CAPTURE_MISSING, problem.getString("message"));
-      assertEquals(0, failed.getObj("progress").getNumber("completedSteps").intValue());
+      assertEquals(
+          Contract.example(example).getObj("releaseRdf").getString("digest"),
+          problem.getString("subject"));
       assertConforms(failed);
     }
+  }
+
+  @Test
+  void anUploadLivesUntilEveryJobThatNamesItHasFinished() throws Exception {
+    final CountDownLatch release = new CountDownLatch(1);
+    final Stage.Planner planner =
+        (job, request) ->
+            List.of(
+                stage(
+                    "hold",
+                    context -> {
+                      release.await();
+                      return Stage.Result.completed();
+                    }));
+    final JobService service = service(planner, Map.of());
+    final Releases.Release named = Releases.of("");
+    final Releases.Release other = Releases.of(":Asset a owl:Class .\n");
+    upload(service, named);
+    final JsonObject check = Contract.example("check-subsumption-request");
+    check.put("requestId", UUID.randomUUID().toString());
+    final UUID id = id(service.submit(JobRequest.validate(named.into(check), "openmetadata")));
+    await(service, id, state("RUNNING"));
+
+    now.addAndGet(5 * JobInputs.HOLD_MILLIS);
+    upload(service, other);
+    assertTrue(Files.exists(held(named)), "a running job still reads it");
+    assertTrue(Files.exists(held(other)));
+
+    release.countDown();
+    await(service, id, state("SUCCEEDED"));
+    assertFalse(Files.exists(held(named)), "removed once no job needs it and the hold has passed");
+    assertTrue(Files.exists(held(other)), "uploaded just now, so inside its hold");
+  }
+
+  @Test
+  void aServerStartRemovesUploadsPastTheirHoldAndHalfWrittenOnes() throws Exception {
+    final JobService first = service(worker(SUCCEED), Map.of());
+    final Releases.Release old = Releases.of("");
+    upload(first, old);
+    first.close();
+    final Path half = Files.writeString(held(old).resolveSibling("upload-9.tmp"), "half");
+    now.addAndGet(2 * JobInputs.HOLD_MILLIS);
+
+    service(worker(SUCCEED), Map.of());
+    assertFalse(Files.exists(held(old)));
+    assertFalse(Files.exists(half));
+  }
+
+  @Test
+  void anUploadCountsAgainstTheDiskQuota() throws Exception {
+    final JobService service = service(worker(SUCCEED), Map.of(JobSettings.DISK_QUOTA, "1m"));
+    final byte[] large = new byte[(1 << 20) + 1];
+    final JobService.Refused refused =
+        assertThrows(
+            JobService.Refused.class,
+            () -> service.upload(Releases.hash(large), new java.io.ByteArrayInputStream(large)));
+    assertEquals(503, refused.status());
+    assertEquals("maxDiskBytes", refused.problem().subject());
+    assertFalse(
+        Files.exists(settings.reasoningRoot().resolve("inputs").resolve(Releases.hash(large))));
+  }
+
+  @Test
+  void uploadsAreRefusedWhileReasoningIsDisabled() throws Exception {
+    settings = workers.settings(Map.of("OPENMETADATA_REASONING_ENABLED", "false"));
+    final JobService service = service(worker(SUCCEED), Map.of());
+    final JobService.Refused refused =
+        assertThrows(
+            JobService.Refused.class,
+            () -> service.upload("0".repeat(64), new java.io.ByteArrayInputStream(new byte[1])));
+    assertEquals(503, refused.status());
+    assertFalse(Files.exists(settings.reasoningRoot()));
   }
 
   @Test
@@ -409,23 +494,41 @@ class JobServiceTest {
         capabilities.getObj("memoryBudget").getNumber("containerLimitBytes").longValue());
     assertEquals(16, capabilities.getObj("limits").getNumber("maxQueuedJobs").intValue());
     assertEquals(3L << 30, capabilities.getObj("limits").getNumber("maxDiskBytes").longValue());
-    assertTrue(capabilities.get("engines").getAsArray().isEmpty(), "no engine is reachable yet");
-    final List<String> listed = new ArrayList<>();
+    final JsonObject limits = capabilities.getObj("limits");
+    assertEquals(3600, limits.getNumber("maxJobSeconds").intValue());
+    assertEquals(Operations.MAX_IMPORTS, limits.getNumber("maxImports").intValue());
+    assertEquals(1, Operations.MAX_IMPORTS, "imports between ontologies are deferred");
+    assertEquals(64L << 20, limits.getNumber("maxUploadBytes").longValue(), "64 MiB by default");
+    assertEquals(32, limits.getNumber("maxExpressionDepth").intValue());
+    assertEquals(200_000, limits.getNumber("maxClosureAxioms").longValue(), "2 GiB worker heap");
+    assertEquals(50_000, limits.getNumber("maxIndividuals").longValue());
+    assertTrue(capabilities.get("engines").getAsArray().isEmpty(), "no worker jar in this test");
+    final Map<String, String> availability = new java.util.LinkedHashMap<>();
     capabilities
         .get("operations")
         .getAsArray()
         .forEach(
-            support -> {
-              listed.add(support.getAsObject().getString("operation"));
-              assertEquals("NOT_IMPLEMENTED", support.getAsObject().getString("availability"));
-            });
-    assertEquals(Contract.enumeration(Contract.CAPABILITIES, "operation"), listed);
+            support ->
+                availability.put(
+                    support.getAsObject().getString("operation"),
+                    support.getAsObject().getString("availability")));
+    assertEquals(
+        Contract.enumeration(Contract.CAPABILITIES, "operation"),
+        new ArrayList<>(availability.keySet()));
+    assertEquals(
+        Map.of(
+            "REFRESH", "NOT_IMPLEMENTED",
+            "CHECK", "AVAILABLE",
+            "EXPLAIN", "AVAILABLE",
+            "RESULTS", "NOT_IMPLEMENTED",
+            "QUERY", "NOT_IMPLEMENTED"),
+        availability);
   }
 
   @Test
   void capabilitiesCannotClaimAnOperationWithoutTheLimitsItNeeds() throws Exception {
     final JobService service = service(worker(SUCCEED), Map.of());
-    for (final String operation : Contract.enumeration(Contract.CAPABILITIES, "operation")) {
+    for (final String operation : List.of("REFRESH", "RESULTS", "QUERY")) {
       final JsonObject claimed = service.capabilities();
       claimed
           .get("operations")
@@ -441,6 +544,18 @@ class JobServiceTest {
               .anyMatch(violation -> violation.startsWith("$.limits.")),
           operation + " was accepted as AVAILABLE without its limits");
     }
+    final JsonObject withoutJobSeconds = service.capabilities();
+    withoutJobSeconds.getObj("limits").remove("maxJobSeconds");
+    assertTrue(
+        Contract.violations(Contract.CAPABILITIES, withoutJobSeconds).stream()
+            .anyMatch(violation -> violation.startsWith("$.limits.")),
+        "CHECK was accepted as AVAILABLE without maxJobSeconds");
+    final JsonObject withoutUploadLimit = service.capabilities();
+    withoutUploadLimit.getObj("limits").remove("maxUploadBytes");
+    assertTrue(
+        Contract.violations(Contract.CAPABILITIES, withoutUploadLimit).stream()
+            .anyMatch(violation -> violation.startsWith("$.limits.")),
+        "CHECK was accepted as AVAILABLE without maxUploadBytes");
     assertEquals(
         List.of(),
         Contract.violations(Contract.CAPABILITIES, Contract.example("ready-capabilities")));
@@ -502,6 +617,10 @@ class JobServiceTest {
     return service;
   }
 
+  private Stage.Planner plans() {
+    return Plans.current(new Operations(settings, JobSettings.fromEnvironment(Map.of())));
+  }
+
   private static Stage.Planner worker(final String behaviour) {
     return worker(behaviour, WorkerStage.DEFAULT_MAX_BUSY_WAIT_MILLIS);
   }
@@ -546,6 +665,19 @@ class JobServiceTest {
         return body.run(context);
       }
     };
+  }
+
+  private void upload(final JobService service, final Releases.Release release) throws Exception {
+    service.upload(
+        release.digest().substring("sha256:".length()),
+        new java.io.ByteArrayInputStream(release.rdf()));
+  }
+
+  private Path held(final Releases.Release release) {
+    return settings
+        .reasoningRoot()
+        .resolve("inputs")
+        .resolve(release.digest().substring("sha256:".length()));
   }
 
   private static JobRequest request(final String example) throws JobRequest.Invalid {

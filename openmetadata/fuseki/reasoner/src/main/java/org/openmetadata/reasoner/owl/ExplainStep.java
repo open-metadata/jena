@@ -13,10 +13,16 @@
 package org.openmetadata.reasoner.owl;
 
 import com.clarkparsia.owlapi.explanation.BlackBoxExplanation;
+import com.clarkparsia.owlapi.explanation.HSTExplanationGenerator;
 import com.clarkparsia.owlapi.explanation.SatisfiabilityConverter;
+import com.clarkparsia.owlapi.explanation.util.ExplanationProgressMonitor;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.openmetadata.reasoner.InputRejectedException;
@@ -25,20 +31,27 @@ import org.openmetadata.reasoner.StepFile;
 import org.openmetadata.reasoner.StepResult;
 import org.openmetadata.reasoner.Watchdog;
 import org.openmetadata.reasoner.store.WorkingDataset;
+import org.semanticweb.owlapi.model.OWLAnnotationValue;
 import org.semanticweb.owlapi.model.OWLAxiom;
 import org.semanticweb.owlapi.model.OWLClassExpression;
 import org.semanticweb.owlapi.model.OWLDataFactory;
+import org.semanticweb.owlapi.model.OWLLiteral;
 import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.reasoner.OWLReasoner;
 
 /**
- * Computes one justification, a minimal set of closure axioms that entails the target: OWL API's
+ * Computes justifications, minimal sets of closure axioms that entail the target: OWL API's
  * black-box explanation over HermiT for an entailment, and a minimal inconsistent subset for an
  * inconsistency, which the black-box generator cannot find because owl:Thing gives it no signature
- * to expand from. Only one is computed, never all of them. The step's deadline bounds the search in
+ * to expand from. An entailment of an inconsistent closure is answered INCONSISTENT with the
+ * inconsistency's justification, since that is what entails it. One justification is computed by
+ * default; up to {@code maxJustifications} entailment justifications come from Reiter's hitting set
+ * tree over the black-box generator, never all of them. The step's deadline bounds the search in
  * time and {@code maxExplainChecks} in consistency checks, each on a fresh reasoner; running out of
- * time is INCOMPLETE and of checks LIMIT_EXCEEDED, neither a statement about the entailment. A
- * target that is not entailed is reported NOT_ENTAILED, which proves nothing about its negation.
+ * time is INCOMPLETE and of checks before any justification is found LIMIT_EXCEEDED, neither a
+ * statement about the entailment. Running out of checks after the first justification answers with
+ * those found and says the list is incomplete. A target that is not entailed is reported
+ * NOT_ENTAILED, which proves nothing about its negation.
  */
 public final class ExplainStep implements Step {
   @Override
@@ -58,22 +71,33 @@ public final class ExplainStep implements Step {
 
     final ExplainBudget budget = new ExplainBudget(step.limits().maxExplainChecks());
     final OWLReasoner reasoner = Engine.hermit(ontology);
+    // Both the closure's reasoner and the latest fresh one the generator made can be running a
+    // check, so a deadline interrupts both; see Watchdog for why it keeps interrupting.
+    final AtomicReference<OWLReasoner> latest = new AtomicReference<>();
     try {
-      watchdog.guard(reasoner::interrupt);
+      watchdog.guard(
+          () -> {
+            reasoner.interrupt();
+            final OWLReasoner fresh = latest.get();
+            if (fresh != null) {
+              fresh.interrupt();
+            }
+          });
       final boolean consistent = reasoner.isConsistent();
-      final Collection<OWLAxiom> justification;
-      if (axiom == null) {
-        if (consistent) {
-          return answer("NOT_ENTAILED", target, input);
-        }
-        justification = new MinimalInconsistentSubset(watchdog, budget).find(ontology);
+      final List<Justification> justifications = new ArrayList<>();
+      String incomplete = null;
+      final String outcome;
+      if (!consistent) {
+        outcome = axiom == null ? "EXPLAINED" : "INCONSISTENT";
+        watchdog.guard(null);
+        justifications.add(
+            Justification.of(new MinimalInconsistentSubset(watchdog, budget).find(ontology)));
+      } else if (axiom == null) {
+        return answer("NOT_ENTAILED", target, input);
+      } else if (!reasoner.isEntailed(axiom)) {
+        return answer("NOT_ENTAILED", target, input);
       } else {
-        if (!consistent) {
-          return answer("INCONSISTENT", target, input);
-        }
-        if (!reasoner.isEntailed(axiom)) {
-          return answer("NOT_ENTAILED", target, input);
-        }
+        outcome = "EXPLAINED";
         final OWLClassExpression unsatisfiable =
             new SatisfiabilityConverter(factory).convert(axiom);
         final BlackBoxExplanation generator =
@@ -82,36 +106,147 @@ public final class ExplainStep implements Step {
                 Engine.explanationFactory(
                     created -> {
                       budget.spend();
-                      watchdog.guard(created::interrupt);
+                      latest.set(created);
                     }),
                 reasoner);
         try {
-          justification = generator.getExplanation(unsatisfiable);
+          if (step.explain().maxJustifications() == 1) {
+            justifications.add(Justification.of(generator.getExplanation(unsatisfiable)));
+          } else {
+            incomplete =
+                several(
+                    generator, unsatisfiable, step.explain().maxJustifications(), justifications);
+          }
         } finally {
           generator.dispose();
         }
       }
-      final List<String> axioms =
-          justification.stream()
-              .map(justified -> justified.getAxiomWithoutAnnotations().toString())
-              .sorted()
-              .toList();
+      justifications.sort(Comparator.comparing(Justification::key));
       final List<String> report = new ArrayList<>();
-      report.add("OUTCOME EXPLAINED");
+      report.add("OUTCOME " + outcome);
       report.add("TARGET " + target);
-      axioms.forEach(line -> report.add("JUSTIFICATION " + line));
-      final JsonArray array = new JsonArray();
-      axioms.forEach(array::add);
-      return answer("EXPLAINED", target, input)
-          .detail("justification", array)
-          .detail("justificationSize", axioms.size())
-          .detail("consistencyChecks", budget.spent())
-          .report(report);
+      final JsonArray all = new JsonArray();
+      final JsonArray allSources = new JsonArray();
+      boolean sourced = false;
+      for (int i = 0; i < justifications.size(); i++) {
+        final String label = i == 0 ? "JUSTIFICATION " : "JUSTIFICATION#" + (i + 1) + " ";
+        final Justification justification = justifications.get(i);
+        justification.axioms().forEach(line -> report.add(label + line));
+        all.add(strings(justification.axioms()));
+        final JsonArray sources = new JsonArray();
+        justification.sources().forEach(each -> sources.add(strings(each)));
+        allSources.add(sources);
+        sourced |= justification.sources().stream().anyMatch(each -> !each.isEmpty());
+      }
+      final StepResult result =
+          answer(outcome, target, input)
+              .detail("justification", all.get(0))
+              .detail("justificationSize", justifications.get(0).axioms().size())
+              .detail("justifications", all)
+              .detail("consistencyChecks", budget.spent())
+              .report(report);
+      if (sourced) {
+        result.detail("justificationSources", allSources);
+      }
+      if (incomplete != null) {
+        result.detail("justificationsIncomplete", incomplete);
+      }
+      return result;
     } catch (final ExplainBudget.Exceeded e) {
       throw InputRejectedException.of("LIMIT_EXCEEDED", "EXPLAIN_CHECKS_EXCEEDED", e.getMessage());
     } finally {
       watchdog.guard(null);
       reasoner.dispose();
+    }
+  }
+
+  /**
+   * Up to {@code max} justifications from the hitting set tree. The first is found as with one; if
+   * the checks run out after that, the ones found are kept and the reason is returned.
+   */
+  private static String several(
+      final BlackBoxExplanation generator,
+      final OWLClassExpression unsatisfiable,
+      final int max,
+      final List<Justification> justifications) {
+    // The tree reports its first justification again when it finds it from a new node.
+    final Set<Set<OWLAxiom>> found = new LinkedHashSet<>();
+    final HSTExplanationGenerator tree = new HSTExplanationGenerator(generator);
+    tree.setProgressMonitor(
+        new ExplanationProgressMonitor() {
+          @Override
+          public void foundExplanation(final Set<OWLAxiom> justification) {
+            if (found.size() < max) {
+              found.add(Set.copyOf(justification));
+            }
+          }
+
+          @Override
+          public boolean isCancelled() {
+            return found.size() >= max;
+          }
+        });
+    String incomplete = null;
+    try {
+      tree.getExplanations(unsatisfiable, max);
+    } catch (final ExplainBudget.Exceeded e) {
+      if (found.isEmpty()) {
+        throw e;
+      }
+      incomplete = e.getMessage();
+    }
+    found.forEach(justification -> justifications.add(Justification.of(justification)));
+    return incomplete;
+  }
+
+  private static JsonArray strings(final List<String> values) {
+    final JsonArray array = new JsonArray();
+    values.forEach(array::add);
+    return array;
+  }
+
+  /**
+   * A minimal set of axioms, each as functional syntax without its annotations, and beside each the
+   * members it came from: the {@code dct:source} annotations OpenMetadata's release export puts on
+   * every statement, which are empty for an axiom without one.
+   */
+  private record Justification(List<String> axioms, List<List<String>> sources) {
+    private static final String SOURCE = "http://purl.org/dc/terms/source";
+
+    static Justification of(final Collection<OWLAxiom> justification) {
+      record Entry(String axiom, List<String> sources) {}
+      final List<Entry> entries =
+          justification.stream()
+              .map(
+                  justified ->
+                      new Entry(
+                          justified.getAxiomWithoutAnnotations().toString(), sources(justified)))
+              .sorted(
+                  Comparator.comparing(Entry::axiom)
+                      .thenComparing(entry -> String.join(" ", entry.sources())))
+              .toList();
+      return new Justification(
+          entries.stream().map(Entry::axiom).toList(),
+          entries.stream().map(Entry::sources).toList());
+    }
+
+    String key() {
+      return String.join("\n", axioms);
+    }
+
+    private static List<String> sources(final OWLAxiom axiom) {
+      return axiom
+          .annotations()
+          .filter(annotation -> annotation.getProperty().getIRI().toString().equals(SOURCE))
+          .map(annotation -> annotation.getValue())
+          .map(value -> value.asIRI().map(Object::toString).orElseGet(() -> literal(value)))
+          .sorted()
+          .distinct()
+          .toList();
+    }
+
+    private static String literal(final OWLAnnotationValue value) {
+      return value.asLiteral().map(OWLLiteral::getLiteral).orElse("");
     }
   }
 
