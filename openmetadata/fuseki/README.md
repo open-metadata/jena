@@ -371,7 +371,7 @@ the tests check against. The operations are served whenever the extension is ena
 | Request | Answer |
 |---|---|
 | `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the operations (`REFRESH`, `CHECK`, `EXPLAIN`, `RESULTS`, `QUERY`, each `AVAILABLE` or `NOT_IMPLEMENTED` with a reason), the memory budget (container limit, required bytes and each term), and the limits the store enforces (`maxQueuedJobs`, `maxDiskBytes`, `maxUploadBytes`, and the rest the protocol requires) |
-| `PUT /reasoning/inputs/sha256:<64 hex digits>` | Holds the body, `application/rdf+thrift`, as the input a later job names by that digest. `201` with `{"digest", "byteSize"}` when new; `200` when the same bytes were already held; `400` when the body is empty or does not hash to the digest in the path; `404` for a path that is not `sha256:` and 64 lowercase hex digits; `413` over `maxUploadBytes`; `415` for another content type; `503` when reasoning is disabled or holding it would put `/fuseki/reasoning` over the disk quota (`LIMIT_EXCEEDED`, subject `maxDiskBytes`); `405` for any other method |
+| `PUT /reasoning/inputs/sha256:<64 hex digits>` | Holds the body, `application/rdf+thrift`, as the input a later job names by that digest. `201` with `{"digest", "byteSize"}` when new; `200` when the same bytes were already held; `400` when the body is empty or does not hash to the digest in the path; `404` for a path that is not `sha256:` and 64 lowercase hex digits; `413` over `maxUploadBytes`; `415` for another content type; `429` when 4 uploads are already being received; `503` when reasoning is disabled or holding it would put `/fuseki/reasoning` over the disk quota (`LIMIT_EXCEEDED`, subject `maxDiskBytes`); `405` for any other method |
 | `POST /reasoning/jobs?dataset=<name>` | `202` with the new job and a `Location`; `200` with the existing job when its `requestId` is known; `400` for a request the schema refuses; `404` for a dataset that is not served; `409` for a known `requestId` sent with a different request or dataset; `413` over 4 MiB; `415` unless `application/json`; `429` when the queue is full; `503` when reasoning is disabled or not ready, or the disk quota is reached |
 | `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
 | `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
@@ -392,7 +392,12 @@ job's `input` records them with `releaseRdf`.
 temporary file while it is hashed, refused over `maxUploadBytes` or when the hash differs from the
 path, and renamed into place, so a reader never sees a partial upload and the same bytes uploaded
 again change nothing but the clock below. They count against `OPENMETADATA_REASONING_DISK_QUOTA` with
-everything else under `/fuseki/reasoning`, and an upload that would pass it is removed and refused.
+everything else under `/fuseki/reasoning`. An upload that cannot fit is refused with `503`
+`LIMIT_EXCEEDED` (`maxDiskBytes`) before its body is read when the store is already at the quota or
+the `Content-Length` would pass it; without one, or when others grew the data meanwhile, it is
+refused and removed once received. At most 4 uploads are received at once; a fifth gets `429`
+`LIMIT_EXCEEDED` (`maxConcurrentUploads`), the answer a full job queue gives, and retries. Neither
+the disk measure nor a sweep delays job status reads.
 An upload is kept while any queued or running job names it. Once none does, it is removed when
 more than an hour has passed since it was last uploaded, so a second job over the same release needs
 no second upload; uploads no job ever names go the same way. The removal runs when an upload

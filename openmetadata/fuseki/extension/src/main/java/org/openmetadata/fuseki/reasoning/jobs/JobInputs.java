@@ -24,6 +24,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Set;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -48,12 +49,22 @@ public final class JobInputs {
   /** Long enough to submit a job after the upload and to retry once; short enough to bound disk. */
   static final long HOLD_MILLIS = TimeUnit.HOURS.toMillis(1);
 
+  /**
+   * Uploads received at once. Each holds a request thread and a temporary file of up to {@code
+   * maxUploadBytes}; a client that finds them taken retries, as it does for a full job queue.
+   */
+  static final int MAX_CONCURRENT_UPLOADS = 4;
+
   private static final Logger LOG = LoggerFactory.getLogger("org.openmetadata.fuseki.Reasoning");
   private static final Pattern HEX = Pattern.compile("[0-9a-f]{64}");
   private static final int BUFFER_BYTES = 64 * 1024;
 
   private final Path directory;
   private final Object commit = new Object();
+  private final Semaphore slots = new Semaphore(MAX_CONCURRENT_UPLOADS);
+
+  /** Bytes uploads published since the store opened; only ever read or written under commit. */
+  private long publishedBytes;
 
   /** What an upload left behind. */
   public record Stored(boolean created, long bytes) {}
@@ -76,9 +87,17 @@ public final class JobInputs {
    * hex} if it hashes to it. A body already held is received and checked like any other and then
    * dropped, so a retry costs the client its bytes but never the store its quota.
    *
+   * <p>The quota is checked twice and the disk is never measured while {@code commit} is held,
+   * since the measure walks every file under the reasoning root. Before the body is read, an upload
+   * that cannot fit, by its {@code declaredBytes} if the client sent them, is refused without
+   * writing a byte. After it is read, the root is measured and the bytes that other uploads
+   * published since the measure began are added, so the last upload to commit sees all the others
+   * and committed state never passes the quota. Both measures count this upload's temporary file.
+   *
    * @param quotaBytes what the reasoning root may use in all; an upload that would leave it above
    *     that is refused and removed
    * @param usedBytes measures what the reasoning root uses now, temporary files included
+   * @param declaredBytes the body's length as the client sent it, or -1
    */
   Stored put(
       final String hex,
@@ -88,8 +107,50 @@ public final class JobInputs {
       final UsedBytes usedBytes,
       final long now)
       throws JobService.Refused, IOException {
+    return put(hex, body, -1, maxBytes, quotaBytes, usedBytes, now);
+  }
+
+  Stored put(
+      final String hex,
+      final InputStream body,
+      final long declaredBytes,
+      final long maxBytes,
+      final long quotaBytes,
+      final UsedBytes usedBytes,
+      final long now)
+      throws JobService.Refused, IOException {
+    if (!slots.tryAcquire()) {
+      throw new JobService.Refused(
+          429,
+          Problem.of(
+                  Problem.Code.LIMIT_EXCEEDED,
+                  MAX_CONCURRENT_UPLOADS + " uploads are already being received; retry shortly")
+              .withSubject("maxConcurrentUploads"));
+    }
+    try {
+      return receiveAndHold(hex, body, declaredBytes, maxBytes, quotaBytes, usedBytes, now);
+    } finally {
+      slots.release();
+    }
+  }
+
+  private Stored receiveAndHold(
+      final String hex,
+      final InputStream body,
+      final long declaredBytes,
+      final long maxBytes,
+      final long quotaBytes,
+      final UsedBytes usedBytes,
+      final long now)
+      throws JobService.Refused, IOException {
     Files.createDirectories(directory);
     final Path target = directory.resolve(hex);
+    if (!Files.isRegularFile(target)) {
+      final long used = usedBytes.get();
+      if (used >= quotaBytes || (declaredBytes > 0 && used + declaredBytes > quotaBytes)) {
+        throw overQuota(used + Math.max(declaredBytes, 0), quotaBytes);
+      }
+    }
     final Path temporary = Files.createTempFile(directory, "upload-", TEMPORARY);
     boolean published = false;
     try {
@@ -105,35 +166,46 @@ public final class JobInputs {
                     + hex
                     + " in the path"));
       }
+      final long publishedBefore;
+      synchronized (commit) {
+        publishedBefore = publishedBytes;
+      }
+      final long measured = usedBytes.get();
       synchronized (commit) {
         if (Files.isRegularFile(target)) {
           Files.setLastModifiedTime(target, FileTime.fromMillis(now));
           return new Stored(false, Files.size(target));
         }
-        final long used = usedBytes.get();
+        final long used = measured + (publishedBytes - publishedBefore);
         if (used > quotaBytes) {
-          throw new JobService.Refused(
-              503,
-              Problem.of(
-                      Problem.Code.LIMIT_EXCEEDED,
-                      "Holding this upload would bring the reasoning data to "
-                          + used
-                          + " bytes, over its quota of "
-                          + quotaBytes
-                          + " bytes")
-                  .withSubject("maxDiskBytes"));
+          throw overQuota(used, quotaBytes);
         }
+        final long size = Files.size(temporary);
         Files.setLastModifiedTime(temporary, FileTime.fromMillis(now));
         Files.move(
             temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         published = true;
-        return new Stored(true, Files.size(target));
+        publishedBytes += size;
+        return new Stored(true, size);
       }
     } finally {
       if (!published) {
         Files.deleteIfExists(temporary);
       }
     }
+  }
+
+  private static JobService.Refused overQuota(final long used, final long quotaBytes) {
+    return new JobService.Refused(
+        503,
+        Problem.of(
+                Problem.Code.LIMIT_EXCEEDED,
+                "Holding this upload would bring the reasoning data to "
+                    + used
+                    + " bytes, over its quota of "
+                    + quotaBytes
+                    + " bytes")
+            .withSubject("maxDiskBytes"));
   }
 
   /** Measures the bytes the reasoning root uses. */

@@ -295,7 +295,8 @@ public final class ReasoningServlet extends HttpServlet {
       return;
     }
     try {
-      final JobInputs.Stored stored = jobs.upload(hex, request.getInputStream());
+      final JobInputs.Stored stored =
+          jobs.upload(hex, request.getInputStream(), request.getContentLengthLong());
       final JsonObject body = new JsonObject();
       body.put("digest", "sha256:" + hex);
       body.put("byteSize", stored.bytes());

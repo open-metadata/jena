@@ -261,6 +261,15 @@ public final class JobService implements AutoCloseable {
 
   public JobInputs.Stored upload(final String hex, final InputStream body)
       throws Refused, IOException {
+    return upload(hex, body, -1);
+  }
+
+  /**
+   * As above; {@code declaredBytes}, the client's Content-Length or -1, lets an upload that cannot
+   * fit be refused before its body is read.
+   */
+  public JobInputs.Stored upload(final String hex, final InputStream body, final long declaredBytes)
+      throws Refused, IOException {
     if (!settings.enabled()) {
       throw new Refused(
           503,
@@ -277,16 +286,27 @@ public final class JobService implements AutoCloseable {
           503,
           Problem.of(Problem.Code.NOT_READY, "Disk use cannot be measured: " + e.getMessage()));
     }
-    synchronized (lock) {
-      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
-    }
+    sweepInputs();
     return inputs.put(
         hex,
         body,
+        declaredBytes,
         jobSettings.maxUploadBytes(),
         quota,
         () -> JobStore.sizeOnDisk(root),
         clock.getAsLong());
+  }
+
+  /**
+   * Takes the in-use set under the lock and sweeps after releasing it, so job reads never wait on
+   * upload I/O.
+   */
+  private void sweepInputs() {
+    final Set<String> inUse;
+    synchronized (lock) {
+      inUse = uploadsInUse();
+    }
+    inputs.sweep(inUse, clock.getAsLong(), false);
   }
 
   /**
@@ -636,8 +656,8 @@ public final class JobService implements AutoCloseable {
     synchronized (lock) {
       finish(job, state, outcome, problem);
       retain();
-      inputs.sweep(uploadsInUse(), clock.getAsLong(), false);
     }
+    sweepInputs();
     LOG.info(
         "Reasoning job {} {}{}",
         job.id(),
