@@ -734,6 +734,14 @@ container memory limit >= (H_f + O_f + H_w + O_w + C_min) / 0.9
 The limit is read from cgroup v2 `memory.max`, else cgroup v1, else physical memory when the
 container has no limit.
 
+Inside its heap the worker sizes TDB2's node caches, which TDB2 bounds by entries: one decoded
+node for every 4 KiB of heap, from 10,000 to 1,000,000 (262,144 in a 1 GiB heap, 524,288 in the
+default 2 GiB), and a quarter as many in the node-to-id cache, to 200,000. A cached node measured
+about 220 bytes on a catalog, so the caches are about a twentieth of the heap; a long literal
+costs its length. `LOAD`, `RULES` and `COMPACT` open the working dataset that way. The steps that
+run an OWL engine (`CLASSIFY`, `CLASSIFY_ALL`, `EXPLAIN`) keep 10,000 entries, since their
+admission limits were measured with them and the engine needs the heap.
+
 `O_f` and `O_w` were measured with Native Memory Tracking (committed memory outside the heap) on
 Apple M4 Max hardware, in a `linux/arm64` container limited to 4 CPUs and 16 GiB:
 

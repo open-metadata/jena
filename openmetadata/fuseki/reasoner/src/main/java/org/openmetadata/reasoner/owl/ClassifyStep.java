@@ -53,7 +53,7 @@ public final class ClassifyStep implements Step {
 
   @Override
   public StepResult run(final StepFile step, final Watchdog watchdog) throws Exception {
-    final DatasetGraph dataset = WorkingDataset.open(step.dataset());
+    final DatasetGraph dataset = WorkingDataset.openForReasoner(step.dataset());
     try {
       return classify(
           dataset, step, step.jobDirectory().resolve(step.stepId() + ".closure.nt"), watchdog);

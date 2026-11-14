@@ -59,7 +59,7 @@ public final class ClassifyAllStep implements Step {
       // A manifest an earlier run of this step file left would read as this run's.
       Files.deleteIfExists(StepFile.resultPath(part(step, closure)));
     }
-    final DatasetGraph dataset = WorkingDataset.open(step.dataset());
+    final DatasetGraph dataset = WorkingDataset.openForReasoner(step.dataset());
     try {
       dataset.begin(TxnType.WRITE);
       try {
