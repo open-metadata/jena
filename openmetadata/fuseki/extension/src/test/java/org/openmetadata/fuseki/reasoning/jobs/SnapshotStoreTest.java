@@ -180,6 +180,68 @@ class SnapshotStoreTest {
     assertEquals(Problem.Code.NOT_READY, none.problem().code());
   }
 
+  @Test
+  void aQueryThatScansPastItsBudgetIsStoppedWithTheSettingsName() throws Exception {
+    store = open();
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    final String all = "SELECT ?s { ?s ?p ?o }";
+    assertEquals(
+        Set.of("urn:x:a", "urn:x:d"),
+        values(query(queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "3")), all)),
+        "the snapshot holds three quads, one of them the hidden provenance one");
+    final SnapshotQueries tight = queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "2"));
+    for (final String sparql :
+        java.util.List.of(
+            all, "SELECT (COUNT(*) AS ?n) { ?s ?p ?o }", "SELECT ?s { ?s ?p ?o } ORDER BY ?s")) {
+      final JobService.Refused e =
+          assertThrows(JobService.Refused.class, () -> query(tight, sparql), sparql);
+      assertEquals(503, e.status(), sparql);
+      assertEquals(Problem.Code.LIMIT_EXCEEDED, e.problem().code(), sparql);
+      assertEquals("maxQueryScannedQuads", e.problem().subject(), sparql);
+    }
+  }
+
+  @Test
+  void aQueryOverNamedGraphsPaysForTheirQuadsToo() throws Exception {
+    store = open();
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    final String named = "SELECT ?s { GRAPH ?g { ?s ?p ?o } }";
+    assertEquals(
+        Set.of("urn:x:a", "urn:x:d"),
+        values(query(queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "2")), named)));
+    final JobService.Refused e =
+        assertThrows(
+            JobService.Refused.class,
+            () -> query(queries(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "1")), named));
+    assertEquals("maxQueryScannedQuads", e.problem().subject());
+  }
+
+  @Test
+  void aSortWithoutALimitAnswersItsFirstRowsInOrderAndReportsTheCutAsBefore() throws Exception {
+    store = open();
+    store.publish(DATASET, 0, candidate(1, 1), working("one", "urn:x:a"), 1L);
+    final Path many = manySubjects("many", 5);
+    store.publish(DATASET, 1, candidate(2, 2), many, 2L);
+    final String sorted = "SELECT ?s { ?s <urn:x:p> ?o } ORDER BY DESC(?s)";
+    final SnapshotQueries three = queries(Map.of(JobSettings.MAX_RESULT_ROWS, "3"));
+    final JsonObject cut = query(three, sorted);
+    assertEquals(java.util.List.of("urn:x:s5", "urn:x:s4", "urn:x:s3"), subjects(cut));
+    assertTrue(cut.getBoolean("truncated"));
+    assertEquals(3, cut.getNumber("rows").intValue());
+    final JsonObject limited = query(three, sorted + " LIMIT 100");
+    assertEquals(java.util.List.of("urn:x:s5", "urn:x:s4", "urn:x:s3"), subjects(limited));
+    assertTrue(limited.getBoolean("truncated"));
+    final JsonObject own = query(three, sorted + " LIMIT 2");
+    assertEquals(java.util.List.of("urn:x:s5", "urn:x:s4"), subjects(own));
+    assertFalse(own.getBoolean("truncated"), "the query's own limit is within the page");
+    final JsonObject offset = query(three, sorted + " OFFSET 3");
+    assertEquals(java.util.List.of("urn:x:s2", "urn:x:s1"), subjects(offset));
+    assertFalse(offset.getBoolean("truncated"));
+    final JsonObject exact = query(queries(Map.of(JobSettings.MAX_RESULT_ROWS, "5")), sorted);
+    assertEquals(5, subjects(exact).size());
+    assertFalse(exact.getBoolean("truncated"), "as many rows as the page holds is not a cut");
+  }
+
   private SnapshotStore open() throws Exception {
     final SnapshotStore opened = new SnapshotStore(root, 1_000);
     opened.open();
@@ -197,6 +259,17 @@ class SnapshotStoreTest {
     final byte[] body =
         queries.run(DATASET, JSON.toString(request).getBytes(StandardCharsets.UTF_8)).body();
     return JSON.parse(new String(body, StandardCharsets.UTF_8));
+  }
+
+  private static java.util.List<String> subjects(final JsonObject answer) {
+    final java.util.List<String> subjects = new java.util.ArrayList<>();
+    answer
+        .getObj("results")
+        .getObj("results")
+        .get("bindings")
+        .getAsArray()
+        .forEach(binding -> subjects.add(binding.getAsObject().getObj("s").getString("value")));
+    return subjects;
   }
 
   private static Set<String> values(final JsonObject answer) {
@@ -232,6 +305,21 @@ class SnapshotStoreTest {
             + RefreshCapture.PROVENANCE
             + "> { <urn:x:witness> <urn:x:solution> <urn:x:witness> }\n";
     Txn.executeWrite(dataset, () -> RDFParser.fromString(trig, Lang.TRIG).parse(dataset));
+    TDBInternal.expel(dataset);
+    return location;
+  }
+
+  private Path manySubjects(final String job, final int count) throws Exception {
+    final Path location =
+        Files.createDirectories(root.resolve("jobs").resolve(job)).resolve("working");
+    final DatasetGraph dataset = DatabaseMgr.connectDatasetGraph(Location.create(location));
+    final StringBuilder trig = new StringBuilder("GRAPH <urn:x:asserted> {\n");
+    for (int i = 1; i <= count; i++) {
+      trig.append("<urn:x:s").append(i).append("> <urn:x:p> <urn:x:o> .\n");
+    }
+    trig.append("}\n");
+    Txn.executeWrite(
+        dataset, () -> RDFParser.fromString(trig.toString(), Lang.TRIG).parse(dataset));
     TDBInternal.expel(dataset);
     return location;
   }

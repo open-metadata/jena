@@ -176,6 +176,15 @@ public final class SnapshotStore implements AutoCloseable {
       return view;
     }
 
+    /**
+     * The snapshot as {@link #view()}, failing a scan that reads more than {@code scanBudget}
+     * quads.
+     */
+    SnapshotView budgetedView(final long scanBudget) {
+      return new SnapshotView(
+          snapshot.database, NodeFactory.createURI(RefreshCapture.PROVENANCE), scanBudget);
+    }
+
     /** The whole snapshot, provenance included, for explanations only. */
     DatasetGraph database() {
       return snapshot.database;

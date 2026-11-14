@@ -50,6 +50,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_MAX_JOB_SECONDS` | `3600` | How long one job may run, capture included; each worker step gets what is left as its deadline. At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_QUERY_SECONDS` | `30` | Deadline of one snapshot query (`maxQuerySeconds`), and so how long a reader can keep a replaced snapshot on disk. At most 4 digits. |
 | `OPENMETADATA_REASONING_MAX_RESULT_ROWS` | `10000` | Rows one snapshot query or one page of a result returns (`maxResultRows`). At most 6 digits. |
+| `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` | `1000000` | Quads one snapshot query may read from the store, the provenance quads its view hides included; a query that reads more stops with `LIMIT_EXCEEDED` (subject `maxQueryScannedQuads`, not a capabilities limit). At most 9 digits. |
 | `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES` | `4` | Snapshot queries that may run at once; more get HTTP 429. At most 3 digits. |
 | `OPENMETADATA_REASONING_MAX_UPLOAD_BYTES` | `64m` | The largest job input one `PUT /reasoning/inputs/...` may carry, the same as a Graph Store upload's limit. At least `1m`. Reported as the capability limit `maxUploadBytes`. |
 
@@ -375,7 +376,7 @@ the tests check against. The operations are served whenever the extension is ena
 | `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
 | `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
 | `GET /reasoning/results/<id>?offset=&limit=` | `200` with a page of a finished job's result ([Results](#results)); `404` for an unknown job or one that has no result, with the job's problem; `409` while it runs; `400` for a limit outside 1 to `maxResultRows` |
-| `POST /reasoning/query?dataset=<name>` | `200` with a bounded `SELECT` or `ASK` over the dataset's current snapshot ([Snapshot queries](#snapshot-queries)); `400` for anything else; `404` for a dataset that is not served; `413` over 1 MiB; `429` over `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES`; `503` with `NOT_READY` before the first snapshot, or with `LIMIT_EXCEEDED` (`maxQuerySeconds`) when the deadline passes |
+| `POST /reasoning/query?dataset=<name>` | `200` with a bounded `SELECT` or `ASK` over the dataset's current snapshot ([Snapshot queries](#snapshot-queries)); `400` for anything else; `404` for a dataset that is not served; `413` over 1 MiB; `429` over `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES`; `503` with `NOT_READY` before the first snapshot, or with `LIMIT_EXCEEDED` (`maxQuerySeconds` when the deadline passes, `maxQueryScannedQuads` when the query reads too many quads) |
 
 Every refusal answers with the protocol's problem object, `{"code": ..., "message": ...}`, with
 `subject` naming the limit for `LIMIT_EXCEEDED`. A request is validated against the schema and the
@@ -619,7 +620,18 @@ union of every graph of the snapshot but the provenance graph, and `GRAPH` sees 
 The answer is `{"snapshot": <rdfReasoningSnapshot without freshness>, "generation": <n>, "rows":
 <n>, "truncated": <bool>, "results": <SPARQL 1.1 JSON results>}`: at most `maxResultRows` rows
 (or fewer if asked) and 8 MiB of terms, with `truncated` when there were more. Freshness is
-OpenMetadata's to compute from the snapshot's input. The query runs with ARQ's general engine over a
+OpenMetadata's to compute from the snapshot's input.
+
+Rows and bytes bound the answer, not the work before its first row, so a query is also bounded by
+what it reads: past `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` quads (counted at the store,
+hidden provenance quads too) it stops with `LIMIT_EXCEEDED` and the subject `maxQueryScannedQuads`.
+The default, one million, is about 40% of a 20,000-table snapshot's 2.4 million quads, so a
+full-snapshot sort, `COUNT(*)` or grouping stops while a query that follows bound patterns to at most a
+page of rows does not. A `SELECT` with `ORDER BY` and no `LIMIT` below `maxRows + 1` is run with
+`LIMIT maxRows + 1`, so ARQ keeps a heap of that size instead of sorting the whole result; the answer
+and its `truncated` flag are the same. Sorts and `DISTINCT` hold at most 100,000 rows in memory and
+spill to files in the JVM's `java.io.tmpdir`, which are deleted when the query ends; `GROUP BY` does
+not spill, and the scan budget is its bound. The query runs with ARQ's general engine over a
 read-only view: handing it TDB2's own engine would bypass the view and see the provenance graph.
 
 ### Results

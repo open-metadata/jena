@@ -56,6 +56,12 @@ import org.apache.jena.sparql.util.Context;
  * not queued, so a burst never holds request threads.
  */
 public final class SnapshotQueries {
+  /**
+   * Rows a sort or DISTINCT holds in memory before ARQ spills to files in java.io.tmpdir, which it
+   * deletes when the query's bag closes; the scan budget bounds what can spill.
+   */
+  static final long SPILL_TO_DISK_ROWS = 100_000;
+
   /** The query text of a request; the request itself is at most {@value #MAX_REQUEST_BYTES}. */
   public static final int MAX_QUERY_CHARACTERS = 65_536;
 
@@ -173,14 +179,23 @@ public final class SnapshotQueries {
     if (service[0]) {
       throw invalid("A snapshot query cannot call SERVICE");
     }
+    if (query.isSelectType()
+        && query.hasOrderBy()
+        && (!query.hasLimit() || query.getLimit() > maxRows + 1L)) {
+      // One row past maxRows is all the answer can use, so ARQ keeps a heap of that size instead of
+      // sorting the whole result; the extra row is what reports the cut.
+      query.setLimit(maxRows + 1L);
+    }
     return new Request(query, maxRows, TimeUnit.SECONDS.toMillis(seconds));
   }
 
   private Answer execute(final SnapshotStore.Lease lease, final Request request)
       throws JobService.Refused {
-    final DatasetGraph view = lease.view();
+    final DatasetGraph view = lease.budgetedView(settings.maxQueryScannedQuads());
     final Context context = ARQ.getContext().copy();
     context.set(ARQ.httpServiceAllowed, false);
+    context.set(ARQ.topNSortingThreshold, request.maxRows() + 1L);
+    context.set(ARQ.spillToDiskThreshold, SPILL_TO_DISK_ROWS);
     view.begin(TxnType.READ);
     try (QueryExec exec =
         QueryExec.dataset(view)
@@ -232,6 +247,15 @@ public final class SnapshotQueries {
                       + TimeUnit.MILLISECONDS.toSeconds(request.timeoutMillis())
                       + " s")
               .withSubject("maxQuerySeconds"));
+    } catch (final SnapshotView.ScanBudgetExceeded e) {
+      throw new JobService.Refused(
+          503,
+          Problem.of(
+                  Problem.Code.LIMIT_EXCEEDED,
+                  "The query read more than "
+                      + e.budget()
+                      + " quads of the snapshot; narrow its patterns")
+              .withSubject("maxQueryScannedQuads"));
     } catch (final QueryException e) {
       throw invalid("The query cannot be evaluated: " + e.getMessage());
     } finally {

@@ -14,6 +14,7 @@ package org.openmetadata.fuseki.reasoning.jobs;
 
 import java.util.Iterator;
 import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.jena.atlas.iterator.Iter;
 import org.apache.jena.graph.Graph;
 import org.apache.jena.graph.Node;
@@ -37,13 +38,67 @@ import org.apache.jena.util.iterator.NiceIterator;
  * to TDB2's own engine over the whole database, which would see the provenance graph.
  */
 final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrapperView {
+  /** Thrown from a scan that passes its view's budget of quads; carries the budget. */
+  static final class ScanBudgetExceeded extends RuntimeException {
+    private final long budget;
+
+    ScanBudgetExceeded(final long budget) {
+      super("The query scanned more than " + budget + " quads", null, false, false);
+      this.budget = budget;
+    }
+
+    long budget() {
+      return budget;
+    }
+  }
+
   private final Node hidden;
   private final Graph union;
+  private final long scanBudget;
+  private final AtomicLong scanned = new AtomicLong();
 
   SnapshotView(final DatasetGraph snapshot, final Node hidden) {
+    this(snapshot, hidden, Long.MAX_VALUE);
+  }
+
+  /**
+   * A view that fails a scan once it has read {@code scanBudget} quads, hidden ones included: a
+   * query whose patterns match little still pays for what the store reads and the view discards.
+   */
+  SnapshotView(final DatasetGraph snapshot, final Node hidden, final long scanBudget) {
     super(snapshot);
     this.hidden = hidden;
+    this.scanBudget = scanBudget;
     this.union = new VisibleUnion();
+  }
+
+  private void scan() {
+    if (scanned.incrementAndGet() > scanBudget) {
+      throw new ScanBudgetExceeded(scanBudget);
+    }
+  }
+
+  private Iterator<Quad> counted(final Iterator<Quad> quads) {
+    if (scanBudget == Long.MAX_VALUE) {
+      return quads;
+    }
+    return new Iterator<>() {
+      @Override
+      public boolean hasNext() {
+        return quads.hasNext();
+      }
+
+      @Override
+      public Quad next() {
+        try {
+          scan();
+        } catch (final ScanBudgetExceeded e) {
+          Iter.close(quads);
+          throw e;
+        }
+        return quads.next();
+      }
+    };
   }
 
   @Override
@@ -61,7 +116,11 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     if (Quad.isDefaultGraph(graph) || Quad.isUnionGraph(graph)) {
       return union;
     }
-    return graph.equals(hidden) ? GraphZero.instance() : super.getGraph(graph);
+    if (graph.equals(hidden)) {
+      return GraphZero.instance();
+    }
+    final Graph named = super.getGraph(graph);
+    return scanBudget == Long.MAX_VALUE ? named : new CountedGraph(named);
   }
 
   @Override
@@ -87,7 +146,7 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     if (g != null && (Quad.isDefaultGraph(g) || Quad.isUnionGraph(g))) {
       return Iter.map(union.find(s, p, o), triple -> Quad.create(Quad.defaultGraphIRI, triple));
     }
-    return Iter.filter(super.find(g, s, p, o), quad -> !hidden.equals(quad.getGraph()));
+    return Iter.filter(counted(super.find(g, s, p, o)), quad -> !hidden.equals(quad.getGraph()));
   }
 
   @Override
@@ -95,7 +154,7 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     if (g != null && g.equals(hidden)) {
       return Iter.nullIterator();
     }
-    return Iter.filter(super.findNG(g, s, p, o), quad -> !hidden.equals(quad.getGraph()));
+    return Iter.filter(counted(super.findNG(g, s, p, o)), quad -> !hidden.equals(quad.getGraph()));
   }
 
   @Override
@@ -157,6 +216,42 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     return new UnsupportedOperationException("A reasoning snapshot is read-only");
   }
 
+  /** A named graph whose scans count against the budget, as the quad scans do. */
+  private final class CountedGraph extends GraphBase {
+    private final Graph graph;
+
+    CountedGraph(final Graph graph) {
+      this.graph = graph;
+    }
+
+    @Override
+    protected ExtendedIterator<Triple> graphBaseFind(final Triple pattern) {
+      final ExtendedIterator<Triple> triples = graph.find(pattern);
+      return new NiceIterator<>() {
+        @Override
+        public boolean hasNext() {
+          return triples.hasNext();
+        }
+
+        @Override
+        public Triple next() {
+          try {
+            scan();
+          } catch (final ScanBudgetExceeded e) {
+            triples.close();
+            throw e;
+          }
+          return triples.next();
+        }
+
+        @Override
+        public void close() {
+          triples.close();
+        }
+      };
+    }
+  }
+
   /**
    * Every graph but the hidden one. TDB2 answers a scan with the graph open from an index ending in
    * the graph, so copies of one triple in several graphs arrive together and are passed on once;
@@ -166,11 +261,12 @@ final class SnapshotView extends DatasetGraphWrapper implements DatasetGraphWrap
     @Override
     protected ExtendedIterator<Triple> graphBaseFind(final Triple pattern) {
       final Iterator<Quad> quads =
-          SnapshotView.super.find(
-              Node.ANY,
-              any(pattern.getSubject()),
-              any(pattern.getPredicate()),
-              any(pattern.getObject()));
+          counted(
+              SnapshotView.super.find(
+                  Node.ANY,
+                  any(pattern.getSubject()),
+                  any(pattern.getPredicate()),
+                  any(pattern.getObject())));
       return new NiceIterator<>() {
         private Triple previous;
         private Triple next;

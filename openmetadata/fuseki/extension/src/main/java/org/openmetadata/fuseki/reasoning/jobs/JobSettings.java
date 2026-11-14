@@ -41,6 +41,8 @@ import org.openmetadata.fuseki.reasoning.Sizes;
  *     query, and so how long a query can keep a replaced snapshot on disk
  * @param maxResultRows OPENMETADATA_REASONING_MAX_RESULT_ROWS: rows one snapshot query or one page
  *     of a result returns
+ * @param maxQueryScannedQuads OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS: quads one snapshot
+ *     query may read from the store, those its view hides included
  * @param maxConcurrentQueries OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES: snapshot queries that
  *     may run at once; more get HTTP 429
  */
@@ -54,6 +56,7 @@ public record JobSettings(
     long maxUploadBytes,
     int maxQuerySeconds,
     int maxResultRows,
+    int maxQueryScannedQuads,
     int maxConcurrentQueries) {
 
   public static final String MAX_QUEUED_JOBS = "OPENMETADATA_REASONING_MAX_QUEUED_JOBS";
@@ -64,6 +67,8 @@ public record JobSettings(
   public static final String MAX_UPLOAD_BYTES = "OPENMETADATA_REASONING_MAX_UPLOAD_BYTES";
   public static final String MAX_QUERY_SECONDS = "OPENMETADATA_REASONING_MAX_QUERY_SECONDS";
   public static final String MAX_RESULT_ROWS = "OPENMETADATA_REASONING_MAX_RESULT_ROWS";
+  public static final String MAX_QUERY_SCANNED_QUADS =
+      "OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS";
   public static final String MAX_CONCURRENT_QUERIES =
       "OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES";
 
@@ -96,6 +101,14 @@ public record JobSettings(
   public static final int DEFAULT_MAX_RESULT_ROWS = 10_000;
 
   /**
+   * About 40% of the 2.4 million quads a 20,000-table snapshot holds, 1.7 million of them hidden
+   * provenance. A query that returns a page of at most {@value #DEFAULT_MAX_RESULT_ROWS} rows by
+   * following bound patterns reads thousands to a few hundred thousand quads; a sort, a count or a
+   * grouping over the whole snapshot reads all of them and is stopped.
+   */
+  public static final int DEFAULT_MAX_QUERY_SCANNED_QUADS = 1_000_000;
+
+  /**
    * Snapshot queries run on request threads in the Fuseki JVM, each holding at most one bounded
    * answer, so a few at a time keep them from crowding out serving.
    */
@@ -104,6 +117,7 @@ public record JobSettings(
   /** Queued and kept jobs are held in memory, a few KiB each, so their counts stay small. */
   private static final Pattern FOUR_DIGITS = Pattern.compile("[1-9][0-9]{0,3}");
 
+  private static final Pattern NINE_DIGITS = Pattern.compile("[1-9][0-9]{0,8}");
   private static final Pattern COUNT = Pattern.compile("[1-9][0-9]{0,5}");
   private static final Pattern THREE_DIGITS = Pattern.compile("[1-9][0-9]{0,2}");
   private static final Pattern PERCENT = Pattern.compile("([1-9][0-9]?|100)%");
@@ -126,6 +140,9 @@ public record JobSettings(
     final int querySeconds =
         integer(environment, MAX_QUERY_SECONDS, FOUR_DIGITS, 4, DEFAULT_MAX_QUERY_SECONDS);
     final int resultRows = integer(environment, MAX_RESULT_ROWS, COUNT, 6, DEFAULT_MAX_RESULT_ROWS);
+    final int scannedQuads =
+        integer(
+            environment, MAX_QUERY_SCANNED_QUADS, NINE_DIGITS, 9, DEFAULT_MAX_QUERY_SCANNED_QUADS);
     final int queries =
         integer(
             environment, MAX_CONCURRENT_QUERIES, THREE_DIGITS, 3, DEFAULT_MAX_CONCURRENT_QUERIES);
@@ -158,6 +175,7 @@ public record JobSettings(
         uploadBytes,
         querySeconds,
         resultRows,
+        scannedQuads,
         queries);
   }
 
