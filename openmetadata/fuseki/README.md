@@ -536,7 +536,7 @@ and against the image's own `shiro.ini`.
 
 A `REFRESH` recomputes every deduction from asserted input and publishes it as a new snapshot of
 the serving dataset it names (the plan's refresh lifecycle). The request lists every active
-ontology release in `ontologyReleases` (possibly none) and carries the governance rules inline in
+ontology release in `ontologyReleases` (possibly none, at most one release per `ontologyId`; a second entry for the same ontology is `400` `INVALID_REQUEST` naming it) and carries the governance rules inline in
 `rules`, with OpenMetadata's digest of them in `ruleBundleDigest`
 (`ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules`). The store records
 the releases' `contentDigest`s and the rule digest with the snapshot's `input` and never checks or
