@@ -1,0 +1,3 @@
+PREFIX : <http://example.org/>
+PREFIX apf: <http://jena.apache.org/ARQ/property#>
+CONSTRUCT { ?x :q ?y } WHERE { ?x apf:strSplit (?y ",") }

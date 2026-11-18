@@ -13,6 +13,8 @@
 package org.openmetadata.fuseki.reasoning.jobs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,6 +41,24 @@ class JobSettingsTest {
     assertEquals(
         2L << 20,
         JobSettings.fromEnvironment(Map.of(JobSettings.MAX_UPLOAD_BYTES, "2m")).maxUploadBytes());
+  }
+
+  @Test
+  void theScanBudgetDefaultsAndReadsItsVariable() {
+    assertEquals(1_000_000, JobSettings.fromEnvironment(Map.of()).maxQueryScannedQuads());
+    assertEquals(
+        250,
+        JobSettings.fromEnvironment(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "250"))
+            .maxQueryScannedQuads());
+    assertEquals(
+        1_000_000,
+        JobSettings.fromEnvironment(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, ""))
+            .maxQueryScannedQuads());
+    final IllegalArgumentException invalid =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> JobSettings.fromEnvironment(Map.of(JobSettings.MAX_QUERY_SCANNED_QUADS, "1m")));
+    assertTrue(invalid.getMessage().startsWith(JobSettings.MAX_QUERY_SCANNED_QUADS));
   }
 
   @Test

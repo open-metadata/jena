@@ -297,7 +297,7 @@ new_uuid() {
 }
 
 refresh_request() {
-  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologyReleases": [], "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
+  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologyReleases": [{"ontologyId": "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", "releaseId": "8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d", "contentDigest": "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}], "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
 }
 
 job_state_becomes() {
@@ -494,12 +494,12 @@ check "capabilities report READY for protocol 1" \
   [ "$(jq -r '"\(.protocolVersion) \(.readiness)"' <<< "$capabilities")" = "1 READY" ]
 check "with the memory budget the readiness check computed" \
   [ "$(jq '.memoryBudget.requiredBytes <= .memoryBudget.containerLimitBytes' <<< "$capabilities")" = "true" ]
-check "and CHECK and EXPLAIN available, the rest not implemented yet" \
+check "and every operation available" \
   [ "$(jq -r '[.operations[] | "\(.operation)=\(.availability)"] | join(" ")' <<< "$capabilities")" = \
-    "REFRESH=NOT_IMPLEMENTED CHECK=AVAILABLE EXPLAIN=AVAILABLE RESULTS=NOT_IMPLEMENTED QUERY=NOT_IMPLEMENTED" ]
+    "REFRESH=AVAILABLE CHECK=AVAILABLE EXPLAIN=AVAILABLE RESULTS=AVAILABLE QUERY=AVAILABLE" ]
 check "with the limits they need and the worker's engines" \
-  [ "$(jq -r '[(.limits | has("maxJobSeconds", "maxImports", "maxClosureAxioms") | tostring), (.engines | map(.name) | join(","))] | join(" ")' <<< "$capabilities")" = \
-    "true true true HermiT,ELK" ]
+  [ "$(jq -r '[(.limits | [has("maxJobSeconds"), has("maxImports"), has("maxClosureAxioms"), has("maxDerivedTriples"), has("maxRulePasses"), has("maxResultRows"), has("maxQuerySeconds")] | all | tostring), (.engines | map(.name) | join(","))] | join(" ")' <<< "$capabilities")" = \
+    "true HermiT,ELK,governance-rules" ]
 request_id=$(new_uuid)
 response=$(submit_job "$(refresh_request "$request_id")")
 job_id=$(body_of "$response" | jq -r .id)
@@ -510,15 +510,15 @@ response=$(submit_job "$(refresh_request "$request_id")")
 check "its request ID returns the same job with 200" \
   [ "$(tail -1 <<< "$response") $(body_of "$response" | jq -r .id)" = "200 $job_id" ]
 check "an invalid request is refused with 400" [ "$(submit_job '{"operation": "REFRESH"}' | tail -1)" = "400" ]
-check "the job fails at capture, which this build lacks" job_state_becomes "$job_id" FAILED
-check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_IMPLEMENTED capture" ]
+check "the job fails at capture: the serving graph holds no graph for the release" job_state_becomes "$job_id" FAILED
+check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "INPUT_CHANGED capture" ]
 check "its manifest is on the data volume" docker exec "$CONTAINER" test -f "$JOBS/$job_id/job.json"
 check "cancelling a finished job leaves it unchanged" [ "$(curl -s -u "admin:$PASSWORD" -X DELETE \
   "$BASE/reasoning/jobs/$job_id" | jq -r .state)" = "FAILED" ]
 check "cancelling an unknown job answers 404" [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" \
   -X DELETE "$BASE/reasoning/jobs/$(new_uuid)")" = "404" ]
-check "results are not implemented yet" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "501" ]
-check "and say so with NOT_IMPLEMENTED" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "NOT_IMPLEMENTED" ]
+check "a failed job has no results" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "404" ]
+check "and answers with its problem" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "INPUT_CHANGED" ]
 docker restart "$CONTAINER" > /dev/null
 for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
 check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]
@@ -576,6 +576,65 @@ check "a release that is not the one named fails the job with INPUT_CHANGED" \
   [ "$(job_answer "$(RELEASE_ID=$other_release ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
 check "an upload that was never made fails the job with INPUT_CHANGED" \
   [ "$(job_answer "$(UPLOAD_HEX=$never_hex ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
+
+echo "== Reasoner: REFRESH, snapshot queries and governance explanations =="
+curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/trig' \
+  --data-binary "@$HERE/refresh-catalog.trig" "$BASE/ds/data"
+pii_rule='PREFIX om: <https://open-metadata.org/ontology/>
+CONSTRUCT {
+  ?downstream om:hasTag ?piiTag .
+  ?downstream om:inferredTagSource ?upstream
+}
+WHERE {
+  ?upstream om:hasTag ?piiTag .
+  ?piiTag om:tagFQN ?fqn .
+  FILTER(STRSTARTS(?fqn, "PII."))
+  ?colLineage om:fromColumn ?upstream ;
+              om:toColumn ?downstream .
+}'
+refresh_at() {
+  jq -cn --arg id "$(new_uuid)" --argjson watermark "$1" --arg release "${RELEASE_ID:-8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d}" --arg body "$pii_rule" '{
+    requestId: $id, operation: "REFRESH",
+    sourceRevision: {datasetGeneration: "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", liveWriteWatermark: $watermark},
+    ontologyReleases: [{ontologyId: "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", releaseId: $release, contentDigest: "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}],
+    ruleBundleDigest: "sha256:9e4f1c2b3a4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7",
+    rules: [{name: "pii-propagation-via-lineage", ruleType: "CONSTRUCT", priority: 100, enabled: true, ruleBody: $body}]}'
+}
+snapshot_query() {
+  curl -s -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/json' \
+    --data "$(jq -cn --arg q "$1" '{query: $q}')" "$BASE/reasoning/query?dataset=ds"
+}
+pii_columns() {
+  snapshot_query 'SELECT ?c WHERE { ?c <https://open-metadata.org/ontology/hasTag> <https://open-metadata.org/catalog/pii> } ORDER BY ?c' \
+    | jq -r '[.results.results.bindings[].c.value | sub(".*/"; "")] | join(",")'
+}
+check "a query before any refresh is NOT_READY" [ "$(snapshot_query 'ASK {}' | jq -r .code)" = "NOT_READY" ]
+refresh_id=$(body_of "$(submit_job "$(refresh_at 10)")" | jq -r .id)
+for _ in $(seq 1 180); do
+  case "$(reasoning_get "jobs/$refresh_id" | jq -r .state)" in QUEUED|RUNNING) sleep 1 ;; *) break ;; esac
+done
+check "a refresh publishes a snapshot" [ "$(reasoning_get "jobs/$refresh_id" | jq -r '"\(.state) \(.snapshotId != null)"')" = "SUCCEEDED true" ]
+echo "      $(reasoning_get "jobs/$refresh_id" | jq -c '{progress, engines: [.input.engines[].name]}')"
+check "a snapshot query sees the governance facts, not the phase 0, staging or unlisted-ontology graphs" [ "$(pii_columns)" = "c1,c2,c3" ]
+check "and never the provenance graph" \
+  [ "$(snapshot_query 'ASK { GRAPH <urn:openmetadata:provenance> { ?s ?p ?o } }' | jq -r .results.boolean)" = "false" ]
+check "nor an ontology graph that was not listed" \
+  [ "$(snapshot_query 'ASK { GRAPH <https://open-metadata.org/graph/ontology/00000000-0000-4000-8000-00000000dead> { ?s ?p ?o } }' | jq -r .results.boolean)" = "false" ]
+check "the refresh's result lists its release" \
+  [ "$(reasoning_get "results/$refresh_id" | jq -r '"\(.page.items) \(.page.total)"')" = "closures 1" ]
+check "a governance fact is explained from the snapshot's witnesses" \
+  [ "$(job_answer "$(ontology_request EXPLAIN '"explain": {"statement": {"subjectIri": "https://open-metadata.org/catalog/c3", "predicateIri": "https://open-metadata.org/ontology/hasTag", "objectKind": "IRI", "objectIri": "https://open-metadata.org/catalog/pii"}}')")" = "SUCCEEDED ENTAILED" ]
+curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/sparql-update' \
+  --data 'DELETE WHERE { GRAPH <https://open-metadata.org/graph/knowledge> { <https://open-metadata.org/catalog/l1> ?p ?o } }' \
+  "$BASE/ds/update"
+check "the next refresh retracts what a removed premise supported" \
+  [ "$(job_answer "$(refresh_at 20)") $(pii_columns) $(snapshot_query 'ASK {}' | jq -r .generation)" = "SUCCEEDED null c1 2" ]
+check "an older refresh cannot replace it" [ "$(job_answer "$(refresh_at 15)")" = "FAILED SUPERSEDED" ]
+docker restart "$CONTAINER" > /dev/null
+for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
+check "the snapshot serves again after a restart" [ "$(pii_columns) $(snapshot_query 'ASK {}' | jq -r .generation)" = "c1 2" ]
+check "a refresh that lists a release the graph does not hold fails with INPUT_CHANGED" \
+  [ "$(job_answer "$(RELEASE_ID=$other_release refresh_at 30)")" = "FAILED INPUT_CHANGED" ]
 
 echo "== Reasoner: a worker never disturbs Fuseki =="
 awk 'BEGIN { for (i = 0; i < 1000; i++) printf "<urn:smoke:s%d> <urn:smoke:p> \"%d\" .\n", i, i }' > "/tmp/$CONTAINER.serving.nt"

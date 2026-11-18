@@ -59,7 +59,12 @@ class LauncherContractTest {
               worker.maxExpressionDepth(),
               worker.maxOutputTriples(),
               worker.maxChecks(),
-              worker.maxExplainChecks()),
+              worker.maxExplainChecks(),
+              worker.maxRules(),
+              worker.maxRulePatterns(),
+              worker.maxPasses(),
+              worker.maxNewFacts(),
+              worker.maxSpoolBytes()),
           List.of(
               extension.maxInputBytes(),
               extension.maxClosureTriples(),
@@ -68,7 +73,12 @@ class LauncherContractTest {
               extension.maxExpressionDepth(),
               extension.maxOutputTriples(),
               extension.maxChecks(),
-              extension.maxExplainChecks()),
+              extension.maxExplainChecks(),
+              extension.maxRules(),
+              extension.maxRulePatterns(),
+              extension.maxPasses(),
+              extension.maxNewFacts(),
+              extension.maxSpoolBytes()),
           "heap " + heap);
     }
   }

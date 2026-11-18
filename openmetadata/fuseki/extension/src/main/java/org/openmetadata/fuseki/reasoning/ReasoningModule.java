@@ -20,6 +20,7 @@ import org.apache.jena.rdf.model.Model;
 import org.openmetadata.fuseki.reasoning.jobs.JobService;
 import org.openmetadata.fuseki.reasoning.jobs.JobSettings;
 import org.openmetadata.fuseki.reasoning.jobs.ReasoningServlet;
+import org.openmetadata.fuseki.reasoning.jobs.ServingDatasets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +36,9 @@ public final class ReasoningModule implements FusekiAutoModule {
 
   private JobService jobs;
 
+  /** Set once the server has started; jobs run only after that, so they always find it. */
+  private volatile ServingDatasets datasets;
+
   @Override
   public String name() {
     return "OpenMetadata reasoning";
@@ -47,7 +51,14 @@ public final class ReasoningModule implements FusekiAutoModule {
     final JobService service;
     try {
       settings = ReasoningSettings.fromEnvironment(System.getenv());
-      service = JobService.create(settings, JobSettings.fromEnvironment(System.getenv()));
+      service =
+          JobService.create(
+              settings,
+              JobSettings.fromEnvironment(System.getenv()),
+              name -> {
+                final ServingDatasets served = datasets;
+                return served == null ? null : served.get(name);
+              });
       service.open();
     } catch (final RuntimeException | IOException e) {
       LOG.error("Reasoning operations are not served: {}", e.getMessage());
@@ -62,6 +73,7 @@ public final class ReasoningModule implements FusekiAutoModule {
 
   @Override
   public void serverAfterStarting(final FusekiServer server) {
+    datasets = ServingDatasets.of(server.getDataAccessPointRegistry());
     if (jobs != null) {
       jobs.start();
     }

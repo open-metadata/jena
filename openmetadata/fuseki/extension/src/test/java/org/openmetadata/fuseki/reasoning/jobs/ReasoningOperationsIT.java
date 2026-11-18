@@ -173,9 +173,15 @@ class ReasoningOperationsIT {
     assertEquals("GET", wrongMethod.headers().firstValue("Allow").orElseThrow());
     assertProblem(
         get("/reasoning/results/" + UUID.randomUUID(), "admin", "admin-pw"),
-        501,
-        "NOT_IMPLEMENTED");
-    assertProblem(post("/reasoning/query", "{}"), 501, "NOT_IMPLEMENTED");
+        404,
+        "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query", "{}"), 400, "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query?dataset=nope", "{}"), 404, "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query?dataset=ds", "{\"query\": \"ASK {}\"}"), 503, "NOT_READY");
+    assertProblem(
+        post("/reasoning/query?dataset=ds", "{\"query\": \"DESCRIBE <urn:x>\"}"),
+        400,
+        "INVALID_REQUEST");
   }
 
   @Test
@@ -242,8 +248,7 @@ class ReasoningOperationsIT {
     final ReasoningSettings settings = workers.settings(Map.of());
     service =
         new JobService(
-            settings,
-            JobSettings.fromEnvironment(jobEnvironment),
+            new Operations(settings, JobSettings.fromEnvironment(jobEnvironment)),
             workers.launcher(settings),
             () -> workers.readiness(settings),
             planner,

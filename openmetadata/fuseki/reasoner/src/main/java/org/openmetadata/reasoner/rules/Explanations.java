@@ -164,7 +164,7 @@ public final class Explanations {
   private final Node provenance;
   private final Provenance.Run run;
   private final Bounds bounds;
-  private final Context context = RulesStep.context();
+  private final Context context = RuleCompiler.evaluationContext();
   private final Map<String, CompiledRule> rules = new HashMap<>();
   private final Set<Node> read = new HashSet<>();
   private final Set<Node> outputs = new LinkedHashSet<>();
