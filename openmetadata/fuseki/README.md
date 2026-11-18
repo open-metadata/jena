@@ -48,6 +48,11 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` | `168` | How long a finished job is kept. |
 | `OPENMETADATA_REASONING_DISK_QUOTA` | `25%` | Disk all of `/fuseki/reasoning` may use before jobs are refused: a size, or a percentage of the volume's capacity. |
 | `OPENMETADATA_REASONING_MAX_JOB_SECONDS` | `3600` | How long one job may run, capture included; each worker step gets what is left as its deadline. At most 6 digits. |
+| `OPENMETADATA_REASONING_MAX_QUERY_SECONDS` | `30` | Deadline of one snapshot query (`maxQuerySeconds`), and so how long a reader can keep a replaced snapshot on disk. At most 4 digits. |
+| `OPENMETADATA_REASONING_MAX_RESULT_ROWS` | `10000` | Rows one snapshot query or one page of a result returns (`maxResultRows`). At most 6 digits. |
+| `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` | `1000000` | Quads one snapshot query may read from the store; a query that reads more stops with `LIMIT_EXCEEDED` (subject `maxQueryScannedQuads`, not a capabilities limit). At most 9 digits. |
+| `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES` | `4` | Snapshot queries that may run at once; more get HTTP 429. At most 3 digits. |
+| `OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE` | the Fuseki heap / 32 KiB, from 10,000 to 999,999: `131072` with the 4g heap | Nodes each open snapshot keeps decoded in the Fuseki heap for its queries' answers, about 220 bytes each. At most 6 digits. |
 | `OPENMETADATA_REASONING_MAX_UPLOAD_BYTES` | `64m` | The largest job input one `PUT /reasoning/inputs/...` may carry, the same as a Graph Store upload's limit. At least `1m`. Reported as the capability limit `maxUploadBytes`. |
 
 Invalid values stop the container at start with an `ERROR` line naming the variable. Numeric values
@@ -124,7 +129,7 @@ work and releases the writer before the client gives up.
 | Path | Contents |
 |---|---|
 | `/jena-fuseki` | The Fuseki distribution (`FUSEKI_HOME`), plus `extensions/` |
-| `/fuseki` | Volume (`FUSEKI_BASE`): `configuration/`, `databases/`, `shiro.ini`, `extra/`, and `reasoning/` when reasoning is enabled, with a directory per job in `reasoning/jobs/` |
+| `/fuseki` | Volume (`FUSEKI_BASE`): `configuration/`, `databases/`, `shiro.ini`, `extra/`, and `reasoning/` when reasoning is enabled, with a directory per job in `reasoning/jobs/` and the published snapshots in `reasoning/snapshots/` |
 | `/jena-fuseki/reasoner` | The reasoner worker: its jar and dependencies, `bin/reasoner`, `NOTICE`, `THIRD-PARTY.md`, `licenses/` and the HermiT source in `source/` |
 
 The extension is enabled by a symlink `/fuseki/extra/openmetadata-fuseki-extensions.jar` pointing at the
@@ -141,8 +146,11 @@ TDB2 dataset under `/fuseki/reasoning`, has no network listener and never fetche
 This release adds the worker, its launcher, the memory-budget check and the HTTP job operations
 OpenMetadata calls ([Job operations](#job-operations)). `CHECK` and `EXPLAIN` run end to end: the
 extension captures the ontology release OpenMetadata uploaded
-([Capture](#capture)), and a worker loads it and classifies or explains it. `REFRESH`, snapshot
-results and snapshot queries arrive with reasoning snapshots in a later release.
+([Capture](#capture)), and a worker loads it and classifies or explains it. A `REFRESH` captures
+every active release from the serving dataset and the catalog triples the rules read, classifies
+each release, runs the rules the request carries to a fixed point and publishes the result as an
+immutable snapshot ([Refresh](#refresh), [Snapshots](#snapshots)), which `QUERY` reads and `EXPLAIN`
+explains governance facts from.
 
 ### Engines
 
@@ -185,12 +193,15 @@ worker on it. Every path a step names must stay inside its job directory.
 |---|---|
 | `LOAD` | Bulk-loads exported N-Quads or TriG (optionally gzip-compressed) into a fresh private TDB2 dataset |
 | `CLASSIFY` | Classifies one import closure: a set of named graphs whose `owl:imports` must all resolve inside it. Writes consistency, unsatisfiable classes, the direct class hierarchy, equivalences, direct types and object property values between named individuals, asserted and entailed (and, with HermiT, equalities between them) into an output graph, and answers entailment checks with `ENTAILED`, `NOT_ENTAILED`, `INCONSISTENT` or `INVALID`. `NOT_ENTAILED` never means the negation was proven. An inconsistent closure writes nothing. |
+| `CLASSIFY_ALL` | Classifies several closures one after another in one worker, each as a `CLASSIFY` of its own would be: a refresh's releases, which paid a JVM start each (about 1.1 s) when every release had its own step |
 | `EXPLAIN` | Computes justifications for an entailment or an inconsistency: one by default, up to `explain.maxJustifications` (at most 10) from a hitting set tree. An entailment of an inconsistent closure is answered `INCONSISTENT` with the inconsistency's justification. Running out of checks after the first justification keeps those found and says so (`justificationsIncomplete`) |
-| `COMPACT` | Compacts the dataset before it is published |
-| `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance graph ([Governance rules](#governance-rules)) |
+| `COMPACT` | Replaces the dataset with a packed copy of it before it is published ([Compaction](#compaction)) |
+| `RULES` | Runs a bundle of governance CONSTRUCT rules to a fixed point over selected graphs, writing each rule's conclusions into its output graph and one witness per derived fact into a provenance file beside the dataset ([Governance rules](#governance-rules)) |
 
-A closure is either the listed `closure.graphs` or, with `"allGraphs": true`, every named graph of
-the working dataset, as when it holds exactly one captured closure. An `owl:imports` target must be
+A closure is the listed `closure.graphs`; or, with `"graphsFile"`, the graphs a file in the job
+directory lists one per line, as a refresh lists each of the closures its working dataset holds;
+or, with `"allGraphs": true`, every named graph of the working dataset, as when it holds exactly
+one captured closure. A closure lists at most 10,000 graphs. An `owl:imports` target must be
 the IRI or version IRI of an ontology header in the closure, or the name of one of its graphs.
 `CLASSIFY`'s manifest names the first 100 unsatisfiable classes in IRI order (`unsatisfiable`);
 the count in `entailments` is always complete. A check that cannot be asked of the closure is
@@ -198,6 +209,31 @@ answered `INVALID` with its `reason`.
 
 A closure outside OWL 2 DL, with a missing import, with triples the OWL mapping cannot consume, or
 over an admission limit is rejected with its problems, never classified with something dropped.
+
+`CLASSIFY_ALL` reads its closures from `closuresFile`, a JSON array in the job directory of at
+most 1,000 objects, each a closure (`root` with `graphs` or `graphsFile`) and the `output` graph
+of its entailments; together they may list 100,000 graphs. No output may be a graph any of the
+closures reads, so the result never depends on their order.
+
+```json
+{"protocol": 1, "stepId": "classify", "kind": "CLASSIFY_ALL", "dataset": "working",
+ "timeoutMillis": 600000, "closuresFile": "classify.closures.json"}
+```
+
+Each closure has its own admission, its own engine, its own output graph and its own manifest:
+closure *n*, counted from 0, gets `<step>-<n>.result.json`, in the shape of a `CLASSIFY` manifest,
+as soon as it is classified. The step reads and writes inside one write transaction that commits
+after the last closure, so it writes every output graph or none (a commit forces a dozen files to
+disk, far longer than a small closure takes to classify). It stops at the first closure that is
+inconsistent (the step still `SUCCEEDED`, outcome `INCONSISTENT`) or rejected (`FAILED`, with that
+closure's problems); its own manifest then names that closure in `stoppedAt` and counts the
+closures classified before it, and the dataset is left as it was. A closure the deadline, the heap
+or a kill cut short has no manifest, so the first closure without a `SUCCEEDED` manifest is always
+the one that ended the step. The closures share the step's deadline
+and heap, and `maxNewFacts` bounds what they write together: each may write what the earlier ones
+left of it, up to `maxOutputTriples`. The step file's `protocol` is still 1: a worker without this
+step refuses the file as `INVALID_STEP`, and the image always ships the worker with the extension
+that starts it.
 
 A step file may set any admission limit in `limits`; each must be a positive integer. The limits
 that bound the worker's heap default to a size proportional to it, so raising
@@ -217,8 +253,8 @@ records the limits a step ran with.
 | `maxRules` | 256 rules in one `RULES` bundle, enabled or not | no |
 | `maxRulePatterns` | 64 triple and path patterns in one rule, EXISTS included | no |
 | `maxPasses` | 64 passes of one `RULES` step, the last one that derives nothing included | no |
-| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs | no |
-| `maxSpoolBytes` | 4 GiB, the file one `RULES` pass spools its solutions to | no |
+| `maxNewFacts` | 10,000,000 triples one `RULES` step may add to its output graphs, or the closures of one `CLASSIFY_ALL` to theirs together | no |
+| `maxSpoolBytes` | 4 GiB, the files one `RULES` step keeps outside the dataset at once: a pass's solutions, the delta it reads and the one it writes, and the witnesses of every pass so far | no |
 
 They were measured on a catalog-shaped closure classified with HermiT: 50,000 individuals in a
 transitive containment hierarchy with its inverse and three assertions each (297,000 triples,
@@ -280,6 +316,36 @@ After a step that did not succeed, it removes the step's exported closure and an
 worker's output. The worker inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `HOME` from
 the server's environment, so `ADMIN_PASSWORD` and JVM options meant for Fuseki never reach it.
 
+### Compaction
+
+By the time `COMPACT` runs, the working dataset's B+tree pages are about half full, and the dataset
+still holds the earlier copy of every page that a later transaction changed. `COMPACT` replaces the
+dataset with a packed copy of it, built in `<stepId>.packed.tmp` in the job directory and renamed
+over it:
+
+- Each index is read in its own order and written bottom-up as full pages, the way TDB2's bulk
+  loader (`tdb2.xloader`) builds an index from sorted input. No quad is inserted.
+- The node table's data file is copied byte for byte. A node's id is its offset in that file, so
+  every id stays valid and the index records are copied unchanged.
+- Each index of the copy comes from the same index of the source. The step therefore fails if the
+  indexes of the source do not all hold the same number of records, where a copy that rebuilt every
+  index from one would have hidden it.
+
+TDB2's own compaction (`DatabaseMgr.compact`), which the step used before, inserts every quad into
+a new database: six tree descents per quad, and pages that end up half full again. The step alone,
+on the working datasets of the two catalogs [measured below](#governance-explanations) after `LOAD`
+and `RULES`, three interleaved runs each:
+
+| Working dataset | TDB2 compaction | Packed copy |
+|---|---|---|
+| 5,000 tables: 169,512 quads, 255 MB | 2.8 to 3.2 s, leaves 255 MB | 1.4 s, leaves 204 MB |
+| 20,000 tables: 672,042 quads, 490 MB | 6.7 s, leaves 473 MB | 1.5 to 2.0 s, leaves 314 MB |
+
+Publishing the working dataset as it is would save that second or two, and would keep the half-full
+pages in every snapshot, on disk and in the page cache that serves its queries. TDB2 grows each of
+its files 8 MiB at a time, so 201 MB of any snapshot's database (24 index files) is fixed; that is
+nearly all of the smaller one.
+
 ### Governance rules
 
 A `RULES` step runs OpenMetadata's governance rules, positive SPARQL `CONSTRUCT` rules such as PII
@@ -289,20 +355,24 @@ over a working dataset that `LOAD` (and `CLASSIFY`, for ontology conclusions) fi
 ```json
 {"protocol": 1, "stepId": "rules", "kind": "RULES", "dataset": "working", "timeoutMillis": 600000,
  "read": ["urn:capture:asserted", "urn:capture:context"],
- "provenance": "urn:capture:provenance",
+ "provenance": "provenance",
  "rules": [{"name": "pii-propagation-via-lineage", "ruleBody": "PREFIX om: <...> CONSTRUCT {...} WHERE {...}",
             "enabled": true, "priority": 200, "output": "urn:capture:inferred:pii-propagation-via-lineage"}],
  "limits": {"maxPasses": 64}}
 ```
 
 - `read` lists the graphs the rules read; they read the union of these and the output graphs, never
-  the provenance graph or any other graph. `urn:x-arq:DefaultGraph` names the default graph.
+  any other graph. `urn:x-arq:DefaultGraph` names the default graph.
+  `readFile` instead names a file in the job directory listing them one per line, at most 100,000,
+  as a refresh does.
 - `rules` is OpenMetadata's rule shape (`name`, `ruleBody`, `ruleType`, `enabled`, `priority`,
   `displayName`, `description`, `tags`) plus `output`, the graph a rule's conclusions go to, which
   every enabled rule needs. Rules may share an output graph. Order and `priority` do not change the
   result.
-- No output graph nor the provenance graph may be read, and no graph under
-  `urn:openmetadata:reasoner:` may be named: the step keeps its delta graphs there.
+- `provenance` names the file the step writes its witnesses to, in the job directory and outside
+  the dataset. It is not RDF in the dataset, so no rule and no query can read it.
+- No output graph may be read, and no graph under `urn:openmetadata:reasoner:` may be named: the
+  step names its delta there in the dataset a pass evaluates over.
 
 **Admission.** Every rule, enabled or not, is checked on its SPARQL algebra before anything runs, and
 one invalid rule rejects the bundle (`INVALID_RULES`, every problem listed with its rule). The step
@@ -317,37 +387,62 @@ casts may be called, never extension functions, and property functions are off, 
 named by an IRI; and a rule has at most 16,384 characters, 32 template triples, `maxRulePatterns`
 patterns and 32 levels of nesting.
 
-**Evaluation.** The step first empties its output and provenance graphs, so it always recomputes from
-what it reads: a premise deleted since the last run takes every conclusion that only it supported
-with it, including conclusions around a cycle, and a conclusion with another support stays. It then
-runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later pass evaluates, for every
-triple pattern that can match the previous pass's new facts, the rule with that one pattern matching
-only them (a delta graph) and the rest matching everything, and with UNION branches that do not hold
-the pattern dropped. A solution that uses a new fact is found that way; one that does not was found
-before. A rule whose property path or EXISTS condition reads a predicate the delta holds is
-evaluated in full in that pass instead. A pass evaluates inside one read transaction and spools its
-solutions to a file in the job directory, bounded by `maxSpoolBytes`; it then reads the file back
-and applies the conclusions in write transactions of up to 500,000 solutions, never upgrading a read
-transaction. A conclusion already in a graph the rules read is not stored; one already in its rule's
-graph is a duplicate; any other goes into its rule's graph with a witness and, if no output graph
-had it, into the next delta. The step converges when a pass adds no new fact, and reports
-`CONVERGED` with per-pass and per-rule counts. Running out of passes, new facts or spool ends it
-`INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a step that does not converge leaves its
-output graphs partial and writes no run record, so its dataset must not be published.
+**Evaluation.** The step first empties its output graphs and removes its provenance file, so it
+always recomputes from what it reads: a premise deleted since the last run takes every conclusion
+that only it supported with it, including conclusions around a cycle, and a conclusion with another
+support stays. It then runs passes, semi-naively. Pass 1 evaluates every rule in full. Each later
+pass evaluates, for every triple pattern that can match the previous pass's new facts (the delta),
+the rule with that one pattern matching only them and the rest matching everything, and with UNION
+branches that do not hold the pattern dropped. A solution that uses a new fact is found that way;
+one that does not was found before.
+
+The delta is a flat file of the job directory, written by one pass and read by the next: it has no
+index, so each read of it is one scan of the file. A variant therefore puts the delta pattern first
+in its block, where it is read once and drives the join. A rule is evaluated in full in a pass
+instead when a property path or EXISTS condition of it reads a predicate the delta holds, or when
+one of its delta patterns is not on the leftmost path of the rule's algebra (it follows a property
+path or `VALUES` in its group, or sits in a nested group that is joined to patterns before it) and
+would be looked up once per solution of what precedes it. Full evaluation finds the same facts in
+the same passes.
+
+A pass evaluates the rules and spools their solutions to a file in the job directory; it then reads
+the file back and applies the conclusions, so nothing is evaluated while the dataset changes. All
+passes run in one write transaction, committed when the step converges or runs out of a budget:
+nothing else reads the working dataset, and TDB2 copies an index page again in every transaction
+that changes it, so a commit per pass grew the files and synced them with every pass. A conclusion
+already in a graph the rules read is not stored; one already in its rule's graph is a duplicate; any other goes into its rule's
+graph with a witness and, if no output graph had it, into the next delta. The step converges when a
+pass adds no new fact, and reports `CONVERGED` with per-pass and per-rule counts. Running out of
+passes, new facts or spool ends it `INCOMPLETE`, and running out of time ends it `TIME_BUDGET`; a
+step that does not converge leaves its output graphs partial and no provenance file, so its dataset
+must not be published.
 
 The starter rules ship with `transitive-lineage-closure` disabled: it stores every
 ancestor/descendant pair, which grows quadratically with lineage depth.
 
-**Witnesses and explanations.** For every fact it derives, the step records in the provenance graph
-the solution that first derived it: the rule, the pass and the values of the rule's variables. Those
-values are terms the dataset already holds, so a witness costs index entries, not node data. A
-converged run also records the graphs it read and every enabled rule's body and SHA-256 digest. The
-worker's `Explanations` API (used by a later `EXPLAIN` for governance facts) rebuilds a fact's
-premises from its witness, explains each premise in turn down to facts the rules read, reconstructs a
-property-path premise as one shortest chain of triples and an EXISTS condition as one match, and
-marks where it stopped at its depth, size and path bounds. A derived fact's premises were all present
-before the pass that derived it, so an explanation always ends at asserted facts. The provenance
-graph is never part of the serving union.
+**Witnesses and explanations.** For every fact it derives, the step records the solution that first
+derived it: the rule, the pass and the values of the rule's variables. Witnesses go to the step's
+provenance file, never into the dataset:
+
+| Part | Holds |
+|---|---|
+| solutions | the rule, the pass and one term per variable of the rule, in the order derived; facts derived from one solution share it |
+| index | one 24-byte entry per derived fact, sorted: a 128-bit SHA-256 digest of the output graph and the triple, and where its solution is |
+| run record | the passes, the graphs the rules read, and every enabled rule's body, SHA-256 digest, output graph and variables |
+
+A witness is found from its fact alone, by binary search of the index, which is the only way
+anything reads one. The file is written under a temporary name while the passes run, its index
+sorted in runs of 65,536 entries that are then merged, and it takes its name only when the step
+converges, so a step that does not converge leaves none. Its terms are written out in full, so it
+counts against `maxSpoolBytes`. As RDF in the dataset a witness was three or more quads in six
+indexes, about 2.6 KB per derived fact and 72% of a snapshot's quads, which every query scanned
+past; in the file the 327,600 facts of the 20,000-table catalog below take 49 MB.
+
+The worker's `Explanations` API (used for governance `EXPLAIN`) rebuilds a fact's premises from its
+witness, explains each premise in turn down to facts the rules read, reconstructs a property-path
+premise as one shortest chain of triples and an EXISTS condition as one match, and marks where it
+stopped at its depth, size and path bounds. A derived fact's premises were all present before the
+pass that derived it, so an explanation always ends at asserted facts.
 
 ### Job operations
 
@@ -360,11 +455,13 @@ the tests check against. The operations are served whenever the extension is ena
 | Request | Answer |
 |---|---|
 | `GET /reasoning/capabilities` | `200`: protocol version `1`, readiness (`READY`, `NOT_READY` or `DISABLED`) with its reasons, the operations (`REFRESH`, `CHECK`, `EXPLAIN`, `RESULTS`, `QUERY`, each `AVAILABLE` or `NOT_IMPLEMENTED` with a reason), the memory budget (container limit, required bytes and each term), and the limits the store enforces (`maxQueuedJobs`, `maxDiskBytes`, `maxUploadBytes`, and the rest the protocol requires) |
-| `PUT /reasoning/inputs/sha256:<64 hex digits>` | Holds the body, `application/rdf+thrift`, as the input a later job names by that digest. `201` with `{"digest", "byteSize"}` when new; `200` when the same bytes were already held; `400` when the body is empty or does not hash to the digest in the path; `404` for a path that is not `sha256:` and 64 lowercase hex digits; `413` over `maxUploadBytes`; `415` for another content type; `503` when reasoning is disabled or holding it would put `/fuseki/reasoning` over the disk quota (`LIMIT_EXCEEDED`, subject `maxDiskBytes`); `405` for any other method |
+| `PUT /reasoning/inputs/sha256:<64 hex digits>` | Holds the body, `application/rdf+thrift`, as the input a later job names by that digest. `201` with `{"digest", "byteSize"}` when new; `200` when the same bytes were already held; `400` when the body is empty or does not hash to the digest in the path; `404` for a path that is not `sha256:` and 64 lowercase hex digits; `413` over `maxUploadBytes`; `415` for another content type; `429` when 4 uploads are already being received; `503` when reasoning is disabled or holding it would put `/fuseki/reasoning` over the disk quota (`LIMIT_EXCEEDED`, subject `maxDiskBytes`); `405` for any other method, with `Allow: PUT, HEAD` |
+| `HEAD /reasoning/inputs/sha256:<64 hex digits>` | Asks whether an input is held, so a client can skip sending it again. `200` with `Content-Length` the held byte size and `Content-Type: application/rdf+thrift`; `404` when it is not held or the path is not `sha256:` and 64 lowercase hex digits; `503` when reasoning is disabled. A `200` restarts the hold, exactly as an upload of the same bytes would, so a client can keep an upload alive by asking; the body is never returned |
 | `POST /reasoning/jobs?dataset=<name>` | `202` with the new job and a `Location`; `200` with the existing job when its `requestId` is known; `400` for a request the schema refuses; `404` for a dataset that is not served; `409` for a known `requestId` sent with a different request or dataset; `413` over 4 MiB; `415` unless `application/json`; `429` when the queue is full; `503` when reasoning is disabled or not ready, or the disk quota is reached |
 | `GET /reasoning/jobs/<id>` | `200` with the job: state, `cancelRequested`, input, progress, outcome and problem, times; `404` when unknown |
 | `DELETE /reasoning/jobs/<id>` | Requests cancellation: `202` while the job stops, `200` once it has, or for a job that had already finished, which is unchanged |
-| `GET /reasoning/results/<id>`, `POST /reasoning/query` | `501` with the problem `NOT_IMPLEMENTED` until snapshots arrive; a finished check's detail is in its job directory's `result.json` meanwhile |
+| `GET /reasoning/results/<id>?offset=&limit=` | `200` with a page of a finished job's result ([Results](#results)); `404` for an unknown job or one that has no result, with the job's problem; `409` while it runs; `400` for a limit outside 1 to `maxResultRows` |
+| `POST /reasoning/query?dataset=<name>` | `200` with a bounded `SELECT` or `ASK` over the dataset's current snapshot ([Snapshot queries](#snapshot-queries)); `400` for anything else; `404` for a dataset that is not served; `413` over 1 MiB; `429` over `OPENMETADATA_REASONING_MAX_CONCURRENT_QUERIES`; `503` with `NOT_READY` before the first snapshot, or with `LIMIT_EXCEEDED` (`maxQuerySeconds` when the deadline passes, `maxQueryScannedQuads` when the query reads too many quads) |
 
 Every refusal answers with the protocol's problem object, `{"code": ..., "message": ...}`, with
 `subject` naming the limit for `LIMIT_EXCEEDED`. A request is validated against the schema and the
@@ -380,7 +477,12 @@ job's `input` records them with `releaseRdf`.
 temporary file while it is hashed, refused over `maxUploadBytes` or when the hash differs from the
 path, and renamed into place, so a reader never sees a partial upload and the same bytes uploaded
 again change nothing but the clock below. They count against `OPENMETADATA_REASONING_DISK_QUOTA` with
-everything else under `/fuseki/reasoning`, and an upload that would pass it is removed and refused.
+everything else under `/fuseki/reasoning`. An upload that cannot fit is refused with `503`
+`LIMIT_EXCEEDED` (`maxDiskBytes`) before its body is read when the store is already at the quota or
+the `Content-Length` would pass it; without one, or when others grew the data meanwhile, it is
+refused and removed once received. The quota check never walks the tree: the uploads directory is counted exactly, and the rest of `/fuseki/reasoning` comes from a walk that is repeated in the background once it is 5 seconds old, so an upload can miss up to 5 seconds of growth elsewhere (the worker's own checks measure afresh). At most 4 uploads are received at once; a fifth gets `429`
+`LIMIT_EXCEEDED` (`maxConcurrentUploads`), the answer a full job queue gives, and retries. Neither
+the disk measure nor a sweep delays job status reads.
 An upload is kept while any queued or running job names it. Once none does, it is removed when
 more than an hour has passed since it was last uploaded, so a second job over the same release needs
 no second upload; uploads no job ever names go the same way. The removal runs when an upload
@@ -414,11 +516,11 @@ run by hand, and refuses work at or over `OPENMETADATA_REASONING_DISK_QUOTA`. Fi
 `OPENMETADATA_REASONING_JOB_HISTORY` or older than `OPENMETADATA_REASONING_JOB_RETENTION_HOURS` are
 removed, oldest first. Directories without a `job.json` are never removed.
 
-A job's worker steps report a `RULES` budget as `LIMIT_EXCEEDED` with the limit as its subject, and
-an invalid bundle as `RULE_FAILED`; no plan runs `RULES` yet.
-
 **What a job does in this release.** A `CHECK` runs `capture`, `load` and `classify`; an
-`EXPLAIN` runs `capture`, `load` and `explain`. The job's `outcome` is the protocol's answer:
+`EXPLAIN` runs `snapshot` (a governance fact is answered there, see
+[Governance explanations](#governance-explanations)), then `capture`, `load` and `explain`; a
+`REFRESH` runs `capture`, `load`, `classify` (one worker step for all the releases), `rules`,
+`compact` and `publish` ([Refresh](#refresh)). The outcome of a check or explanation is the protocol's answer:
 
 | Result | Job |
 |---|---|
@@ -429,6 +531,7 @@ an invalid bundle as `RULE_FAILED`; no plan runs `RULES` yet.
 | Closure outside OWL 2 DL | `FAILED`, `PROFILE_VIOLATION` |
 | The upload is not held, has another size or hash than `releaseRdf` says, or does not hold exactly one `owl:Ontology` with `owl:versionIRI <urn:openmetadata:ontology-release:{releaseId}>` | `FAILED`, `INPUT_CHANGED`, `subject` the upload's digest, or the `ontologyId` for a wrong header |
 | The release has an `owl:imports`, which nothing can satisfy because no other ontology is in the input | `FAILED`, `MISSING_IMPORT`, `subject` the imported IRI |
+| A term in the upload is longer than 1 MiB (Thrift's string limit, checked while it is read, so a huge literal never has to fit in memory) | `INCOMPLETE`, `LIMIT_EXCEEDED`, `subject` the upload's digest, as for any limit the capture reaches |
 | An upload that is not RDF-Thrift | `FAILED`, `INVALID_REQUEST`, `subject` the upload's digest |
 | A question naming an entity outside the closure | `FAILED`, `INVALID_REQUEST` |
 | Cancelled | `CANCELLED` |
@@ -442,18 +545,20 @@ explanation can name the members behind each statement. `capture.json` records t
 ontology IRI, its version IRI and the spool's size. A question the schema admits but OWL cannot state, such as
 an intersection without operands, is refused with `400` when the job is submitted.
 
-Capabilities report `CHECK` and `EXPLAIN` `AVAILABLE` with the limits the protocol requires of them
+Capabilities report every operation `AVAILABLE` with the limits the protocol requires of it
 (`maxQueuedJobs`, `maxJobSeconds`, `maxDiskBytes`, `maxClosureAxioms`, `maxIndividuals`,
-`maxExpressionDepth`, `maxImports`, `maxUploadBytes`), the engine builds read from the worker jar's manifest, and the
-OWL 2 DL constructs as coverage; `REFRESH`, `RESULTS` and `QUERY` stay `NOT_IMPLEMENTED`, so a
-`REFRESH` still fails at `capture` with `NOT_IMPLEMENTED`, which is permanent for this build.
+`maxExpressionDepth`, `maxImports` and `maxUploadBytes` for the jobs; `maxDerivedTriples`
+(10,000,000) and `maxRulePasses` (64) for `REFRESH`; `maxResultRows` for `RESULTS` and `QUERY`, and
+`maxQuerySeconds` for `QUERY`), the engine builds read from the worker jar's manifest plus
+`governance-rules` (`jena-6.2.0`, SPARQL CONSTRUCT rules), and the OWL 2 DL constructs as coverage.
 `NOT_READY` stays the transient answer (reasoning disabled, memory budget, disk unmeasurable, server
 stopping, another worker running). An operation is `AVAILABLE` only while the store enforces every
 limit it needs (OpenMetadata's
 `ADR:2026-10-14-rdf-reasoning-capabilities-list-each-operation-and-the-limits-it-enforces`); when
-the disk quota cannot be resolved, `CHECK` and `EXPLAIN` are reported `NOT_IMPLEMENTED` and
-readiness `NOT_READY`. The admission limits are the worker's for `OPENMETADATA_REASONER_HEAP` and
-are written into every step file, so the worker enforces exactly what capabilities report.
+the disk quota cannot be resolved, the job operations are reported `NOT_IMPLEMENTED` and readiness
+`NOT_READY`, and without the worker's rule compiler (an image without the worker) so is `REFRESH`.
+The admission limits are the worker's for `OPENMETADATA_REASONER_HEAP` and are written into every
+step file, so the worker enforces exactly what capabilities report.
 
 ### Capture
 
@@ -513,6 +618,191 @@ admin = *
 The extension's integration tests run against this file (`extension/src/test/resources/shiro/`)
 and against the image's own `shiro.ini`.
 
+### Refresh
+
+A `REFRESH` recomputes every deduction from asserted input and publishes it as a new snapshot of
+the serving dataset it names (the plan's refresh lifecycle). The request lists every active
+ontology release in `ontologyReleases` (possibly none, at most one release per `ontologyId`; a second entry for the same ontology is `400` `INVALID_REQUEST` naming it) and carries the governance rules inline in
+`rules`, with OpenMetadata's digest of them in `ruleBundleDigest`
+(`ADR:2026-11-10-reasoning-jobs-name-ontology-releases-and-carry-their-rules`). The store records
+the releases' `contentDigest`s and the rule digest with the snapshot's `input` and never checks or
+recomputes either: they are OpenMetadata's, and what the store can check is the serving graph.
+
+**Rules.** Disabled rules take no part. Every enabled rule is compiled with the `RULES` step's own
+compiler when the job is submitted, so a rule OpenMetadata saves is never refused later, and one it
+should not have saved is `400` before anything is queued: `RULE_FAILED` with the rule as subject
+and the compiler's problems (at most 10) as message, or `INVALID_REQUEST` for a name used twice or a
+body over 16,384 characters. `RuleCompilerVectorsTest` runs OpenMetadata's admission vectors
+through the same entry point.
+
+**Capture.** Inside one read transaction of the serving dataset the extension:
+
+1. reads, for each listed release, the graph `https://open-metadata.org/graph/ontology/{ontologyId}`
+   in which Fuseki holds an active release. It must hold exactly one named `owl:Ontology` whose
+   `owl:versionIRI` is `urn:openmetadata:ontology-release:{releaseId}`: a missing graph, or a graph
+   of another release because the ontology was activated again since the request was made, fails
+   the job `INPUT_CHANGED` with the `ontologyId` as subject, and the next refresh sees the new
+   release. An `owl:imports` is `MISSING_IMPORT`, as for a `CHECK`, since no other ontology is in
+   the input. Each release is one closure; at most 1,000;
+2. streams the catalog: every quad whose predicate a rule can match, read predicate by predicate
+   from TDB2's predicate-first index (a rule with a variable predicate or a negated property set
+   reads everything), from every graph but the store's own (`urn:openmetadata:`) and the paths
+   `/graph/ontology/` (every ontology graph: the listed releases are read in step 1, and a release
+   that is not listed is no input), `/graph/staging/` (where OpenMetadata stages the chunks of a
+   graph it replaces, which are never complete) and `/graph/inferred/` (the phase 0 materializer's
+   output). Graph decisions are kept in an LRU of 4,096; the catalog may span 10,000 graphs and
+   the rules 100,000 graphs in all.
+
+The spool is checked against the disk quota and the deadline every 4,096 quads, and the server
+holds one release's header, the graph names and nothing of the catalog. A refresh whose source
+revision is older than the current snapshot's (same dataset generation, lower watermark) stops
+before capturing with `SUPERSEDED`. A refresh with no releases still runs the rules over the
+catalog.
+
+**Reasoning.** `load` bulk-loads the spool; `classify` runs one `CLASSIFY_ALL` step, a single
+worker that classifies each closure in turn into `urn:openmetadata:entailments:<release id>`;
+`rules` runs the rules to a fixed point (`maxPasses` 64) reading the catalog graphs, the closures'
+graphs and their entailments, writing each rule's conclusions to `urn:openmetadata:inferred:<rule>`
+and its witnesses to the file `provenance` in the job directory; `compact` replaces the working
+dataset with a packed copy ([Compaction](#compaction)); `publish` makes the two the dataset's
+current snapshot. The closures' entailments and the rules' new facts together may not pass
+`maxDerivedTriples`: each closure gets what the ones before it left, and `RULES` gets the rest as
+`maxNewFacts`; the spool of a pass gets what the disk quota leaves. A refresh publishes complete
+results or none: a limit, the deadline, the worker's heap, a release outside OWL 2 DL or an
+inconsistent release (`INCONSISTENT_ONTOLOGY`, subject the ontology) fails it, with the protocol's
+limit names (`maxRulePasses`, `maxDerivedTriples`, `maxDiskBytes`, `maxJobSeconds`) as subjects,
+and the previous snapshot stays current. A problem with one release has the step `classify-<n>`,
+*n* the release's position in `ontologyReleases` counted from 0, whether the release was
+inconsistent or rejected or the deadline or the heap ran out while it was classified;
+`classify-<n>.result.json` in the job directory is that release's result. A `SUCCEEDED` refresh has
+`snapshotId`, and `input.engines` names the engines that computed it.
+
+### Snapshots
+
+Each serving dataset has a lineage of snapshots under `/fuseki/reasoning/snapshots/<dataset>/`:
+one directory per snapshot with its compacted TDB2 database (`tdb/`), the provenance file of the
+rules that derived it (`provenance`, absent when no rules ran) and `snapshot.json`, and
+`current.json`, the pointer to the current one and its generation, a number that grows by one with
+every publication. The database holds what queries read and nothing else.
+
+- **Atomic.** `publish` moves the job's working dataset and its provenance file into a new snapshot
+  directory (renames on the same volume, never copies), opens the database, writes the metadata,
+  and only then replaces the pointer by an atomic rename and swaps the current snapshot under one
+  lock. A reader sees the old snapshot
+  or the new one, whole; a failure before the rename removes the new directory and leaves the old
+  one current.
+- **Compare-and-set.** The capture records the generation that was current; `publish` succeeds
+  only if it still is, and never over a snapshot of the same dataset generation with a higher
+  live-write watermark or one published by a job submitted later (jobs carry a submission
+  sequence). Anything else fails `SUPERSEDED` and publishes nothing, so a late or older refresh can
+  never replace a newer snapshot.
+- **Leases and retention.** A query or explanation leases the current snapshot while it reads; its
+  deadline bounds the lease. A replaced snapshot is closed and deleted when its last lease ends, so
+  a snapshot in use is never deleted, and at most 4 replaced snapshots per dataset wait for readers
+  (a fifth publication waits up to the query deadline for one to go). At startup everything but the
+  current snapshot of each dataset is removed: replaced snapshots and unfinished publications. The
+  snapshots count toward `OPENMETADATA_REASONING_DISK_QUOTA` with the jobs.
+- **Isolation.** Snapshots are never registered as Fuseki datasets, and inferred results never go
+  to the serving dataset: OpenMetadata's phase 0 graphs `{base}graph/inferred/*` are not read by a
+  refresh and are OpenMetadata's to remove after cutover. The Fuseki JVM opens a snapshot only after
+  the worker that wrote it has exited, lazily and with TDB2's small store parameters but for the
+  cache of decoded nodes, which holds `OPENMETADATA_REASONING_SNAPSHOT_NODE_CACHE` entries: by
+  default about 29 MiB a snapshot in a 4 GiB heap, under a hundredth of it.
+- **Format.** `snapshot.json` names the snapshot's layout in `store.format`, now 2. Format 1 kept
+  the witnesses in the graph `urn:openmetadata:provenance` of the database, which every query had
+  to be kept from. A snapshot of any other format is removed at startup like one that is not
+  current: the dataset has no snapshot, and its generation starts again at 1, with its next
+  refresh.
+
+### Snapshot queries
+
+`POST /reasoning/query?dataset=<name>` with `{"query": "<SELECT or ASK>", "maxRows": <optional>,
+"timeoutSeconds": <optional>}` runs over the dataset's current snapshot: its default graph is the
+union of every graph of the snapshot's database, and `GRAPH` sees the same graphs. The witnesses
+are not in the database, so no query reaches them. `FROM`, `FROM NAMED`, `SERVICE`, other query
+forms and texts over 65,536 characters are refused.
+The answer is `{"snapshot": <rdfReasoningSnapshot without freshness>, "generation": <n>, "rows":
+<n>, "truncated": <bool>, "results": <SPARQL 1.1 JSON results>}`: at most `maxResultRows` rows
+(or fewer if asked) and 8 MiB of terms, with `truncated` when there were more. Freshness is
+OpenMetadata's to compute from the snapshot's input.
+
+Rows and bytes bound the answer, not the work before its first row, so a query is also bounded by
+what it reads: past `OPENMETADATA_REASONING_MAX_QUERY_SCANNED_QUADS` quads (counted at the store)
+it stops with `LIMIT_EXCEEDED` and the subject `maxQueryScannedQuads`. The default, one million, is
+about one and a half times the 0.68 million quads of a 20,000-table snapshot: a sort, `COUNT(*)` or
+grouping over a whole snapshot stops from about 30,000 tables, while a query that follows bound
+patterns to at most a page of rows does not at any size. A `SELECT` with `ORDER BY` and no `LIMIT` below `maxRows + 1` is run with
+`LIMIT maxRows + 1`, so ARQ keeps a heap of that size instead of sorting the whole result; the answer
+and its `truncated` flag are the same. Sorts and `DISTINCT` hold at most 100,000 rows in memory and
+spill to files in the JVM's `java.io.tmpdir`, which are deleted when the query ends; `GROUP BY` does
+not spill, and the scan budget is its bound. The query runs with ARQ's general engine over a
+read-only view: handing it TDB2's own engine would bypass the view, and with it the scan budget
+and the union default graph.
+
+### Results
+
+`GET /reasoning/results/<job id>` answers `{"job": <job>, "result": <result.json>, "page":
+{"items", "offset", "limit", "total"}}` for a finished job: the closures of a refresh (with each
+one's entailment graph, engine and unsatisfiable classes, plus the rule counts and the snapshot),
+the unsatisfiable classes of a check, or the justifications of an explanation are paged, up to
+`maxResultRows` per page.
+
+### Governance explanations
+
+An `EXPLAIN` whose statement is a fact the dataset's current snapshot holds in a rule's output
+graph is answered `ENTAILED` from that snapshot's provenance file (`result.json` has `"kind":
+"GOVERNANCE"`, the snapshot and the explanation): the rule and pass that first derived the fact,
+its premises, each explained in turn down to `ASSERTED` facts, property-path premises as one
+shortest chain, bounded at depth 16, 1,000 facts (or `maxResultRows`), 256-triple chains and
+100,000 visited nodes, with `truncated` where a bound stopped it. Any other statement goes on to
+the OWL explanation. The explanation runs in the Fuseki JVM, since TDB2 locks a database to the one
+process that opens it and serving holds the snapshot open: the extension loads the worker jar's
+`ServerBridge`, and nothing else, in a class loader of its own whose parent supplies Jena, so the
+rule code (the same compiler and `Explanations` the worker runs) never reaches the OWL API or any
+other worker dependency (`RuleCodeIsolationIT`). Admission uses the same bridge.
+
+**Measured** on an Apple M-series laptop (18 cores), Java 21, worker heap 1 GiB
+(`RefreshPerformanceIT`, run with `-Dreasoning.performance=true`; `-Dreasoning.performance.tables=`
+sets the size), with the starter PII, schema-tag and domain rules and a release of 1,000 classes,
+while a reader and a writer used the serving dataset. Each figure is the median of three runs:
+
+| Catalog | Captured | Derived | Job | Steps (capture, load, classify, rules, compact) | Worker heap after GC | Server heap after GC | Snapshot | Peak reasoning disk | Slowest serving read / write, before and during |
+|---|---|---|---|---|---|---|---|---|---|
+| 5,000 tables, 137,614 triples | 85,612 catalog triples, 0.43 MB spool | 81,900 facts, 21 passes | 8.6 s (8.3 to 8.9) | 0.5, 2.0, 1.1, 3.4, 1.5 s | 55 MiB at most | 12 MiB | 216 MB | 0.47 GB | 73 / 155 ms before, 113 / 236 ms during |
+| 20,000 tables, 544,444 triples | 342,442, 1.65 MB | 327,600, 21 passes | 18.6 s (15.2 to 19.0) | 1.6, 3.2, 1.2, 10.3, 2.1 s | 72 MiB at most | 60 MiB | 363 MB | 0.82 GB | 75 / 136 ms before, 157 / 358 ms during |
+
+The laptop was running other builds during these runs (load average 12 to 19), so the times are
+upper bounds and the serving latencies say only that a refresh does not add to them by much; sizes
+and counts do not depend on load. Before the provenance file, the delta file, the single RULES
+transaction, the packed copy, one classify worker and heap-sized worker caches, the same refreshes
+took 28.8 s (25.7 to 32.2) and 69.6 s (65.6 to 75.8), of which RULES took 15.2 and 33.9 s and
+COMPACT 8.4 and 25.6 s, for snapshots of 416 MB and 1.14 to 1.16 GB and 1.01 and 2.9 to 3.0 GB of
+disk at the peak; those runs were interleaved with the first measurements of the new layout, under
+the same load.
+
+The column descriptions no rule reads were never captured. What bounds each figure:
+
+- **Job time.** Every step is one thread. RULES evaluates 21 passes and is the largest step; LOAD is
+  TDB2's loader; COMPACT is mostly creating and syncing a second set of files, so it hardly grows
+  with the catalog.
+- **Snapshot.** The database holds the captured input and the derived facts in six quad indexes:
+  201 MB of files TDB2 allocates whatever they hold, and about 170 bytes for each of the 0.68
+  million quads of the larger catalog. The provenance file adds 150 bytes per derived fact (12 and
+  49 MB).
+- **Peak disk.** The working dataset and its packed copy exist at once, beside the provenance file.
+
+On the larger catalog a snapshot query for the 4,200 PII columns took 57 ms the first time and
+11 ms repeated. A full page of 10,000 two-column rows, 11,000 nodes, took 88 to 107 ms the first
+time and, repeated, 29 to 36 ms with the 131,072-entry node cache a 4 GiB Fuseki heap gets
+(`-Dreasoning.performance.snapshotNodeCache=`) against 50 to 51 ms with 10,000 entries.
+
+Releases cost about 12 ms each after the worker's start, since one worker classifies them all and
+commits once: with 1,000 tables and releases of 100 classes each
+(`-Dreasoning.performance.releases=` and `-Dreasoning.performance.terms=`), `classify` took 1.8
+to 2.1 s for 50 releases, 3.5 to 3.8 s for 200 and 12.6 s for 1,000. With a worker per release it
+took 58 to 60 s for 50 and 219 to 230 s for 200, 1.1 s a release, nearly all of it starting a JVM
+and opening the dataset.
+
 ### Memory budget
 
 A worker shares the container's memory limit with Fuseki. To keep a worker's out-of-memory a Java
@@ -533,6 +823,14 @@ container memory limit >= (H_f + O_f + H_w + O_w + C_min) / 0.9
 
 The limit is read from cgroup v2 `memory.max`, else cgroup v1, else physical memory when the
 container has no limit.
+
+Inside its heap the worker sizes TDB2's node caches, which TDB2 bounds by entries: one decoded
+node for every 4 KiB of heap, from 10,000 to 1,000,000 (262,144 in a 1 GiB heap, 524,288 in the
+default 2 GiB), and a quarter as many in the node-to-id cache, to 200,000. A cached node measured
+about 220 bytes on a catalog, so the caches are about a twentieth of the heap; a long literal
+costs its length. `LOAD`, `RULES` and `COMPACT` open the working dataset that way. The steps that
+run an OWL engine (`CLASSIFY`, `CLASSIFY_ALL`, `EXPLAIN`) keep 10,000 entries, since their
+admission limits were measured with them and the engine needs the heap.
 
 `O_f` and `O_w` were measured with Native Memory Tracking (committed memory outside the heap) on
 Apple M4 Max hardware, in a `linux/arm64` container limited to 4 CPUs and 16 GiB:
@@ -676,6 +974,17 @@ packaged worker with the launcher's real command, on the image's classpath, and 
 catalog-shaped closure of 20,000 individuals classified in the default 2 GiB heap; unit tests check
 that the exit statuses and step file rules the launcher repeats match the worker's. The smoke test
 runs the same suite through the built image.
+
+In `reasoner/`, `RefreshJobsIT` runs `REFRESH`, `QUERY`, `RESULTS` and governance `EXPLAIN` end to
+end with the packaged worker: a refresh publishes a snapshot a query reads; removing a premise and
+refreshing again retracts what it supported and advances the generation while a leased older
+snapshot survives until its reader is done; an older refresh fails `SUPERSEDED`; the snapshot serves
+after a restart; a rule that cannot be admitted is refused at submission, a release that is no longer the
+active one fails `INPUT_CHANGED`, and an inconsistent release publishes nothing; an unlisted
+ontology graph and a staging graph never reach the rules.
+`RuleCodeIsolationIT` loads the packaged worker jar as the server does, behind a parent that hides
+the worker's dependencies. The smoke test refreshes over `test/refresh-catalog.trig` in the image, queries the snapshot, explains a governance fact,
+retracts it, refreshes out of order and restarts.
 
 `mvn verify` in `extension/` runs the job operations against stand-in worker processes: queueing,
 cancellation, restart recovery and retention on real job directories, and the HTTP operations on a

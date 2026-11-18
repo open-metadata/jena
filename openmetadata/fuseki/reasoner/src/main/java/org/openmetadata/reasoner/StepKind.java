@@ -18,6 +18,11 @@ public enum StepKind {
   LOAD,
   /** Classify one ontology import closure and write its finite entailments. */
   CLASSIFY,
+  /**
+   * Classify several import closures one after another in this process, each into its own output
+   * graph with its own result manifest, as a CLASSIFY step of its own would.
+   */
+  CLASSIFY_ALL,
   /** Compute one bounded justification for an entailment or an inconsistency. */
   EXPLAIN,
   /** Compact the working dataset before it is published. */

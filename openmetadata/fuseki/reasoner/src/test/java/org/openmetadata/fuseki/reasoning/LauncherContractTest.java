@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.openmetadata.fuseki.reasoning.jobs.RefreshCapture;
 import org.openmetadata.reasoner.ExitCodes;
 import org.openmetadata.reasoner.InvalidStepException;
 import org.openmetadata.reasoner.Limits;
@@ -43,6 +44,12 @@ class LauncherContractTest {
     assertEquals(ExitCodes.BUDGET, WorkerExitCodes.BUDGET);
   }
 
+  /** A refresh hands every release it admits to one CLASSIFY_ALL step. */
+  @Test
+  void oneStepTakesEveryReleaseARefreshAdmits() {
+    assertEquals(RefreshCapture.MAX_CLOSURES, StepFile.MAX_BATCH_CLOSURES);
+  }
+
   /** Capabilities report the extension's copy of the limits; the worker enforces its own. */
   @Test
   void theExtensionComputesTheWorkersLimitsForEveryHeap() {
@@ -59,7 +66,12 @@ class LauncherContractTest {
               worker.maxExpressionDepth(),
               worker.maxOutputTriples(),
               worker.maxChecks(),
-              worker.maxExplainChecks()),
+              worker.maxExplainChecks(),
+              worker.maxRules(),
+              worker.maxRulePatterns(),
+              worker.maxPasses(),
+              worker.maxNewFacts(),
+              worker.maxSpoolBytes()),
           List.of(
               extension.maxInputBytes(),
               extension.maxClosureTriples(),
@@ -68,7 +80,12 @@ class LauncherContractTest {
               extension.maxExpressionDepth(),
               extension.maxOutputTriples(),
               extension.maxChecks(),
-              extension.maxExplainChecks()),
+              extension.maxExplainChecks(),
+              extension.maxRules(),
+              extension.maxRulePatterns(),
+              extension.maxPasses(),
+              extension.maxNewFacts(),
+              extension.maxSpoolBytes()),
           "heap " + heap);
     }
   }

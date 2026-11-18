@@ -176,7 +176,7 @@ public final class Jobs {
    * with an existential over a union, plus a universal restriction. Deterministic (Park-Miller),
    * the same generator as test/hard-ontology.awk in the image smoke test.
    */
-  static String hardOntology(final int n) {
+  public static String hardOntology(final int n) {
     final StringBuilder trig = new StringBuilder();
     trig.append("PREFIX owl: <http://www.w3.org/2002/07/owl#>\n")
         .append("PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n")

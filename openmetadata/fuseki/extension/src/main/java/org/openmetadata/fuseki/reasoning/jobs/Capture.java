@@ -12,6 +12,7 @@
  */
 package org.openmetadata.fuseki.reasoning.jobs;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
@@ -22,7 +23,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -34,17 +34,21 @@ import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.graph.Triple;
-import org.apache.jena.riot.Lang;
 import org.apache.jena.riot.RDFFormat;
-import org.apache.jena.riot.RDFParser;
 import org.apache.jena.riot.RiotException;
 import org.apache.jena.riot.system.StreamRDF;
 import org.apache.jena.riot.system.StreamRDFBase;
 import org.apache.jena.riot.system.StreamRDFWriter;
+import org.apache.jena.riot.thrift.ThriftRDF;
 import org.apache.jena.sparql.core.Quad;
 import org.apache.jena.sys.JenaSystem;
 import org.apache.jena.vocabulary.OWL2;
 import org.apache.jena.vocabulary.RDF;
+import org.apache.thrift.protocol.TCompactProtocol;
+import org.apache.thrift.protocol.TProtocol;
+import org.apache.thrift.protocol.TProtocolException;
+import org.apache.thrift.transport.TIOStreamTransport;
+import org.apache.thrift.transport.TTransportException;
 
 /**
  * Turns the release a CHECK or EXPLAIN names into the gzip-compressed N-Quads spool the worker
@@ -73,6 +77,13 @@ public final class Capture {
   private static final int CHECK_EVERY = 4096;
 
   private static final int BUFFER_BYTES = 64 * 1024;
+
+  /**
+   * The longest string one term of the upload may hold. Thrift reads a string into one array of its
+   * declared length, which the parser then copies into a term, so a single huge literal needs more
+   * than twice its size in heap; a term an ontology release has cause to hold is far smaller.
+   */
+  static final int MAX_TERM_BYTES = 1 << 20;
 
   static {
     // The vocabulary classes below initialise Jena from whichever thread first touches them, and
@@ -158,14 +169,15 @@ public final class Capture {
     boolean complete = false;
     try {
       final Copy copy = new Copy(bounds, cancelled);
-      final Header header = new Header();
+      final Header header = new Header("the upload");
       try (CountingOutputStream file = new CountingOutputStream(Files.newOutputStream(partial));
           OutputStream out = new BufferedOutputStream(new FastGzip(file), BUFFER_BYTES);
           InputStream in = Files.newInputStream(upload)) {
         copy.file = file;
         final StreamRDF writer = StreamRDFWriter.getWriterStream(out, RDFFormat.NQUADS_UTF8);
         writer.start();
-        RDFParser.source(in).lang(Lang.RDFTHRIFT).parse(new Spooling(writer, graph, header, copy));
+        final TProtocol protocol = protocol(in);
+        ThriftRDF.protocolToStream(protocol, new Spooling(writer, graph, header, copy));
         writer.finish();
       } catch (final Abort e) {
         if (e.getCause() instanceof Refused refused) {
@@ -173,6 +185,13 @@ public final class Capture {
         }
         throw (Cancelled) e.getCause();
       } catch (final RiotException e) {
+        if (overTermLimit(e)) {
+          throw new Refused(
+              Problem.of(
+                      Problem.Code.LIMIT_EXCEEDED,
+                      "The release holds a term longer than " + MAX_TERM_BYTES + " bytes")
+                  .withSubject(release.digest()));
+        }
         throw new Refused(
             Problem.of(
                     Problem.Code.INVALID_REQUEST,
@@ -180,7 +199,7 @@ public final class Capture {
                 .withSubject(release.digest()));
       }
       copy.checkBytes(copy.file.count());
-      final String versionIri = header.verify(release);
+      final String versionIri = header.verify(release.ontologyId(), release.releaseId());
       Files.move(partial, spool, StandardCopyOption.REPLACE_EXISTING);
       complete = true;
       return new Result(
@@ -195,6 +214,25 @@ public final class Capture {
         Files.deleteIfExists(partial);
       }
     }
+  }
+
+  private static TProtocol protocol(final InputStream in) throws IOException {
+    try {
+      return new TCompactProtocol(
+          new TIOStreamTransport(new BufferedInputStream(in, BUFFER_BYTES)), MAX_TERM_BYTES, -1);
+    } catch (final TTransportException e) {
+      throw new IOException(e);
+    }
+  }
+
+  private static boolean overTermLimit(final Throwable failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause instanceof TProtocolException protocol
+          && protocol.getType() == TProtocolException.SIZE_LIMIT) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -230,7 +268,7 @@ public final class Capture {
     }
   }
 
-  private static Refused changed(final String subject, final String message) {
+  static Refused changed(final String subject, final String message) {
     return new Refused(Problem.of(Problem.Code.INPUT_CHANGED, message).withSubject(subject));
   }
 
@@ -243,14 +281,22 @@ public final class Capture {
   }
 
   /** The few triples of the ontology header the capture decides on; the rest only pass through. */
-  private static final class Header {
+  static final class Header {
     private static final int MAX_REMEMBERED = 8;
 
     private final Set<Node> ontologies = new LinkedHashSet<>();
     private final Set<Node> versions = new LinkedHashSet<>();
     private final Set<Node> imports = new LinkedHashSet<>();
-    private final Set<Node> versionSubjects = new HashSet<>();
-    private Node ontology;
+    private final Set<Node> versionSubjects = new LinkedHashSet<>();
+    Node ontology;
+    private final String source;
+
+    /**
+     * @param source what the header was read from, as it reads mid-sentence: "the upload"
+     */
+    Header(final String source) {
+      this.source = source;
+    }
 
     void see(final Triple triple) {
       final Node predicate = triple.getPredicate();
@@ -258,7 +304,7 @@ public final class Capture {
         remember(ontologies, triple.getSubject());
       } else if (predicate.equals(VERSION_IRI)) {
         remember(versions, triple.getObject());
-        versionSubjects.add(triple.getSubject());
+        remember(versionSubjects, triple.getSubject());
       } else if (predicate.equals(IMPORTS)) {
         remember(imports, triple.getObject());
       }
@@ -272,32 +318,35 @@ public final class Capture {
     }
 
     /** The release's version IRI, once the header is known to be the named release's. */
-    String verify(final Release release) throws Refused {
-      final String expected = RELEASE_IRI_PREFIX + release.releaseId();
+    String verify(final String ontologyId, final String releaseId) throws Refused {
+      final String expected = RELEASE_IRI_PREFIX + releaseId;
       if (ontologies.size() != 1) {
         throw changed(
-            release.ontologyId(),
-            "The upload has "
+            ontologyId,
+            Character.toUpperCase(source.charAt(0))
+                + source.substring(1)
+                + " has "
                 + (ontologies.isEmpty() ? "no" : "more than one")
                 + " owl:Ontology, not the one header of release "
-                + release.releaseId());
+                + releaseId);
       }
       ontology = ontologies.iterator().next();
       if (!ontology.isURI()) {
         throw changed(
-            release.ontologyId(),
-            "The owl:Ontology in the upload is a blank node, not a named one");
+            ontologyId, "The owl:Ontology in " + source + " is a blank node, not a named one");
       }
       if (!versions.contains(NodeFactory.createURI(expected))
           || versions.size() != 1
           || versionSubjects.size() != 1
           || !versionSubjects.contains(ontology)) {
         throw changed(
-            release.ontologyId(),
-            "The owl:Ontology in the upload does not state owl:versionIRI <"
+            ontologyId,
+            "The owl:Ontology in "
+                + source
+                + " does not state owl:versionIRI <"
                 + expected
                 + ">, so it is not release "
-                + release.releaseId()
+                + releaseId
                 + "; it has "
                 + versions);
       }
@@ -310,7 +359,7 @@ public final class Capture {
                           + imported
                           + ">, but no other ontology is in the input: imports between ontologies"
                           + " are not supported")
-                  .withSubject(imported.isURI() ? imported.getURI() : release.ontologyId()));
+                  .withSubject(imported.isURI() ? imported.getURI() : ontologyId));
         }
       }
       return expected;
@@ -353,11 +402,11 @@ public final class Capture {
   }
 
   /** The copy's running counts and its checks against the bounds. */
-  private static final class Copy {
+  static final class Copy {
     private final Bounds bounds;
     private final BooleanSupplier cancelled;
-    private CountingOutputStream file;
-    private long triples;
+    CountingOutputStream file;
+    long triples;
 
     Copy(final Bounds bounds, final BooleanSupplier cancelled) {
       this.bounds = bounds;
@@ -410,14 +459,14 @@ public final class Capture {
    * The lowest compression level: capture runs in the server's JVM, and the spool is read once and
    * deleted, so CPU matters more than its size.
    */
-  private static final class FastGzip extends GZIPOutputStream {
+  static final class FastGzip extends GZIPOutputStream {
     FastGzip(final OutputStream out) throws IOException {
       super(out, 1 << 16);
       def.setLevel(Deflater.BEST_SPEED);
     }
   }
 
-  private static final class CountingOutputStream extends FilterOutputStream {
+  static final class CountingOutputStream extends FilterOutputStream {
     private long count;
 
     CountingOutputStream(final OutputStream out) {

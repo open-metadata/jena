@@ -12,6 +12,9 @@
  */
 package org.openmetadata.reasoner.rules;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -50,25 +53,26 @@ import org.apache.jena.sparql.path.P_ReverseLink;
 import org.apache.jena.sparql.path.P_ZeroOrMore1;
 import org.apache.jena.sparql.path.P_ZeroOrMoreN;
 import org.apache.jena.sparql.path.P_ZeroOrOne;
-import org.apache.jena.sparql.path.Path;
 import org.apache.jena.sparql.util.Context;
 import org.openmetadata.reasoner.StepFile;
 
 /**
- * Explains a fact a converged RULES step derived, from its provenance graph: the rule and pass that
+ * Explains a fact a converged RULES step derived, from its provenance file: the rule and pass that
  * first derived it and its premises, each premise explained in turn, down to facts the rules read.
  * Premises of a derived fact were all present before the pass that derived it, so following them
  * always reaches asserted facts; the explanation is still bounded in depth and size, and marks
  * where it stopped. A property-path premise is reconstructed as one supporting chain of triples,
  * found breadth-first, so it is a shortest one; an EXISTS condition is answered with one match.
- * Read inside a read transaction on the working dataset or its published snapshot.
+ * Read inside a read transaction on the working dataset or its published snapshot, with the
+ * provenance file that step wrote for it.
  */
 public final class Explanations {
   /**
    * @param maxDepth premises below the fact explained before they are left unexplained
    * @param maxFacts facts one explanation lists, all levels together
    * @param maxPathLength triples one reconstructed path chain may have
-   * @param maxPathNodes nodes a path reconstruction may visit
+   * @param maxPathNodes nodes a path reconstruction may visit, and the nodes it may reach, which a
+   *     hub's many neighbours would otherwise grow past
    */
   public record Bounds(int maxDepth, int maxFacts, int maxPathLength, int maxPathNodes) {
     public static final Bounds DEFAULT = new Bounds(16, 1_000, 256, 100_000);
@@ -161,10 +165,10 @@ public final class Explanations {
   }
 
   private final DatasetGraph dataset;
-  private final Node provenance;
+  private final Provenance.Reader provenance;
   private final Provenance.Run run;
   private final Bounds bounds;
-  private final Context context = RulesStep.context();
+  private final Context context = RuleCompiler.evaluationContext();
   private final Map<String, CompiledRule> rules = new HashMap<>();
   private final Set<Node> read = new HashSet<>();
   private final Set<Node> outputs = new LinkedHashSet<>();
@@ -172,32 +176,31 @@ public final class Explanations {
   private int facts;
 
   private Explanations(
-      final DatasetGraph dataset,
-      final Node provenance,
-      final Provenance.Run run,
-      final Bounds bounds) {
+      final DatasetGraph dataset, final Provenance.Reader provenance, final Bounds bounds) {
     this.dataset = dataset;
     this.provenance = provenance;
-    this.run = run;
+    this.run = provenance.run();
     this.bounds = bounds;
     run.read().forEach(graph -> read.add(SelectedGraphs.normalize(graph)));
     run.rules().values().forEach(rule -> outputs.add(rule.output()));
     final Set<Node> selection = new HashSet<>(read);
     selection.addAll(outputs);
-    this.evaluation = SelectedGraphs.evaluation(dataset, selection, null);
+    this.evaluation = SelectedGraphs.evaluation(dataset, selection, null, null);
   }
 
   /**
-   * Explains {@code fact}, or returns {@code null} when the provenance graph holds no converged
-   * run, which is the case after a RULES step that did not finish.
+   * Explains {@code fact}, or returns {@code null} when there is no provenance file, which is the
+   * case after a RULES step that did not converge.
+   *
+   * @param provenance the provenance file of the RULES step that wrote {@code dataset}
    */
   public static Fact explain(
-      final DatasetGraph dataset, final Node provenance, final Triple fact, final Bounds bounds) {
-    final Provenance.Run run = Provenance.readRun(dataset, provenance);
-    if (run == null) {
-      return null;
+      final DatasetGraph dataset, final Path provenance, final Triple fact, final Bounds bounds) {
+    try (Provenance.Reader reader = Provenance.Reader.open(provenance)) {
+      return reader == null ? null : new Explanations(dataset, reader, bounds).fact(fact, 0);
+    } catch (final IOException e) {
+      throw new UncheckedIOException(e);
     }
-    return new Explanations(dataset, provenance, run, bounds).fact(fact, 0);
   }
 
   private Fact fact(final Triple triple, final int depth) {
@@ -216,8 +219,12 @@ public final class Explanations {
     if (derivedIn == null) {
       return new Fact(triple, Origin.ABSENT, null, null, 0, List.of(), false);
     }
-    final Provenance.Solution solution =
-        Provenance.readSolution(dataset, provenance, Provenance.witness(derivedIn, triple));
+    final Provenance.Solution solution;
+    try {
+      solution = provenance.solution(derivedIn, triple);
+    } catch (final IOException e) {
+      throw new UncheckedIOException(e);
+    }
     if (solution == null) {
       return new Fact(triple, Origin.DERIVED, derivedIn, null, 0, List.of(), true);
     }
@@ -286,7 +293,7 @@ public final class Explanations {
     final Node object = value(pattern.getObject(), binding);
     final String text = pattern.getPath().toString();
     final List<Step> steps = new ArrayList<>();
-    final Path inner = repeated(pattern.getPath());
+    final org.apache.jena.sparql.path.Path inner = repeated(pattern.getPath());
     if (subject == null || object == null || inner == null || !steps(inner, steps)) {
       return new PathPremise(subject, text, object, List.of(), false);
     }
@@ -297,6 +304,7 @@ public final class Explanations {
     final Deque<Node> queue = new ArrayDeque<>();
     queue.add(subject);
     int visited = 0;
+    search:
     while (!queue.isEmpty() && visited < bounds.maxPathNodes()) {
       final Node node = queue.poll();
       visited++;
@@ -310,6 +318,9 @@ public final class Explanations {
           final Node next = step.forward() ? edge.getObject() : edge.getSubject();
           if (next.equals(subject) && !next.equals(object) || reachedBy.containsKey(next)) {
             continue;
+          }
+          if (reachedBy.size() >= bounds.maxPathNodes()) {
+            break search;
           }
           reachedBy.put(next, edge);
           if (next.equals(object)) {
@@ -350,7 +361,8 @@ public final class Explanations {
         complete);
   }
 
-  private static Path repeated(final Path path) {
+  private static org.apache.jena.sparql.path.Path repeated(
+      final org.apache.jena.sparql.path.Path path) {
     if (path instanceof P_OneOrMore1 p) {
       return p.getSubPath();
     }
@@ -371,7 +383,8 @@ public final class Explanations {
 
   private record Step(Node predicate, boolean forward) {}
 
-  private static boolean steps(final Path path, final List<Step> steps) {
+  private static boolean steps(
+      final org.apache.jena.sparql.path.Path path, final List<Step> steps) {
     if (path instanceof P_Link link) {
       steps.add(new Step(link.getNode(), true));
       return true;

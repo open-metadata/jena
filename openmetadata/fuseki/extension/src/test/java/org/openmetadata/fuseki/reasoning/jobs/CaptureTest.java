@@ -165,6 +165,34 @@ class CaptureTest {
   }
 
   @Test
+  void aTermLongerThanTheTermLimitIsRefusedWhileTheUploadIsReadAndLeavesNoSpool() throws Exception {
+    final Release huge =
+        Releases.of(":Asset rdfs:comment \"" + "x".repeat(Capture.MAX_TERM_BYTES + 1) + "\" .");
+    hold(huge);
+    final Capture.Refused refused = refused(huge, huge.byteSize());
+    assertEquals(Problem.Code.LIMIT_EXCEEDED, refused.problem().code());
+    assertEquals(huge.digest(), refused.problem().subject());
+    assertNoSpool();
+
+    final Release large =
+        Releases.of(":Asset rdfs:comment \"" + "x".repeat(Capture.MAX_TERM_BYTES / 2) + "\" .");
+    assertEquals(3, capture(large).triples());
+  }
+
+  @Test
+  void manyOntologiesStatingVersionsAreStillRefusedAsNotTheNamedRelease() throws Exception {
+    final StringBuilder others = new StringBuilder();
+    for (int i = 0; i < 50; i++) {
+      others.append("<urn:other:%d> owl:versionIRI <urn:other:v%d> .\n".formatted(i, i));
+    }
+    final Release release = Releases.of(others.toString());
+    hold(release);
+    final Capture.Refused refused = refused(release, release.byteSize());
+    assertEquals(Problem.Code.INPUT_CHANGED, refused.problem().code());
+    assertNoSpool();
+  }
+
+  @Test
   void aReleaseOverItsTripleBoundIsRefusedAndLeavesNoSpool() throws Exception {
     final Release release = Releases.of(MEMBERS);
     hold(release);

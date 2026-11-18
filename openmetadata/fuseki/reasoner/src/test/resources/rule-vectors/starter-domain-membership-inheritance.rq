@@ -1,0 +1,7 @@
+PREFIX om: <https://open-metadata.org/ontology/>
+CONSTRUCT { ?column om:belongsToDomain ?domain }
+WHERE {
+  ?table a om:Table ;
+         om:belongsToDomain ?domain ;
+         om:hasColumn ?column .
+}

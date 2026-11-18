@@ -279,7 +279,7 @@ public record JobRequest(
       if (releases == null) {
         return -1;
       }
-      final Set<String> seen = new HashSet<>();
+      final Set<String> ontologies = new HashSet<>();
       for (int i = 0; i < releases.size(); i++) {
         final String path = "ontologyReleases[" + i + "]";
         final JsonObject release =
@@ -297,8 +297,16 @@ public record JobRequest(
         if (content != null && !CONTENT_DIGEST.matcher(content).matches()) {
           error(path + ".contentDigest: must be 64 lowercase hexadecimal digits");
         }
-        if (!seen.add(JSON.toStringFlat(release))) {
-          error("ontologyReleases: items must be unique");
+        final String ontologyId =
+            release.get("ontologyId").isString()
+                ? release.get("ontologyId").getAsString().value()
+                : null;
+        if (ontologyId != null && !ontologies.add(ontologyId)) {
+          error(
+              path
+                  + ".ontologyId: "
+                  + ontologyId
+                  + " is listed twice; at most one release per ontology");
         }
       }
       return releases.size();

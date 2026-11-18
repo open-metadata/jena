@@ -173,9 +173,15 @@ class ReasoningOperationsIT {
     assertEquals("GET", wrongMethod.headers().firstValue("Allow").orElseThrow());
     assertProblem(
         get("/reasoning/results/" + UUID.randomUUID(), "admin", "admin-pw"),
-        501,
-        "NOT_IMPLEMENTED");
-    assertProblem(post("/reasoning/query", "{}"), 501, "NOT_IMPLEMENTED");
+        404,
+        "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query", "{}"), 400, "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query?dataset=nope", "{}"), 404, "INVALID_REQUEST");
+    assertProblem(post("/reasoning/query?dataset=ds", "{\"query\": \"ASK {}\"}"), 503, "NOT_READY");
+    assertProblem(
+        post("/reasoning/query?dataset=ds", "{\"query\": \"DESCRIBE <urn:x>\"}"),
+        400,
+        "INVALID_REQUEST");
   }
 
   @Test
@@ -228,7 +234,16 @@ class ReasoningOperationsIT {
         "INVALID_REQUEST");
     final HttpResponse<String> read = get(path, "admin", "admin-pw");
     assertProblem(read, 405, "INVALID_REQUEST");
-    assertEquals("PUT", read.headers().firstValue("Allow").orElseThrow());
+    assertEquals("PUT, HEAD", read.headers().firstValue("Allow").orElseThrow());
+
+    final HttpResponse<String> held = head(path, "admin", "admin-pw");
+    assertEquals(200, held.statusCode());
+    assertEquals(
+        String.valueOf(release.length), held.headers().firstValue("Content-Length").orElseThrow());
+    assertEquals(
+        404, head("/reasoning/inputs/sha256:" + "0".repeat(64), "admin", "admin-pw").statusCode());
+    assertEquals(404, head("/reasoning/inputs/sha256:abc", "admin", "admin-pw").statusCode());
+    assertEquals(401, head(path, "admin", "wrong").statusCode());
   }
 
   private void start(final Path shiro, final Stage.Planner planner) throws IOException {
@@ -242,8 +257,7 @@ class ReasoningOperationsIT {
     final ReasoningSettings settings = workers.settings(Map.of());
     service =
         new JobService(
-            settings,
-            JobSettings.fromEnvironment(jobEnvironment),
+            new Operations(settings, JobSettings.fromEnvironment(jobEnvironment)),
             workers.launcher(settings),
             () -> workers.readiness(settings),
             planner,
@@ -316,6 +330,15 @@ class ReasoningOperationsIT {
       throws Exception {
     return client.send(
         authorized(HttpRequest.newBuilder(uri(path)), user, password).GET().build(),
+        HttpResponse.BodyHandlers.ofString());
+  }
+
+  private HttpResponse<String> head(final String path, final String user, final String password)
+      throws Exception {
+    return client.send(
+        authorized(HttpRequest.newBuilder(uri(path)), user, password)
+            .method("HEAD", HttpRequest.BodyPublishers.noBody())
+            .build(),
         HttpResponse.BodyHandlers.ofString());
   }
 

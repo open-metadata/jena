@@ -41,13 +41,14 @@ import org.apache.jena.sparql.engine.binding.Binding;
  * template. Instances are immutable and shared by every pass.
  *
  * <p>Semi-naive evaluation rewrites the pattern once per atom: in the variant for atom {@code k},
- * that triple pattern matches only the previous pass's new facts (a delta graph), every other
- * pattern matches everything, and UNION branches that do not contain {@code k} are dropped, since
- * their solutions use no new fact. A solution that uses at least one new fact is found by the
- * variant of one atom it matched there; a solution that uses none was found by an earlier pass.
- * Property paths and EXISTS conditions cannot be split that way; a rule whose path or EXISTS may
- * read a predicate the delta holds is evaluated in full in that pass instead, and TDB2 drops the
- * facts it already has.
+ * that triple pattern matches only the previous pass's new facts (the delta), every other pattern
+ * matches everything, and UNION branches that do not contain {@code k} are dropped, since their
+ * solutions use no new fact. A solution that uses at least one new fact is found by the variant of
+ * one atom it matched there; a solution that uses none was found by an earlier pass. Property paths
+ * and EXISTS conditions cannot be split that way; a rule whose path or EXISTS may read a predicate
+ * the delta holds is evaluated in full in that pass instead, and the step drops the facts it
+ * already has. So is a rule with a variant in which the delta would not drive the join ({@link
+ * #deltaDrives}).
  *
  * @param index position in the bundle, which the spool records instead of the name
  * @param pattern the WHERE pattern, union branches marked
@@ -152,6 +153,56 @@ record CompiledRule(
       }
     }
     return matching;
+  }
+
+  /**
+   * Whether every variant a delta with these predicates needs reads the delta once, before anything
+   * else, so that scanning a delta without an index is all it costs. The delta pattern is first in
+   * its own block; it also has to be on the leftmost path of the pattern: the first element of
+   * every sequence and the left operand of every join above it. Anywhere else it is evaluated once
+   * for every solution of what precedes it.
+   */
+  boolean deltaDrives(final Set<Node> deltaPredicates) {
+    for (final Atom atom : deltaAtoms(deltaPredicates)) {
+      if (!drives(pattern, atom.index())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean drives(final Op op, final int k) {
+    if (op instanceof OpBGP || op instanceof OpTriple) {
+      return true;
+    }
+    if (op instanceof OpUnion union) {
+      return drives(contains(union.getLeft(), k) ? union.getLeft() : union.getRight(), k);
+    }
+    if (op instanceof OpDisjunction disjunction) {
+      for (final Op element : disjunction.getElements()) {
+        if (contains(element, k)) {
+          return drives(element, k);
+        }
+      }
+      return false;
+    }
+    if (op instanceof OpJoin join) {
+      return contains(join.getLeft(), k) && drives(join.getLeft(), k);
+    }
+    if (op instanceof OpSequence sequence) {
+      final Op first = sequence.getElements().isEmpty() ? null : sequence.get(0);
+      return first != null && contains(first, k) && drives(first, k);
+    }
+    if (op instanceof OpFilter filter) {
+      return drives(filter.getSubOp(), k);
+    }
+    if (op instanceof OpExtend extend) {
+      return drives(extend.getSubOp(), k);
+    }
+    if (op instanceof OpAssign assign) {
+      return drives(assign.getSubOp(), k);
+    }
+    return false;
   }
 
   /** The pattern with atom {@code k} matching only the facts in {@code delta}. */

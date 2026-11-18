@@ -35,7 +35,8 @@ import org.apache.jena.atlas.json.JsonValue;
  * @param maxRules rules in one RULES step's bundle, enabled or not
  * @param maxRulePatterns triple and path patterns in one rule, including those inside EXISTS
  * @param maxPasses evaluation passes of one RULES step, the last one that derives nothing included
- * @param maxNewFacts triples one RULES step may add to its output graphs
+ * @param maxNewFacts triples one RULES step may add to its output graphs, or the closures of one
+ *     CLASSIFY_ALL step to theirs together
  * @param maxSpoolBytes size of the file one RULES pass spools its solutions to
  */
 public record Limits(
@@ -168,6 +169,24 @@ public record Limits(
       throw new InvalidStepException(key + " must be a positive integer");
     }
     return value;
+  }
+
+  /** These limits with another bound on the triples one CLASSIFY writes. */
+  Limits withMaxOutputTriples(final long triples) {
+    return new Limits(
+        maxInputBytes,
+        maxClosureTriples,
+        maxLogicalAxioms,
+        maxIndividuals,
+        maxExpressionDepth,
+        triples,
+        maxChecks,
+        maxExplainChecks,
+        maxRules,
+        maxRulePatterns,
+        maxPasses,
+        maxNewFacts,
+        maxSpoolBytes);
   }
 
   JsonObject toJson() {

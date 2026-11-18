@@ -37,7 +37,10 @@ import org.apache.jena.tdb2.sys.TDBInternal;
 public final class RuleFixtures {
   static final String OM = "https://open-metadata.org/ontology/";
   static final String ASSERTED = "urn:catalog:asserted";
-  static final String PROVENANCE = "urn:catalog:provenance";
+
+  /** The provenance file of a step made by {@link #step}, in its job directory. */
+  public static final String PROVENANCE = "provenance";
+
   static final List<String> STARTER_RULES =
       List.of(
           "domain-membership-inheritance",

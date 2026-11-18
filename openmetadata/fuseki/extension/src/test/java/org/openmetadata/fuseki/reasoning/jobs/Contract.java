@@ -35,6 +35,7 @@ final class Contract {
   static final String REQUEST = "rdfReasoningJobRequest";
   static final String JOB = "rdfReasoningJob";
   static final String CAPABILITIES = "rdfReasoningCapabilities";
+  static final String SNAPSHOT = "rdfReasoningSnapshot";
 
   private Contract() {}
 

@@ -136,6 +136,10 @@ final class ClosureDocument {
       final Path file,
       final Limits limits)
       throws InputRejectedException, IOException {
+    if (dataset.isInTransaction()) {
+      // A CLASSIFY_ALL step reads each of its closures inside its one write transaction.
+      return exportInTransaction(dataset, closure, file, limits);
+    }
     dataset.begin(TxnType.READ);
     try {
       return exportInTransaction(dataset, closure, file, limits);
