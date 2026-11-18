@@ -118,14 +118,35 @@ RUN set -eux; \
     cp -r NOTICE THIRD-PARTY.md licenses /out/reasoner/; \
     cp bin/reasoner /out/reasoner/bin/reasoner
 
-FROM eclipse-temurin:21-jre-noble
+# Amazon Corretto 21's generic Linux build, from its official image: Temurin has not published
+# OpenJDK's November 2026 security release yet. Only the jlinked runtime leaves this stage, not
+# the image's Amazon Linux 2 base.
+FROM amazoncorretto:21-al2-generic AS jre
+# --strip-java-debug-attributes, not --strip-debug: Corretto ships its native libraries
+# stripped, and --strip-debug would need objcopy for nothing.
+RUN jlink \
+      --add-modules ALL-MODULE-PATH \
+      --strip-java-debug-attributes \
+      --no-man-pages \
+      --no-header-files \
+      --compress=zip-6 \
+      --output /javaruntime
+
+FROM ubuntu:24.04
 ARG FUSEKI_VERSION
 
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+# C.UTF-8 ships with glibc, so the JVM gets UTF-8 without the locales package.
+ENV LANG=C.UTF-8
+COPY --from=jre /javaruntime ${JAVA_HOME}
+
 # gettext-base provides envsubst, used by the entrypoint to render shiro.ini and dataset configs.
+# tzdata keeps TZ working for the entrypoint's log timestamps.
 # The upgrade ships Ubuntu's current security fixes even when the base image is older than them.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends tini curl ca-certificates gettext-base \
+    && apt-get install -y --no-install-recommends tini curl ca-certificates gettext-base tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # CVE-2026-91403: eMudhra's compromised intermediates chain to three emSign roots (ECC G3, ECC C3,
@@ -133,10 +154,8 @@ RUN apt-get update \
 # cacerts. This drops them all from the JDK's cacerts by SHA-256 and fails the build if any is
 # still trusted. Roots, not the advisory's intermediate fingerprints in blocked.certs: an ECDSA
 # signature re-encoded as (r, n-s) gives an intermediate a new fingerprint that still verifies. Same
-# step and reasoning as OpenMetadata's images (its ADR 2026-10-23, deleting roots). Remove it once
-# eclipse-temurin:21-jre-noble ships none of them: this step then deletes nothing. The ENTRYPOINT
-# below replaces Temurin's, so its /__cacert_entrypoint.sh never re-imports the system CA store
-# into cacerts.
+# step and reasoning as OpenMetadata's images (its ADR 2026-10-23, deleting roots). Corretto's
+# cacerts has none of them, so nothing is deleted today; the step stays as the check.
 RUN set -eu; \
     roots='86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B BC4D809B15189D78DB3E1D8CF4F9726A795DA1643CA5F1358E1DDB0EDC0D7EB3 125609AA301DA0A249B97A8239CB6A34216F44DCAC9F3954B14292F2E8C8608F 40F6AF0346A99AA1CD1D555A4E9CCE62C7F9634603EE406615833DC8C8D00367 1AA0C2709E831BD6E3B5129A00BA41F7EEEF020872F1E6504BF0F6C3F24F3AF3 D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4'; \
     certs=$(keytool -list -v -cacerts -storepass changeit); \
