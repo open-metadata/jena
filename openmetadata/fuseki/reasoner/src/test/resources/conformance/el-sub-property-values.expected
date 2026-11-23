@@ -1,3 +1,0 @@
-OUTCOME CLASSIFIED
-VALUE <http://example.org/el-sub-property-values#alice> <http://example.org/el-sub-property-values#owns> <http://example.org/el-sub-property-values#dataset1>
-VALUE <http://example.org/el-sub-property-values#alice> <http://example.org/el-sub-property-values#primaryOwnerOf> <http://example.org/el-sub-property-values#dataset1>

@@ -1,4 +1,0 @@
-Ontology(
-  SubClassOf(<http://example.org/el-disjoint-unsatisfiable#Contractor> owl:Nothing)
-  SubClassOf(<http://example.org/el-disjoint-unsatisfiable#Employee> owl:Nothing)
-)

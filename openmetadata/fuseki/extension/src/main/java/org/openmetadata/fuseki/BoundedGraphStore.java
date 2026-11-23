@@ -46,7 +46,7 @@ public final class BoundedGraphStore extends GSP_RW {
   public static final String UPDATE_TIMEOUT_HEADER = "X-OpenMetadata-Update-Timeout-Ms";
   private static final long DEFAULT_TIMEOUT_MS = 50_000;
 
-  /** Also the largest job input a reasoning upload may carry unless its setting says otherwise. */
+  /** The largest Graph Store upload accepted unless OPENMETADATA_MAX_UPLOAD_BYTES says otherwise. */
   public static final long DEFAULT_MAX_BYTES = 64L * 1024 * 1024;
 
   private final long timeoutMillis;
