@@ -1,3 +1,0 @@
-OUTCOME CLASSIFIED
-TYPE <http://example.org/el-range-assertions#platform> <http://example.org/el-range-assertions#Team>
-VALUE <http://example.org/el-range-assertions#alice> <http://example.org/el-range-assertions#manages> <http://example.org/el-range-assertions#platform>

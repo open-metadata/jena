@@ -1,4 +1,0 @@
-Ontology(
-  SubClassOf(<http://example.org/el-named-hierarchy#A> <http://example.org/el-named-hierarchy#C>)
-  SubClassOf(<http://example.org/el-named-hierarchy#C> <http://example.org/el-named-hierarchy#A>)
-)

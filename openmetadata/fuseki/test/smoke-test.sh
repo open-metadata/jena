@@ -12,10 +12,6 @@
 #
 # Runs a built image through every environment contract the README promises and fails on the first
 # broken promise. Usage: test/smoke-test.sh <image>. Needs docker, curl, awk and jq.
-#
-# The reasoner sections run the conformance suite from reasoner/src/test/resources/conformance
-# through the image's real launcher, and prove that a worker's heap exhaustion, timeout or kill
-# never disturbs Fuseki, in a container whose --memory is the minimum the memory budget allows.
 
 set -euo pipefail
 
@@ -28,13 +24,6 @@ CONTAINER="fuseki-smoke-$$"
 VOLUME="fuseki-smoke-$$"
 FAILURES=0
 HERE="$(cd "$(dirname "$0")" && pwd)"
-FIXTURES="$HERE/../reasoner/src/test/resources/conformance"
-REASONER=/jena-fuseki/reasoner/bin/reasoner
-JOBS=/fuseki/reasoning/jobs
-REASONING=(-e OPENMETADATA_EXTENSION_ENABLED=true -e OPENMETADATA_REASONING_ENABLED=true
-  -e OPENMETADATA_REASONER_HEAP=1g -e OPENMETADATA_REASONER_PAGE_CACHE_FLOOR=64m)
-# (H_f 512m + O_f 1g + H_w 1g + O_w 512m + C_min 64m) / 0.9, rounded up to whole MiB.
-MINIMUM_MEMORY=3485m
 
 cleanup() {
   docker rm -f "$CONTAINER" > /dev/null 2>&1 || true
@@ -159,155 +148,6 @@ volume_owner_is() {
   [ "$(docker run --rm -v "$VOLUME:/fuseki" --entrypoint stat "$IMAGE" -c '%u:%g %a' /fuseki)" = "$1" ]
 }
 
-reasoner() {
-  docker exec "$CONTAINER" "$REASONER" "$@"
-}
-
-# Writes stdin to a file of a job directory, as the server's uid.
-job_file() {
-  docker exec -i "$CONTAINER" sh -c "mkdir -p '$JOBS/$1' && cat > '$JOBS/$1/$2'"
-}
-
-# Runs a step through the image's launcher; extra arguments are docker exec options.
-run_step() {
-  local job="$1" step="$2"
-  shift 2
-  docker exec "$@" "$CONTAINER" "$REASONER" run "$JOBS/$job/$step.json" > /dev/null 2>&1 || true
-}
-
-step_field() {
-  docker exec "$CONTAINER" cat "$JOBS/$1/$2.status.json" | jq -r "$3"
-}
-
-step_ended() {
-  [ "$(step_field "$1" "$2" .status)" = "$3" ] && [[ "$(step_field "$1" "$2" .reason)" == "$4"* ]]
-}
-
-classify_step() {
-  printf '{"protocol": 1, "stepId": "%s", "kind": "CLASSIFY", "dataset": "working", "timeoutMillis": %s, "closure": {"root": "http://example.org/hard", "graphs": ["urn:hard"]}}' "$2" "$3" \
-    | job_file "$1" "$2.json"
-}
-
-worker_pid() {
-  docker exec "$CONTAINER" pgrep -f org.openmetadata.reasoner.Main
-}
-
-wait_for_worker() {
-  for _ in $(seq 1 100); do
-    worker_pid > /dev/null && return 0
-    sleep 0.1
-  done
-  return 1
-}
-
-sparql_ask() {
-  curl -fs -u "admin:$PASSWORD" -H 'Accept: application/sparql-results+json' -G \
-    --data-urlencode "query=$1" "$BASE/ds/sparql" | jq -r .boolean
-}
-
-serving_triples() {
-  curl -fs -u "admin:$PASSWORD" -H 'Accept: application/sparql-results+json' -G \
-    --data-urlencode 'query=SELECT (COUNT(*) AS ?n) WHERE { GRAPH <urn:smoke:serving> { ?s ?p ?o } }' \
-    "$BASE/ds/sparql" | jq -r '.results.bindings[0].n.value'
-}
-
-fuseki_pid() {
-  docker top "$CONTAINER" -eo pid,args | awk '/FusekiServer/ { print $1; exit }'
-}
-
-# Fuseki is the same process, never OOM-killed, still serves the same data and still commits.
-serving_intact() {
-  local probe="urn:smoke:probe:$RANDOM"
-  [ "$(fuseki_pid)" = "$SERVING_PID" ] \
-    && [ "$(docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' "$CONTAINER")" = "false 0" ] \
-    && heap_max_bytes_is 536870912 \
-    && [ "$(serving_triples)" = "1000" ] \
-    && curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/sparql-update' \
-      --data "INSERT DATA { GRAPH <urn:smoke:probes> { <$probe> <urn:smoke:p> 1 } }" "$BASE/ds/update" \
-    && [ "$(sparql_ask "ASK { GRAPH <urn:smoke:probes> { <$probe> ?p ?o } }")" = "true" ]
-}
-
-# Runs a step in the background and queries Fuseki every 200 ms until it ends: every query must
-# be answered with the serving data unchanged.
-answers_while_running() {
-  run_step "$@" &
-  local runner=$! answered=0 failed=0
-  while kill -0 "$runner" 2> /dev/null; do
-    if [ "$(serving_triples)" = "1000" ]; then
-      answered=$((answered + 1))
-    else
-      failed=$((failed + 1))
-    fi
-    sleep 0.2
-  done
-  wait "$runner"
-  echo "      $answered queries answered while the worker ran, $failed failed"
-  [ "$failed" -eq 0 ] && [ "$answered" -gt 0 ]
-}
-
-conformance_reports_match() {
-  local failed=0 step
-  for step in "$@"; do
-    if ! docker exec "$CONTAINER" cmp -s "$JOBS/conformance/${step%.*}.expected" \
-      "$JOBS/conformance/$step.report.txt"; then
-      echo "      report differs: $step"
-      failed=1
-    fi
-  done
-  [ "$failed" -eq 0 ]
-}
-
-routing_matches() {
-  local fixture engine failed=0
-  while read -r fixture engine; do
-    if [ "$(step_field conformance "$fixture" .manifest.routing.engineUsed)" != "$engine" ]; then
-      echo "      $fixture was not routed to $engine"
-      failed=1
-    fi
-  done < <(grep -v '^#' "$FIXTURES/routing.expected")
-  [ "$failed" -eq 0 ]
-}
-
-# The reasoning operations, as the admin account unless curl options say otherwise.
-reasoning_status() {
-  local path="$1"
-  shift
-  curl -s -o /dev/null -w '%{http_code}' "$@" "$BASE/reasoning/$path"
-}
-
-reasoning_get() {
-  curl -fs -u "admin:$PASSWORD" "$BASE/reasoning/$1"
-}
-
-# Prints the body, then the HTTP status on a line of its own, of a job submitted to a dataset
-# (ds by default).
-submit_job() {
-  curl -s -w '\n%{http_code}' -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/json' \
-    --data "$1" "$BASE/reasoning/jobs?dataset=${2:-ds}"
-}
-
-# The body of submit_job's output; head -n -1 is not portable.
-body_of() {
-  sed '$d' <<< "$1"
-}
-
-new_uuid() {
-  od -An -N16 -tx1 /dev/urandom | tr -d ' \n' \
-    | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/'
-}
-
-refresh_request() {
-  printf '{"requestId": "%s", "operation": "REFRESH", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 18442}, "ontologyReleases": [], "ruleBundleDigest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "rules": []}' "$1"
-}
-
-job_state_becomes() {
-  for _ in $(seq 1 100); do
-    [ "$(reasoning_get "jobs/$1" | jq -r .state)" = "$2" ] && return 0
-    sleep 0.1
-  done
-  return 1
-}
-
 # Status of a SPARQL update inserting $2 into $1's default graph.
 update_status() {
   curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" -X POST \
@@ -350,8 +190,7 @@ check "health ping is anonymous" status_is 200 "$BASE/\$/ping"
 check "queries require the admin account" status_is 401 -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
 check "heap follows FUSEKI_HEAP" heap_max_bytes_is 536870912
 check "direct buffers are capped" server_flag_set "-XX:MaxDirectMemorySize=256m"
-check "reasoning is off by default" [ "$(reasoner readiness 2> /dev/null | jq -r .status)" = "DISABLED" ]
-check "no reasoning directory without reasoning" docker exec "$CONTAINER" test ! -e /fuseki/reasoning
+check "the removed reasoning endpoint is not served" status_is 404 -u "admin:$PASSWORD" "$BASE/reasoning/capabilities"
 
 echo "== Extension and performance settings from the environment =="
 fresh_volume
@@ -368,10 +207,6 @@ check "upload limit reflects OPENMETADATA_MAX_UPLOAD_BYTES" header_equals openme
 check "union is in effect for queries" union_is openmetadata_a true
 check "an upload under the limit is accepted" [ "$(upload_status openmetadata 1024)" = "201" ]
 check "an upload over the limit is rejected with 413" [ "$(upload_status openmetadata 2097152)" = "413" ]
-check "reasoning operations report DISABLED without reasoning" \
-  [ "$(reasoning_get capabilities | jq -r .readiness)" = "DISABLED" ]
-check "and refuse jobs with 503" [ "$(submit_job "$(refresh_request "$(new_uuid)")" openmetadata | tail -1)" = "503" ]
-check "and write nothing to disk" docker exec "$CONTAINER" test ! -e /fuseki/reasoning
 
 echo "== Turning the extension off again on the same volume =="
 start -e FUSEKI_DATASETS=openmetadata
@@ -427,207 +262,7 @@ echo "== Invalid settings fail fast =="
 check "missing ADMIN_PASSWORD" exits_with_error
 check "non-numeric FUSEKI_QUERY_TIMEOUT_MS" exits_with_error -e ADMIN_PASSWORD=x -e FUSEKI_QUERY_TIMEOUT_MS=abc
 check "non-boolean OPENMETADATA_EXTENSION_ENABLED" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=yes
-check "non-boolean OPENMETADATA_REASONING_ENABLED" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_ENABLED=yes
-check "reasoning without the extension" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_ENABLED=true
-check "non-size OPENMETADATA_REASONER_HEAP" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_HEAP=lots
-check "OPENMETADATA_REASONER_HEAP under 16m" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_HEAP=8m
-check "OPENMETADATA_REASONER_OFF_HEAP under its caps" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_OFF_HEAP=256m
-check "invalid OPENMETADATA_REASONER_PAGE_CACHE_FLOOR" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_PAGE_CACHE_FLOOR=150%
-check "non-numeric OPENMETADATA_REASONER_CPUS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONER_CPUS=two
-check "a zero OPENMETADATA_REASONING_MAX_QUEUED_JOBS" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_MAX_QUEUED_JOBS=0
-check "invalid OPENMETADATA_REASONING_DISK_QUOTA" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_REASONING_DISK_QUOTA=0%
 check "invalid OPENMETADATA_STORAGE_MIN_FREE" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=true -e OPENMETADATA_STORAGE_MIN_FREE=lots
-
-echo "== Reasoner: readiness refuses an undersized container =="
-fresh_volume
-start --memory=1g "${REASONING[@]}" -e FUSEKI_DATASETS=ds
-check "startup logs NOT_READY with the budget" bash -c "docker logs $CONTAINER 2>&1 | grep -q 'Reasoning NOT_READY: requires'"
-readiness=$(reasoner readiness 2> /dev/null || true)
-echo "      $(jq -c '{status, requiredBytes, availableBytes}' <<< "$readiness")"
-check "readiness reports NOT_READY" [ "$(jq -r .status <<< "$readiness")" = "NOT_READY" ]
-check "with required above available bytes" \
-  [ "$(jq '.requiredBytes > .availableBytes and .availableBytes == 1073741824' <<< "$readiness")" = "true" ]
-printf '{"protocol": 1, "stepId": "load", "kind": "LOAD", "dataset": "working", "timeoutMillis": 60000, "inputs": ["empty.nq"]}' \
-  | job_file refused load.json
-job_file refused empty.nq < /dev/null
-run_step refused load
-check "a step is refused NOT_READY" step_ended refused load NOT_READY "The container memory limit"
-check "and no worker was started" docker exec "$CONTAINER" test ! -e "$JOBS/refused/load.log"
-check "Fuseki serves as usual" status_is 200 -u "admin:$PASSWORD" -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
-check "capabilities report NOT_READY over HTTP" [ "$(reasoning_get capabilities | jq -r .readiness)" = "NOT_READY" ]
-check "and jobs are refused with 503" [ "$(submit_job "$(refresh_request "$(new_uuid)")" | tail -1)" = "503" ]
-
-echo "== Reasoner: the conformance suite through the image =="
-fresh_volume
-start --memory=$MINIMUM_MEMORY "${REASONING[@]}" -e FUSEKI_DATASETS=ds
-check "startup logs READY at the minimum memory" bash -c "docker logs $CONTAINER 2>&1 | grep -q 'Reasoning READY'"
-check "readiness reports READY" [ "$(reasoner readiness 2> /dev/null | jq -r .status)" = "READY" ]
-docker exec "$CONTAINER" mkdir -p "$JOBS/conformance"
-docker cp "$FIXTURES/." "$CONTAINER:$JOBS/conformance/"
-run_step conformance load
-check "the fixtures load" step_ended conformance load SUCCEEDED LOADED
-# Fixture names have no spaces; plain word splitting keeps this working with bash 3.
-steps=($(cd "$FIXTURES" && ls -- *.json | sed 's/\.json$//' | grep -vx load))
-files=("${steps[@]/#/$JOBS/conformance/}")
-docker exec "$CONTAINER" "$REASONER" run "${files[@]/%/.json}" > /dev/null 2>&1 || true
-check "all ${#steps[@]} fixtures match their expected reports" conformance_reports_match "${steps[@]}"
-check "every answered fixture is routed to its expected engine" routing_matches
-elk=($(awk '!/^#/ && $2 == "ELK" { print $1 }' "$FIXTURES/routing.expected"))
-for fixture in "${elk[@]}"; do
-  jq --arg id "$fixture.hermit" '.stepId = $id | .engine = "HERMIT" | .output = "urn:fixture:\($id):entailments"' \
-    "$FIXTURES/$fixture.json" | job_file conformance "$fixture.hermit.json"
-done
-files=("${elk[@]/#/$JOBS/conformance/}")
-docker exec "$CONTAINER" "$REASONER" run "${files[@]/%/.hermit.json}" > /dev/null 2>&1 || true
-check "the ${#elk[@]} ELK-routed fixtures give identical reports through HermiT" \
-  conformance_reports_match "${elk[@]/%/.hermit}"
-docker exec "$CONTAINER" sh -c "cat $JOBS/conformance/*.status.json" \
-  | jq -s -r 'map(select(.manifest.worker != null)) | "      worker heap, largest peak used: \(map(.manifest.worker.heapPeakUsedBytes) | max / 1048576 | floor) MiB, largest after GC: \(map(.manifest.worker.heapPeakAfterGcBytes) | max / 1048576 | floor) MiB, slowest step: \(map(.elapsedMillis) | max) ms"'
-
-echo "== Reasoner: job operations over HTTP =="
-check "capabilities answer the admin account" [ "$(reasoning_status capabilities -u "admin:$PASSWORD")" = "200" ]
-check "and refuse anonymous requests" [ "$(reasoning_status capabilities)" = "401" ]
-check "and a wrong password" [ "$(reasoning_status capabilities -u admin:wrong)" = "401" ]
-capabilities=$(reasoning_get capabilities)
-echo "      $(jq -c '{protocolVersion, readiness, limits, operations: [.operations[] | "\(.operation)=\(.availability)"]}' <<< "$capabilities")"
-check "capabilities report READY for protocol 1" \
-  [ "$(jq -r '"\(.protocolVersion) \(.readiness)"' <<< "$capabilities")" = "1 READY" ]
-check "with the memory budget the readiness check computed" \
-  [ "$(jq '.memoryBudget.requiredBytes <= .memoryBudget.containerLimitBytes' <<< "$capabilities")" = "true" ]
-check "and CHECK and EXPLAIN available, the rest not implemented yet" \
-  [ "$(jq -r '[.operations[] | "\(.operation)=\(.availability)"] | join(" ")' <<< "$capabilities")" = \
-    "REFRESH=NOT_IMPLEMENTED CHECK=AVAILABLE EXPLAIN=AVAILABLE RESULTS=NOT_IMPLEMENTED QUERY=NOT_IMPLEMENTED" ]
-check "with the limits they need and the worker's engines" \
-  [ "$(jq -r '[(.limits | has("maxJobSeconds", "maxImports", "maxClosureAxioms") | tostring), (.engines | map(.name) | join(","))] | join(" ")' <<< "$capabilities")" = \
-    "true true true HermiT,ELK" ]
-request_id=$(new_uuid)
-response=$(submit_job "$(refresh_request "$request_id")")
-job_id=$(body_of "$response" | jq -r .id)
-check "a job is accepted with 202" [ "$(tail -1 <<< "$response")" = "202" ]
-check "anonymous submissions are refused" [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-  -H 'Content-Type: application/json' --data "$(refresh_request "$request_id")" "$BASE/reasoning/jobs?dataset=ds")" = "401" ]
-response=$(submit_job "$(refresh_request "$request_id")")
-check "its request ID returns the same job with 200" \
-  [ "$(tail -1 <<< "$response") $(body_of "$response" | jq -r .id)" = "200 $job_id" ]
-check "an invalid request is refused with 400" [ "$(submit_job '{"operation": "REFRESH"}' | tail -1)" = "400" ]
-check "the job fails at capture, which this build lacks" job_state_becomes "$job_id" FAILED
-check "with a structured problem" [ "$(reasoning_get "jobs/$job_id" | jq -r '"\(.problem.code) \(.problem.step)"')" = "NOT_IMPLEMENTED capture" ]
-check "its manifest is on the data volume" docker exec "$CONTAINER" test -f "$JOBS/$job_id/job.json"
-check "cancelling a finished job leaves it unchanged" [ "$(curl -s -u "admin:$PASSWORD" -X DELETE \
-  "$BASE/reasoning/jobs/$job_id" | jq -r .state)" = "FAILED" ]
-check "cancelling an unknown job answers 404" [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" \
-  -X DELETE "$BASE/reasoning/jobs/$(new_uuid)")" = "404" ]
-check "results are not implemented yet" [ "$(reasoning_status "results/$job_id" -u "admin:$PASSWORD")" = "501" ]
-check "and say so with NOT_IMPLEMENTED" [ "$(curl -s -u "admin:$PASSWORD" "$BASE/reasoning/results/$job_id" | jq -r .code)" = "NOT_IMPLEMENTED" ]
-docker restart "$CONTAINER" > /dev/null
-for _ in $(seq 1 90); do curl -fs -o /dev/null "$BASE/\$/ping" && break; sleep 1; done
-check "the job survives a restart" [ "$(reasoning_get "jobs/$job_id" | jq -r .state)" = "FAILED" ]
-response=$(submit_job "$(refresh_request "$request_id")")
-check "and so does its request ID" [ "$(body_of "$response" | jq -r .id)" = "$job_id" ]
-
-echo "== Reasoner: a CHECK and an EXPLAIN over an uploaded release =="
-RELEASE="$HERE/check-release.rdf-thrift"
-release_hex=$(shasum -a 256 "$RELEASE" | cut -d' ' -f1)
-release_size=$(wc -c < "$RELEASE" | tr -d ' ')
-upload_status() {
-  curl -s -o /dev/null -w '%{http_code}' "${@:3}" -X PUT -H "Content-Type: ${CONTENT_TYPE:-application/rdf+thrift}" \
-    --data-binary "@$2" "$BASE/reasoning/inputs/sha256:$1"
-}
-check "anonymous uploads are refused" [ "$(upload_status "$release_hex" "$RELEASE")" = "401" ]
-check "a release is uploaded with 201" [ "$(upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "201" ]
-check "the same bytes again are held with 200" [ "$(upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "200" ]
-check "bytes that do not hash to the path are refused with 400" \
-  [ "$(upload_status "$release_hex" "$HERE/check-release.ttl" -u "admin:$PASSWORD")" = "400" ]
-check "another content type is refused with 415" \
-  [ "$(CONTENT_TYPE=text/turtle upload_status "$release_hex" "$RELEASE" -u "admin:$PASSWORD")" = "415" ]
-check "the upload is on the data volume" docker exec "$CONTAINER" test -f "/fuseki/reasoning/inputs/$release_hex"
-check "capabilities report the upload limit" \
-  [ "$(reasoning_get capabilities | jq -r .limits.maxUploadBytes)" = "67108864" ]
-ontology_request() {
-  printf '{"requestId": "%s", "operation": "%s", "sourceRevision": {"datasetGeneration": "9d72cf3b-3657-4ee3-809c-5bc70b9308bd", "liveWriteWatermark": 1}, "ontologyReleases": [{"ontologyId": "3b9e1f0a-6c2d-4e8f-9a1b-7d5c3e2f1a0b", "releaseId": "%s", "contentDigest": "0c5f2e8a9b1d3c4e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"}], "releaseRdf": {"digest": "sha256:%s", "byteSize": %s, "mediaType": "application/rdf+thrift"}, %s}' \
-    "$(new_uuid)" "$1" "${RELEASE_ID:-8f4a2c6e-1b3d-4f5a-9c7e-2d1b0a9f8e7d}" "${UPLOAD_HEX:-$release_hex}" "${UPLOAD_SIZE:-$release_size}" "$2"
-}
-# Submits a job, waits for it to end and prints its id.
-run_job() {
-  local id
-  id=$(body_of "$(submit_job "$1")" | jq -r .id)
-  for _ in $(seq 1 120); do
-    case "$(reasoning_get "jobs/$id" | jq -r .state)" in QUEUED|RUNNING) sleep 1 ;; *) break ;; esac
-  done
-  echo "$id"
-}
-job_answer() {
-  reasoning_get "jobs/$(run_job "$1")" | jq -r '"\(.state) \(.outcome // .problem.code)"'
-}
-consistency='"check": {"kind": "CONSISTENCY"}'
-check "the release is consistent" \
-  [ "$(job_answer "$(ontology_request CHECK "$consistency")")" = "SUCCEEDED NOT_ENTAILED" ]
-check "a class it makes unsatisfiable is found" \
-  [ "$(job_answer "$(ontology_request CHECK '"check": {"kind": "SATISFIABILITY", "classExpression": {"kind": "NAMED_CLASS", "classIri": "https://open-metadata.org/finance#Hybrid"}}')")" = "SUCCEEDED ENTAILED" ]
-explain='"explain": {"statement": {"subjectIri": "https://open-metadata.org/finance#Hybrid", "predicateIri": "http://www.w3.org/2000/01/rdf-schema#subClassOf", "objectKind": "IRI", "objectIri": "http://www.w3.org/2002/07/owl#Nothing"}}'
-explained=$(run_job "$(ontology_request EXPLAIN "$explain")")
-check "and explained" [ "$(reasoning_get "jobs/$explained" | jq -r '"\(.state) \(.outcome)"')" = "SUCCEEDED ENTAILED" ]
-check "the explanation names the source member of each axiom" \
-  [ "$(docker exec "$CONTAINER" cat "$JOBS/$explained/result.json" | jq -c '.justificationSources[0]')" = \
-    '[["urn:openmetadata:ontology-member:3"],["urn:openmetadata:ontology-member:1"],["urn:openmetadata:ontology-member:2"]]' ]
-other_release=$(new_uuid)
-never_hex=$(printf 'never uploaded' | shasum -a 256 | cut -d' ' -f1)
-check "a release that is not the one named fails the job with INPUT_CHANGED" \
-  [ "$(job_answer "$(RELEASE_ID=$other_release ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
-check "an upload that was never made fails the job with INPUT_CHANGED" \
-  [ "$(job_answer "$(UPLOAD_HEX=$never_hex ontology_request CHECK "$consistency")")" = "FAILED INPUT_CHANGED" ]
-
-echo "== Reasoner: a worker never disturbs Fuseki =="
-awk 'BEGIN { for (i = 0; i < 1000; i++) printf "<urn:smoke:s%d> <urn:smoke:p> \"%d\" .\n", i, i }' > "/tmp/$CONTAINER.serving.nt"
-curl -fs -o /dev/null -u "admin:$PASSWORD" -X POST -H 'Content-Type: application/n-triples' \
-  --data-binary "@/tmp/$CONTAINER.serving.nt" "$BASE/ds/data?graph=urn:smoke:serving"
-SERVING_PID=$(fuseki_pid)
-awk -v n=200 -f "$HERE/hard-ontology.awk" | job_file contain hard.trig
-printf '{"protocol": 1, "stepId": "load", "kind": "LOAD", "dataset": "working", "timeoutMillis": 60000, "inputs": ["hard.trig"]}' \
-  | job_file contain load.json
-run_step contain load
-check "the oversized closure loads" step_ended contain load SUCCEEDED LOADED
-
-classify_step contain oom 600000
-check "Fuseki answers while a 48m worker exhausts its heap" \
-  answers_while_running contain oom -e OPENMETADATA_REASONER_HEAP=48m
-check "the step reports INCOMPLETE for its memory budget" step_ended contain oom INCOMPLETE MEMORY_BUDGET
-check "the worker exited with status 3" [ "$(step_field contain oom .exitCode)" = "3" ]
-check "Fuseki is intact" serving_intact
-
-classify_step contain timeout 5000
-check "Fuseki answers while a classification runs out of time" answers_while_running contain timeout
-check "the step reports INCOMPLETE for its time budget" step_ended contain timeout INCOMPLETE TIME_BUDGET
-echo "      deadline to exit: $(step_field contain timeout .manifest.interruptLatencyMillis) ms, step $(step_field contain timeout .elapsedMillis) ms"
-check "Fuseki is intact" serving_intact
-
-classify_step contain wedged 3000
-run_step contain wedged &
-check "a worker starts" wait_for_worker
-docker exec "$CONTAINER" kill -STOP "$(worker_pid)"
-check "the worker inherits no ADMIN_PASSWORD" bash -c \
-  "! docker exec $CONTAINER sh -c 'tr \"\\000\" \"\\n\" < /proc/$(worker_pid)/environ' | grep -q ADMIN_PASSWORD"
-check "a step requested while a worker runs is BUSY" [ "$(docker exec "$CONTAINER" "$REASONER" run "$JOBS/contain/load.json" 2> /dev/null | jq -r .status)" = "BUSY" ]
-wait
-check "a stopped worker is killed after its deadline" step_ended contain wedged INCOMPLETE "TIME_BUDGET: the worker did not exit"
-echo "      SIGTERM to exit: $(step_field contain wedged .terminationLatencyMillis) ms, step $(step_field contain wedged .elapsedMillis) ms"
-check "no worker is left" bash -c "! docker exec $CONTAINER pgrep -f org.openmetadata.reasoner.Main"
-check "Fuseki is intact" serving_intact
-
-awk 'BEGIN { for (i = 0; i < 1500000; i++) printf "<urn:smoke:s%d> <urn:smoke:p%d> \"value %d\" <urn:smoke:g%d> .\n", i, i % 50, i, i % 200 }' \
-  | job_file kill big.nq
-printf '{"protocol": 1, "stepId": "load", "kind": "LOAD", "dataset": "working", "timeoutMillis": 600000, "inputs": ["big.nq"]}' \
-  | job_file kill load.json
-run_step kill load &
-check "a bulk load starts" wait_for_worker
-sleep 3
-docker exec "$CONTAINER" kill -KILL "$(worker_pid)"
-wait
-# The launcher never sends SIGKILL on its own here, so it reads it as the cgroup OOM killer's.
-check "a worker SIGKILLed during a write reports its memory budget" step_ended kill load INCOMPLETE MEMORY_BUDGET
-check "and leaves no result manifest" docker exec "$CONTAINER" test ! -e "$JOBS/kill/load.result.json"
-check "Fuseki is intact" serving_intact
-rm -f "/tmp/$CONTAINER.serving.nt"
 
 rm -f "/tmp/$CONTAINER.nt"
 if [ "$FAILURES" -gt 0 ]; then
