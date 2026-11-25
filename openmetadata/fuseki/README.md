@@ -181,7 +181,7 @@ that `/reasoning/*` is not served.
 ## Publishing
 
 Images are published only from `release/<fuseki-version>` branches, never from `main`. A release branch
-is cut from the matching upstream tag (`jena-6.2.0` for `release/6.2.0`), and its name must match the
+is cut from the matching upstream tag (`jena-<version>` for `release/<version>`), and its name must match the
 `FUSEKI_VERSION` in the Dockerfile.
 
 A publish (a push to the release branch, or a manual run of the workflow with the branch as input)
@@ -205,3 +205,42 @@ Each publish pushes two tags for `linux/amd64` and `linux/arm64`: `<version>`, w
 build of that release, and the immutable `<version>-<commit>`. Pin the immutable tag in deployments
 and tests: with `imagePullPolicy: IfNotPresent`, a node that already has `<version>` never pulls a
 rebuild of it.
+
+## Porting to a new Fuseki release
+
+A release branch is the upstream tag plus `openmetadata/fuseki/` and the image workflow, nothing
+else. `bin/port-to` carries that to the next release without touching the upstream tree:
+
+```bash
+git switch <branch that carries the packaging>
+openmetadata/fuseki/bin/port-to <new-version>       # --no-checks skips the build and tests
+```
+
+It fetches `jena-<new-version>` if needed, creates the local branch `openmetadata/port-<new-version>`
+at that tag, merges the branch it was run from, and fails if the result differs from the tag
+anywhere outside `openmetadata/` and the workflow. One commit then bumps `FUSEKI_VERSION`, its
+SHA-512 (from Apache's checksum file), the URL comment and the extension's `<version>` and
+`<jena.version>`. It lists every other mention of the old version; prose such as the README's version
+statements is yours to review. Then it runs `mvn verify`, builds `om-fuseki:<new-version>-port` and
+smoke-tests it. Rerunning it converges to the same branch, so run it again after fixing what it found.
+It never pushes.
+
+What fails after a port, and what it means:
+
+- **Compile errors in the extension.** Fuseki changed an API the extension uses. Fix the extension.
+- **`ReplacementsTripwireTest`.** A library listed in `server-jar/replacements.sha256` is no longer
+  newer than the one this Fuseki bundles, or is no longer bundled. The new Fuseki has fixed that
+  library, so delete its lines from the list; `replace-libraries.sh` then stops deleting it from the
+  jar. Correct the README and Dockerfile wording about it too. The test also fails when a bundled
+  artifact of a replaced library is missing from the list.
+- **`StockFusekiLockIT`.** Stock Fuseki no longer holds the writer lock while an upload transfers, the
+  reason for the extension. Re-measure with the scenario above before keeping or removing it.
+- **A smoke-test failure.** An environment contract in this README no longer holds on the new Fuseki.
+
+Publishing is by pull request. The pull request's CI builds and smoke-tests the image and publishes
+nothing; the merge is what publishes:
+
+```bash
+git push origin jena-<new-version>^{commit}:refs/heads/release/<new-version>   # exactly the upstream tag
+# open a pull request from openmetadata/port-<new-version> into release/<new-version>
+```
