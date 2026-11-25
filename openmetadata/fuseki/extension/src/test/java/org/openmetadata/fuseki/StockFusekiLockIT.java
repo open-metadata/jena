@@ -14,6 +14,7 @@ package org.openmetadata.fuseki;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.Socket;
 import java.net.URI;
@@ -28,6 +29,7 @@ import org.apache.jena.fuseki.main.FusekiServer;
 import org.apache.jena.fuseki.main.sys.FusekiModules;
 import org.apache.jena.query.Dataset;
 import org.apache.jena.tdb2.TDB2Factory;
+import org.apache.jena.tdb2.sys.TDBInternal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -37,6 +39,10 @@ import org.junit.jupiter.api.io.TempDir;
  * that stops being true: the extension is then worth removing, or at least rewriting.
  */
 class StockFusekiLockIT {
+  private static final String RECHECK =
+      "Repeat the measurement in README.md's \"What the extension adds\" before keeping or"
+          + " removing the extension.";
+
   @TempDir private Path directory;
 
   @Test
@@ -68,14 +74,21 @@ class StockFusekiLockIT {
       upload.getOutputStream().write(
           (headers + "<urn:test:s> <urn:test:p> <urn:test:o> .\n").getBytes(StandardCharsets.UTF_8));
       upload.getOutputStream().flush();
-      Thread.sleep(500);
+      final long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+      while (TDBInternal.getTransactionCoordinator(dataset.asDatasetGraph()).countActiveWriter()
+          == 0) {
+        assertTrue(
+            System.nanoTime() < deadline,
+            "stock Fuseki no longer takes the writer lock before it has the upload body. "
+                + RECHECK);
+        Thread.sleep(20);
+      }
 
       assertThrows(
           HttpTimeoutException.class,
           () -> client.send(update, HttpResponse.BodyHandlers.discarding()),
-          "stock Fuseki no longer blocks a small update behind a slow Graph Store upload."
-              + " Re-measure with README.md's scenario, then decide whether the extension is"
-              + " still needed");
+          "stock Fuseki no longer blocks a small update behind a slow Graph Store upload. "
+              + RECHECK);
     } finally {
       server.stop();
       dataset.close();

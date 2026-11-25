@@ -234,7 +234,8 @@ What fails after a port, and what it means:
   jar. Correct the README and Dockerfile wording about it too. The test also fails when a bundled
   artifact of a replaced library is missing from the list.
 - **`StockFusekiLockIT`.** Stock Fuseki no longer holds the writer lock while an upload transfers, the
-  reason for the extension. Re-measure with the scenario above before keeping or removing it.
+  reason for the extension. Repeat the measurement in "What the extension adds" before keeping or
+  removing it.
 - **A smoke-test failure.** An environment contract in this README no longer holds on the new Fuseki.
 
 Publishing is by pull request. The pull request's CI builds and smoke-tests the image and publishes
