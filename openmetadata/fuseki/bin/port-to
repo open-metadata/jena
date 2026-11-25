@@ -128,7 +128,9 @@ assert_only_packaging_differs
 
 echo
 echo "Mentions of $old left for review (prose is not rewritten):"
-git grep -n -F "$old" -- "$FUSEKI_DIR" "$WORKFLOW" || echo "  none"
+# Also the short form, such as "Fuseki 6.2", which prose uses and the full version misses.
+short="${old%.*}"
+git grep -n -E "(^|[^0-9.])${short//./\\.}([^0-9]|\$)" -- "$FUSEKI_DIR" "$WORKFLOW" || echo "  none"
 
 if [ "$run_checks" = true ]; then
   image="om-fuseki:$version-port"
