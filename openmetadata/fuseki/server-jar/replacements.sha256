@@ -10,7 +10,3 @@ f6cf863cffcf53b19bed89f2b04b985ae8eb544e8aeb9c1fcdc047cd61bc6904  org/apache/shi
 9cdb815bba586a641cb245a12db2b53b03d6b57dc0aca9d9c97b1930f7c78c42  org/apache/shiro/shiro-event/3.0.1/shiro-event-3.0.1.jar
 19e8fdddaa41c30318fb345d7ded1b6e7f469456d58c6a5e16a53d4d45ee8030  org/apache/shiro/crypto/shiro-hashes-argon2/3.0.1/shiro-hashes-argon2-3.0.1.jar
 95392a3a4eb4862cff10f01acef17a24aebae82fc05086bd973701a23a1230e3  org/apache/shiro/crypto/shiro-hashes-bcrypt/3.0.1/shiro-hashes-bcrypt-3.0.1.jar
-af8c85e879025ce30c381e6810e14c4f52b4150894e36c815860d14763271348  io/micrometer/micrometer-commons/1.17.2/micrometer-commons-1.17.2.jar
-e28ddecbd27477cc7020defd1c2061a3d8b6b2e543d90856186711fe7f346532  io/micrometer/micrometer-core/1.17.2/micrometer-core-1.17.2.jar
-d3ff53cfa0532dc1af0de349073f9aeb985e01f4b88c1d904350178805859695  io/micrometer/micrometer-observation/1.17.2/micrometer-observation-1.17.2.jar
-407d7da0bf04caaabc53203344835b8d0587f6c3c10b4358a7689bb0e584427b  io/micrometer/micrometer-registry-prometheus/1.17.2/micrometer-registry-prometheus-1.17.2.jar
