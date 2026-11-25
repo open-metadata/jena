@@ -23,10 +23,21 @@ set -euo pipefail
 JAR="$(realpath "$1")"
 LIST="$(realpath "$2")"
 MAVEN_CENTRAL=https://repo1.maven.org/maven2
-# Everything the replaced libraries contribute to the jar, and nothing else.
-REPLACED=('org/apache/shiro/*' 'io/micrometer/*' 'META-INF/maven/org.apache.shiro/*'
-  'META-INF/maven/org.apache.shiro.crypto/*' 'META-INF/micrometer-*'
-  'META-INF/native-image/io.micrometer/*' 'META-INF/shiro.tld')
+# Everything each library contributes to the jar, and nothing else. Chosen from the list, not
+# fixed, so dropping a library's lines from replacements.sha256 also stops this script deleting it
+# from Fuseki's jar. ReplacementsTripwireTest tells you when a library's lines are due to go.
+REPLACED=()
+if grep -q -- '[[:space:]]org/apache/shiro/' "$LIST"; then
+  REPLACED+=('org/apache/shiro/*' 'META-INF/maven/org.apache.shiro/*'
+    'META-INF/maven/org.apache.shiro.crypto/*' 'META-INF/shiro.tld')
+fi
+if grep -q -- '[[:space:]]io/micrometer/' "$LIST"; then
+  REPLACED+=('io/micrometer/*' 'META-INF/micrometer-*' 'META-INF/native-image/io.micrometer/*')
+fi
+if [ "${#REPLACED[@]}" -eq 0 ]; then
+  echo "$LIST lists no library this script knows how to replace" >&2
+  exit 1
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
