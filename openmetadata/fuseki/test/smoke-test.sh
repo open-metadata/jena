@@ -100,7 +100,7 @@ status_is() {
   [ "$(curl -s -o /dev/null -w '%{http_code}' "${@:2}")" = "$1" ]
 }
 
-# Fuseki 6.2 labels the sample with application="fuseki" and prints it in scientific notation.
+# Fuseki labels the sample with application="fuseki" and prints it in scientific notation.
 server_flag_set() {
   docker exec "$CONTAINER" sh -c 'tr "\0" " " < /proc/$(pgrep -f fuseki-server.jar | head -1)/cmdline' \
     | grep -q -- "$1"

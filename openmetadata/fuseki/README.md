@@ -18,7 +18,7 @@ extension, is an opt-in environment variable.
 docker run -d -p 3030:3030 -v fuseki:/fuseki \
   -e ADMIN_PASSWORD=change-me \
   -e FUSEKI_DATASETS=ds \
-  openmetadata/fuseki:6.2.0
+  openmetadata/fuseki:6.3.0
 ```
 
 ## Environment variables
@@ -139,7 +139,7 @@ securityContext:
 **Docker**, once, with the container stopped:
 
 ```bash
-docker run --rm --user 0 --entrypoint chown -v <volume>:/fuseki openmetadata/fuseki:6.2.0 -R 1000:0 /fuseki
+docker run --rm --user 0 --entrypoint chown -v <volume>:/fuseki openmetadata/fuseki:6.3.0 -R 1000:0 /fuseki
 ```
 
 Starting as root to fix ownership and then dropping privileges would avoid that step, but leaves
