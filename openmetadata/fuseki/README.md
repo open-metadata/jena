@@ -166,12 +166,13 @@ The image build downloads the release from Apache's CDN, falling back to the arc
 published SHA-512. The extension is compiled against the exact `fuseki-server.jar` it runs with, so an
 incompatible Fuseki fails the build. The smoke test needs `docker`, `curl`, `awk` and `jq`.
 
-Fuseki 6.2.0 bundles Apache Shiro 2.2.1 and Micrometer 1.17.0 inside `fuseki-server.jar`, and both
-carry published CVEs. The `server` stage of the Dockerfile replaces them with the releases listed in
+Fuseki 6.3.0 bundles Apache Shiro 2.2.1 inside `fuseki-server.jar`, which carries a published CVE. The
+`server` stage of the Dockerfile replaces it with the release listed in
 `server-jar/replacements.sha256`, downloaded from Maven Central and checked by SHA-256; the rest of
-Apache's jar is unchanged. Fuseki's own classes call the same Shiro and Micrometer methods when
-compiled against the new releases, and Fuseki's test suite gives the same results on them. Drop the
-stage when a Fuseki release ships fixed versions of both.
+Apache's jar is unchanged. Fuseki's own classes call the same Shiro methods when compiled against the
+new release, and Fuseki's test suite gives the same results on it. Fuseki's bundled Micrometer 1.17.2
+already has the fix for its CVE, so Micrometer is not replaced. Drop the stage when a Fuseki release
+ships a fixed Shiro.
 
 `mvn verify` in `extension/` runs the unit tests and the Graph Store integration tests on a real Fuseki
 server: upload deadlines and size limits, rollback, and the storage guard. The smoke test starts the

@@ -12,7 +12,7 @@
 # Apache Jena Fuseki packaged by OpenMetadata. This is not an Apache Software Foundation release.
 #
 # Built from the released Apache Jena Fuseki distribution, verified against its published SHA-512,
-# with newer Apache Shiro and Micrometer releases swapped into fuseki-server.jar (the server stage).
+# with a newer Apache Shiro release swapped into fuseki-server.jar (the server stage).
 # The layout and environment contract match daschswiss/apache-jena-fuseki (stain/jena-docker
 # lineage), so this image replaces it after a one-time ownership fix of the volume, because it
 # runs as non-root: FUSEKI_BASE=/fuseki holds configuration/*.ttl, databases/ and shiro.ini.
@@ -43,10 +43,11 @@ RUN set -eux; \
 RUN /jena-fuseki/fuseki-server --version 2>&1 | grep -qx "Apache Jena version ${FUSEKI_VERSION}"
 
 # Jars are architecture-independent, so builder stages run natively on the build host.
-# Fuseki 6.2.0 bundles Apache Shiro 2.2.1 and Micrometer 1.17.0 inside fuseki-server.jar, which
-# scanners report as CVE-2026-56091 and CVE-2026-59296. This stage swaps in the releases pinned in
-# server-jar/replacements.sha256 and leaves every other class of Apache's jar as released. Remove
-# it once a Fuseki release ships fixed versions of both.
+# Fuseki 6.3.0 bundles Apache Shiro 2.2.1 inside fuseki-server.jar, which scanners report as
+# CVE-2026-56091. This stage swaps in the release pinned in server-jar/replacements.sha256 and
+# leaves every other class of Apache's jar as released. Its bundled Micrometer 1.17.2 already has
+# the fix for CVE-2026-59296, so Micrometer is no longer replaced. Remove the stage once a Fuseki
+# release ships a fixed Shiro.
 FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-noble AS server
 ARG FUSEKI_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates zip unzip \
