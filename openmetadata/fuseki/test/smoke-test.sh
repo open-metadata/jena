@@ -106,6 +106,25 @@ server_flag_set() {
     | grep -q -- "$1"
 }
 
+# Jetty takes an output buffer of the connector's configured size for every response with a body.
+# When its pool cannot keep one that large, each response leaves direct memory that only a
+# System.gc() frees, and G1 answers that with a stop-the-world full collection. 600 responses
+# exceed the 256 MiB cap at any buffer size Fuseki has configured, so the count of such collections
+# and the direct memory in use do not depend on which size it is.
+responses_leave_direct_memory_alone() {
+  local metrics direct system_gc
+  for _ in $(seq 1 600); do
+    curl -fs -o /dev/null -u "admin:$PASSWORD" -G --data-urlencode 'query=ASK{}' "$BASE/$1/sparql" \
+      || return 1
+  done
+  metrics=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics") || return 1
+  grep -q '^jvm_gc_' <<< "$metrics" || return 1
+  system_gc=$(grep -c 'cause="System.gc()"' <<< "$metrics" || true)
+  direct=$(awk '/^jvm_buffer_memory_used_bytes/ && /id="direct"/ { printf "%.0f", $NF }' <<< "$metrics")
+  echo "      after 600 queries: System.gc() series=$system_gc, direct buffers=${direct:-missing} bytes"
+  [ "$system_gc" = "0" ] && [ -n "$direct" ] && [ "$direct" -lt 67108864 ]
+}
+
 heap_max_bytes_is() {
   local actual
   actual=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics" \
@@ -190,6 +209,7 @@ check "health ping is anonymous" status_is 200 "$BASE/\$/ping"
 check "queries require the admin account" status_is 401 -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
 check "heap follows FUSEKI_HEAP" heap_max_bytes_is 536870912
 check "direct buffers are capped" server_flag_set "-XX:MaxDirectMemorySize=256m"
+check "responses neither force System.gc() nor pile up direct buffers" responses_leave_direct_memory_alone ds
 check "the removed reasoning endpoint is not served" status_is 404 -u "admin:$PASSWORD" "$BASE/reasoning/capabilities"
 
 echo "== Extension and performance settings from the environment =="
