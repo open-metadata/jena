@@ -21,13 +21,13 @@
 
   <groupId>org.open-metadata</groupId>
   <artifactId>openmetadata-fuseki-extensions</artifactId>
-  <version>6.2.0</version>
+  <version>6.3.0</version>
   <name>OpenMetadata Fuseki extensions</name>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <jena.version>6.2.0</jena.version>
+    <jena.version>6.3.0</jena.version>
     <junit.version>5.11.4</junit.version>
     <surefire.version>3.1.2</surefire.version>
   </properties>

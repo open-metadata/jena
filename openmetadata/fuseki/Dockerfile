@@ -19,9 +19,9 @@
 # With no OpenMetadata variables set it runs stock Fuseki; the OpenMetadata Graph Store extension
 # and the performance settings are opt-in environment variables, documented in README.md.
 
-ARG FUSEKI_VERSION=6.2.0
-# From https://downloads.apache.org/jena/binaries/apache-jena-fuseki-6.2.0.tar.gz.sha512
-ARG FUSEKI_SHA512=ba65f5867d2d4741b2ed9e2af5a0d4fbb447909894ab2a0c6bc4dac8997f4fe339c87b13c48d45d054977769f0f8bf763ea346b1f7792d5cdc458041bd43a132
+ARG FUSEKI_VERSION=6.3.0
+# From https://downloads.apache.org/jena/binaries/apache-jena-fuseki-6.3.0.tar.gz.sha512
+ARG FUSEKI_SHA512=18bb611a667d70842243b423fecd36c247e43d495d12889908e38711b57bea547d07641bd8b6dcacba6e40c019e6fce736adb3240e63799676bfba31c3e3bc7f
 
 FROM eclipse-temurin:21-jre-noble AS distribution
 ARG FUSEKI_VERSION
