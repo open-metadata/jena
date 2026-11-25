@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE Configure PUBLIC "-//Jetty//Configure//EN" "https://jetty.org/configure_10_0.dtd">
+<!--
+  Copyright 2026 Collate
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+  The connector Fuseki 6.2.0 builds for itself (JettyServer.jettyServer and
+  JettyLib.httpConfiguration: 2 to 20 threads, port 3030, 512 KiB request headers, 16 KiB
+  response headers, no Server header), with one difference: the output buffer.
+
+  Fuseki sets it to 5 MiB. Jetty takes that buffer from its pool for every response that has a
+  body, the pool keeps no buffer above 64 KiB, and so each response allocates 5 MiB of direct
+  memory that only a collection frees. Under query load that fills -XX:MaxDirectMemorySize
+  several times a second, and each time the JVM asks for a collection. At 32 KiB, Jetty's own
+  default, the pool reuses the buffer. A result then reaches the client 32 KiB at a time while
+  the query runs. Fuseki sends results chunked with either buffer.
+
+  The entrypoint passes this file as fuseki-server's Jetty configuration. The DOCTYPE is needed:
+  Jetty validates the file, against a DTD it carries in its own jar.
+-->
+<Configure id="Server" class="org.eclipse.jetty.server.Server">
+  <Get name="threadPool">
+    <Set name="minThreads" type="int">2</Set>
+    <Set name="maxThreads" type="int">20</Set>
+  </Get>
+  <Call name="addConnector">
+    <Arg>
+      <New class="org.eclipse.jetty.server.ServerConnector">
+        <Arg name="server"><Ref refid="Server"/></Arg>
+        <Arg name="factories">
+          <Array type="org.eclipse.jetty.server.ConnectionFactory">
+            <Item>
+              <New class="org.eclipse.jetty.server.HttpConnectionFactory">
+                <Arg>
+                  <New class="org.eclipse.jetty.server.HttpConfiguration">
+                    <Set name="requestHeaderSize" type="int">524288</Set>
+                    <Set name="responseHeaderSize" type="int">16384</Set>
+                    <Set name="outputBufferSize" type="int">32768</Set>
+                    <Set name="sendServerVersion" type="boolean">false</Set>
+                  </New>
+                </Arg>
+              </New>
+            </Item>
+          </Array>
+        </Arg>
+        <Set name="port" type="int">3030</Set>
+      </New>
+    </Arg>
+  </Call>
+</Configure>

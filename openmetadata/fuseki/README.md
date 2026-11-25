@@ -29,7 +29,7 @@ docker run -d -p 3030:3030 -v fuseki:/fuseki \
 | `FUSEKI_MANAGE_SHIRO` | `true` | `false` keeps an operator-provided `$FUSEKI_BASE/shiro.ini`; `ADMIN_PASSWORD` is then not required. |
 | `FUSEKI_DATASETS` | unset | Comma-separated dataset names. Each gets a TDB2 dataset config in `$FUSEKI_BASE/configuration/<name>.ttl` if that file does not exist. Existing files are never modified. |
 | `FUSEKI_HEAP` | `4g` | Sets both `-Xms` and `-Xmx`, so the page-cache budget is predictable. Ignored when `JVM_ARGS` is set. |
-| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended, and so is `-XX:MaxDirectMemorySize=256m` unless `JVM_ARGS` sets that flag. |
+| `JVM_ARGS` | unset | Replaces the heap flags entirely (as in the DaSCH image). The settings below are still appended, and so are `-XX:MaxDirectMemorySize=256m` and `-XX:+ExplicitGCInvokesConcurrent` unless `JVM_ARGS` sets those flags. |
 | `FUSEKI_QUERY_TIMEOUT_MS` | unset | Server-wide `arq:queryTimeout`, applied to every dataset including existing ones. |
 | `FUSEKI_UPDATE_TIMEOUT_MS` | unset | Server-wide `arq:updateTimeout`, applied to every dataset. |
 | `FUSEKI_UNION_DEFAULT_GRAPH` | `false` | `true` makes the default graph the union of named graphs for every TDB2 dataset. |
@@ -105,11 +105,36 @@ the dataset in `RDF_ENDPOINT`, so a deployment serving `collate` uses
 The timeouts deliberately sit below OpenMetadata's 60-second client deadline, so Fuseki abandons the
 work and releases the writer before the client gives up.
 
+## Response buffers
+
+The entrypoint starts `fuseki-server` with `--jetty-config=/jena-fuseki/jetty.xml`. The file
+describes the connector Fuseki builds for itself, with one difference: the output buffer is 32 KiB,
+Jetty's default, where Fuseki sets 5 MiB.
+
+Fuseki's connector takes a 5 MiB direct buffer for every response that has a body, however small.
+Jetty's buffer pool keeps no buffer above 64 KiB, so nothing reuses it and only a garbage collection
+frees it. Under query load the buffers reach `-XX:MaxDirectMemorySize` several times a second, and
+each time the JVM asks for a collection. G1 answers with a full collection, which stops the server.
+A 20,000-table catalog under about 170 queries a second ran 2.0 to 3.5 of them a second and was
+stopped for 8 to 11% of the time. With `jetty.xml` the same load asks for none, and direct buffers
+stay under 4 MiB.
+
+A result now reaches the client 32 KiB at a time while the query runs, where Fuseki's buffer held
+back up to 5 MiB. The response headers do not change: Fuseki sends a result chunked with either
+buffer.
+
+Fuseki refuses `--port`, `--localhost`, `--https`, `--httpsPort`, `--passwd` and `--auth` beside a
+Jetty configuration file. When the command has one of them, or its own `--jetty-config`, the
+entrypoint logs a warning and leaves `jetty.xml` out, and Fuseki's own connector serves. For that
+case the entrypoint adds `-XX:+ExplicitGCInvokesConcurrent`, which turns the collection the JVM asks
+for into a concurrent one. To change the port and keep the buffer, mount a copy of `jetty.xml` with
+another port and pass it as `--jetty-config`.
+
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `/jena-fuseki` | The Fuseki distribution (`FUSEKI_HOME`), plus `extensions/` |
+| `/jena-fuseki` | The Fuseki distribution (`FUSEKI_HOME`), plus `extensions/` and `jetty.xml` |
 
 The extension is enabled by a symlink `/fuseki/extra/openmetadata-fuseki-extensions.jar` pointing at the
 jar in the image, so it always matches the running image. Other jars in `extra/` are left alone.

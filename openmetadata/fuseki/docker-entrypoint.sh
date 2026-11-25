@@ -26,6 +26,7 @@ set -euo pipefail
 EXTENSION_JAR="$FUSEKI_HOME/extensions/openmetadata-fuseki-extensions.jar"
 EXTENSION_LINK="$FUSEKI_BASE/extra/openmetadata-fuseki-extensions.jar"
 SERVER_CONFIG="${TMPDIR:-/tmp}/fuseki-server-context.ttl"
+JETTY_CONFIG="$FUSEKI_HOME/jetty.xml"
 
 log() {
   printf '%s %-5s Entrypoint      :: %s\n' "$(date +%H:%M:%S)" "$1" "$2" >&2
@@ -140,6 +141,12 @@ compose_jvm_args() {
   if [[ "$JVM_ARGS" != *-XX:MaxDirectMemorySize=* ]]; then
     JVM_ARGS="$JVM_ARGS -XX:MaxDirectMemorySize=256m"
   fi
+  # At that limit the JVM asks for a collection, which G1 answers with a stop-the-world full one
+  # unless this flag makes it concurrent. jetty.xml keeps responses away from the limit; this is
+  # for a server that runs without it, where they reach it several times a second.
+  if [[ "$JVM_ARGS" != *ExplicitGCInvokesConcurrent* ]]; then
+    JVM_ARGS="$JVM_ARGS -XX:+ExplicitGCInvokesConcurrent"
+  fi
   # A crash core dump is as large as the heap and lands on the node's disk, not the data volume:
   # in production it filled the node and got the pod evicted. The hs_err report is enough.
   JVM_ARGS="$JVM_ARGS -XX:-CreateCoredumpOnCrash"
@@ -189,6 +196,23 @@ add_context_entry() {
   fi
 }
 
+# The options Fuseki refuses beside a Jetty configuration file, and that file's own option. Jena
+# takes an option with one dash or two, and its value after "=" or as the next argument.
+has_connector_argument() {
+  local argument
+  for argument in "$@"; do
+    [[ "$argument" == -* ]] || continue
+    argument="${argument%%=*}"
+    argument="${argument#-}"
+    case "${argument#-}" in
+      jetty-config | jetty | port | localhost | local | https | httpsPort | httpsport | passwd | auth)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 has_config_argument() {
   local argument
   for argument in "$@"; do
@@ -213,6 +237,16 @@ main() {
     else
       set -- "$@" "--config=$SERVER_CONFIG"
       log INFO "Server context from environment: $SERVER_CONFIG"
+    fi
+  fi
+
+  # jetty.xml is Fuseki's own connector with an output buffer Jetty's pool reuses. Fuseki's is
+  # 5 MiB of direct memory for every response, freed only by a collection.
+  if [ "$(basename "${1:-}")" = "fuseki-server" ]; then
+    if has_connector_argument "$@"; then
+      log WARN "A connector argument was given; $JETTY_CONFIG is not applied. See README.md, Response buffers."
+    else
+      set -- "$@" "--jetty-config=$JETTY_CONFIG"
     fi
   fi
 

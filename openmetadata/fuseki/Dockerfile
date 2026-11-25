@@ -133,6 +133,7 @@ COPY --from=server /jena-fuseki /jena-fuseki
 COPY --from=extension /build/openmetadata-fuseki-extensions.jar \
     /jena-fuseki/extensions/openmetadata-fuseki-extensions.jar
 COPY shiro.ini /jena-fuseki/shiro.ini
+COPY jetty.xml /jena-fuseki/jetty.xml
 COPY dataset.ttl.template /jena-fuseki/dataset.ttl.template
 COPY docker-entrypoint.sh healthcheck.sh /
 RUN chmod 755 /docker-entrypoint.sh /healthcheck.sh

@@ -106,6 +106,18 @@ server_flag_set() {
     | grep -q -- "$1"
 }
 
+# 120 responses take 600 MiB of direct buffers from Fuseki's own connector, which passes the
+# 256 MiB limit twice, and each time the JVM asks for a collection. The metrics name its cause.
+responses_fill_no_direct_limit() {
+  local metrics
+  for _ in $(seq 1 120); do
+    curl -fs -o /dev/null -u "admin:$PASSWORD" -G --data-urlencode 'query=ASK{}' "$BASE/$1/sparql" \
+      || return 1
+  done
+  metrics=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics") || return 1
+  grep -q '^jvm_gc_' <<< "$metrics" && ! grep -q 'cause="System.gc()"' <<< "$metrics"
+}
+
 heap_max_bytes_is() {
   local actual
   actual=$(curl -fs -u "admin:$PASSWORD" "$BASE/\$/metrics" \
@@ -190,6 +202,8 @@ check "health ping is anonymous" status_is 200 "$BASE/\$/ping"
 check "queries require the admin account" status_is 401 -G --data-urlencode 'query=ASK{}' "$BASE/ds/sparql"
 check "heap follows FUSEKI_HEAP" heap_max_bytes_is 536870912
 check "direct buffers are capped" server_flag_set "-XX:MaxDirectMemorySize=256m"
+check "a collection asked for at the cap is concurrent" server_flag_set "-XX:+ExplicitGCInvokesConcurrent"
+check "responses do not fill the direct buffer limit" responses_fill_no_direct_limit ds
 check "the removed reasoning endpoint is not served" status_is 404 -u "admin:$PASSWORD" "$BASE/reasoning/capabilities"
 
 echo "== Extension and performance settings from the environment =="
