@@ -40,7 +40,7 @@ RUN set -eux; \
     tar -xzf "$tarball"; \
     mv "apache-jena-fuseki-${FUSEKI_VERSION}" /jena-fuseki; \
     rm -f /jena-fuseki/fuseki.war
-RUN /jena-fuseki/fuseki-server --version 2>&1 | grep -qx "Apache Jena version ${FUSEKI_VERSION}"
+RUN /jena-fuseki/fuseki-server --version 2>&1 | grep -Eqx "Apache Jena( Fuseki)? version ${FUSEKI_VERSION}"
 
 # Jars are architecture-independent, so builder stages run natively on the build host.
 # Fuseki 6.3.0 bundles Apache Shiro 2.2.1 inside fuseki-server.jar, which scanners report as
@@ -56,7 +56,7 @@ COPY --from=distribution /jena-fuseki /jena-fuseki
 COPY server-jar /build/server-jar
 RUN /build/server-jar/replace-libraries.sh /jena-fuseki/fuseki-server.jar \
         /build/server-jar/replacements.sha256 \
-    && /jena-fuseki/fuseki-server --version 2>&1 | grep -qx "Apache Jena version ${FUSEKI_VERSION}"
+    && /jena-fuseki/fuseki-server --version 2>&1 | grep -Eqx "Apache Jena( Fuseki)? version ${FUSEKI_VERSION}"
 
 FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-noble AS extension
 WORKDIR /build
