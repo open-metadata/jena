@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+#  Copyright 2026 Collate
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  http://www.apache.org/licenses/LICENSE-2.0
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+# Carries the OpenMetadata packaging from the branch it is run on to a new Apache Jena release.
+# Usage: port-to [--no-checks] [--from <ref>] <fuseki-version>
+# Creates or updates the local branch openmetadata/port-<version> from the upstream tag
+# jena-<version>, merges the packaging into it, bumps the version pins, and (unless --no-checks)
+# runs the extension tests, builds the image and smoke-tests it. Rerunning it converges to the same
+# state. It never pushes. Maven options can be passed through MAVEN_ARGS.
+
+set -euo pipefail
+
+UPSTREAM=https://github.com/apache/jena.git
+FUSEKI_DIR=openmetadata/fuseki
+DOCKERFILE=$FUSEKI_DIR/Dockerfile
+POM=$FUSEKI_DIR/extension/pom.xml
+WORKFLOW=.github/workflows/openmetadata-fuseki-image.yml
+
+fail() {
+  echo "port-to: $1" >&2
+  exit 1
+}
+
+run_checks=true
+from=""
+version=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-checks) run_checks=false ;;
+    --from) from="${2:?--from needs a ref}"; shift ;;
+    -*) fail "unknown option $1" ;;
+    *) [ -z "$version" ] || fail "one version only"; version="$1" ;;
+  esac
+  shift
+done
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "usage: port-to [--no-checks] [--from <ref>] <x.y.z>"
+
+cd "$(git rev-parse --show-toplevel)"
+[ -z "$(git status --porcelain)" ] || fail "the working tree has uncommitted changes"
+
+tag="jena-$version"
+port="openmetadata/port-$version"
+current="$(git symbolic-ref --short -q HEAD)" || fail "HEAD is detached; check out the branch to port"
+if [ -z "$from" ] && [ "$current" != "$port" ]; then
+  from="$current"
+fi
+
+dockerfile_version() {
+  sed -n 's/^ARG FUSEKI_VERSION=//p'
+}
+
+if ! git rev-parse -q --verify "refs/tags/$tag^{commit}" > /dev/null; then
+  echo "Fetching $tag from $UPSTREAM"
+  git fetch --no-tags "$UPSTREAM" "refs/tags/$tag:refs/tags/$tag"
+fi
+
+# Only the packaging may differ from upstream, otherwise a release branch is no longer "the tag
+# plus our directory" and the next port cannot rely on that.
+assert_only_packaging_differs() {
+  local stray
+  stray="$(git diff --name-only "$tag" HEAD | grep -v -e "^openmetadata/" -e "^$WORKFLOW\$" || true)"
+  if [ -n "$stray" ]; then
+    echo "port-to: $port differs from $tag outside openmetadata/ and $WORKFLOW:" >&2
+    echo "$stray" | sed 's/^/  /' >&2
+    exit 1
+  fi
+}
+
+if [ "$current" != "$port" ]; then
+  if git rev-parse -q --verify "refs/heads/$port" > /dev/null; then
+    git switch -q "$port"
+  else
+    git switch -q -c "$port" "$tag"
+  fi
+fi
+
+if [ -n "$from" ]; then
+  git rev-parse -q --verify "$from^{commit}" > /dev/null || fail "no such ref: $from"
+  if git merge-base --is-ancestor "$from" HEAD; then
+    echo "$from is already merged into $port"
+  else
+    git merge --no-ff -m "Port the OpenMetadata Fuseki packaging to Jena $version" "$from" \
+      || fail "merging $from conflicted; resolve it, commit, and rerun"
+  fi
+else
+  # Rerun on the port branch itself: recover the merged branch from the merge commit.
+  merge="$(git rev-list --merges --first-parent -n 1 HEAD "^$tag")"
+  [ -z "$merge" ] || from="$(git rev-parse "$merge^2")"
+fi
+assert_only_packaging_differs
+
+old="$(git show "${from:-HEAD}:$DOCKERFILE" | dockerfile_version)"
+
+sha_file="apache-jena-fuseki-$version.tar.gz.sha512"
+sha512="$(curl --fail --location --silent --show-error --retry 3 \
+    "https://downloads.apache.org/jena/binaries/$sha_file" \
+  || curl --fail --location --silent --show-error --retry 3 \
+    "https://archive.apache.org/dist/jena/binaries/$sha_file")" \
+  || fail "no published SHA-512 for Fuseki $version"
+sha512="$(printf '%s' "$sha512" | awk '{ print $1; exit }')"
+[[ "$sha512" =~ ^[0-9a-f]{128}$ ]] || fail "unreadable SHA-512 for Fuseki $version: $sha512"
+
+SHA512="$sha512" VERSION="$version" perl -pi -e '
+  s/^ARG FUSEKI_VERSION=.*/ARG FUSEKI_VERSION=$ENV{VERSION}/;
+  s/^ARG FUSEKI_SHA512=.*/ARG FUSEKI_SHA512=$ENV{SHA512}/;
+  s{^(# From https://downloads\.apache\.org/jena/binaries/apache-jena-fuseki-)[0-9.]+(\.tar\.gz\.sha512)}{$1$ENV{VERSION}$2};
+' "$DOCKERFILE"
+# The pom's own <version> is the only one indented two spaces.
+VERSION="$version" perl -pi -e '
+  s{^(  <version>)[^<]*(</version>)}{$1$ENV{VERSION}$2};
+  s{^(    <jena\.version>)[^<]*(</jena\.version>)}{$1$ENV{VERSION}$2};
+' "$POM"
+grep -qx "ARG FUSEKI_VERSION=$version" "$DOCKERFILE" \
+  && grep -qx "ARG FUSEKI_SHA512=$sha512" "$DOCKERFILE" \
+  && grep -qx "  <version>$version</version>" "$POM" \
+  && grep -qx "    <jena.version>$version</jena.version>" "$POM" \
+  || fail "the pins in $DOCKERFILE and $POM did not all change to $version; update the patterns above"
+if [ -n "$(git status --porcelain)" ]; then
+  git add "$DOCKERFILE" "$POM"
+  git commit -q -m "Pin Apache Jena Fuseki $version" \
+    -m "FUSEKI_VERSION, its SHA-512 from Apache's published checksum, and the extension's own and Jena versions."
+fi
+assert_only_packaging_differs
+
+echo
+echo "Mentions of $old left for review (prose is not rewritten):"
+# Also the short form, such as "Fuseki 6.2", which prose uses and the full version misses.
+short="${old%.*}"
+git grep -n -E "(^|[^0-9.])${short//./\\.}([^0-9]|\$)" -- "$FUSEKI_DIR" "$WORKFLOW" || echo "  none"
+
+if [ "$run_checks" = true ]; then
+  image="om-fuseki:$version-port"
+  (cd "$FUSEKI_DIR/extension" && mvn -B -ntp verify)
+  docker build -t "$image" "$FUSEKI_DIR"
+  "$FUSEKI_DIR/test/smoke-test.sh" "$image"
+fi
+
+cat <<PUBLISH
+
+$port is ready locally. Nothing was pushed. To publish:
+  1. Push the upstream tag as the release branch, with no packaging on it:
+       git push origin $tag^{commit}:refs/heads/release/$version
+  2. Open a pull request from $port into release/$version.
+     Its CI builds and smoke-tests the image and publishes nothing.
+  3. Merging the pull request pushes release/$version, which publishes the image.
+PUBLISH
