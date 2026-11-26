@@ -139,6 +139,22 @@ upload_status() {
     "$BASE/$1/data?graph=$GRAPH"
 }
 
+# Fuseki 6.3.0 refuses an RDF Thrift row above 100,000 bytes. The extension lifts that to the upload
+# limit, so a 150,000 character literal must round-trip: written as N-Triples, exported as Thrift by
+# Fuseki itself (no binary fixture), uploaded as Thrift to another graph, and read back by length.
+thrift_row_above_stock_cap_roundtrips() {
+  local source="urn:smoke:thrift:source" target="urn:smoke:thrift:target" file="/tmp/$CONTAINER.trdf"
+  head -c 150000 /dev/zero | tr '\0' 'a' | sed 's/^/<urn:s> <urn:p> "/; s/$/" ./' > "/tmp/$CONTAINER.nt"
+  curl -fs -o /dev/null -u "admin:$PASSWORD" -X PUT -H 'Content-Type: application/n-triples' \
+    --data-binary "@/tmp/$CONTAINER.nt" "$BASE/openmetadata/data?graph=$source" || return 1
+  curl -fs -u "admin:$PASSWORD" -H 'Accept: application/rdf+thrift' -o "$file" \
+    "$BASE/openmetadata/data?graph=$source" || return 1
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PASSWORD" -X POST \
+    -H 'Content-Type: application/rdf+thrift' --data-binary "@$file" \
+    "$BASE/openmetadata/data?graph=$target")" == 2* ]] || return 1
+  [ "$(dataset_ask openmetadata "ASK { GRAPH <$target> { ?s ?p ?o FILTER(STRLEN(?o) = 150000) } }")" = "true" ]
+}
+
 exits_with_error() {
   local output
   if output=$(docker run --rm "$@" "$IMAGE" 2>&1); then
@@ -227,6 +243,7 @@ check "upload limit reflects OPENMETADATA_MAX_UPLOAD_BYTES" header_equals openme
 check "union is in effect for queries" union_is openmetadata_a true
 check "an upload under the limit is accepted" [ "$(upload_status openmetadata 1024)" = "201" ]
 check "an upload over the limit is rejected with 413" [ "$(upload_status openmetadata 2097152)" = "413" ]
+check "an RDF Thrift row of 150,000 characters is stored whole" thrift_row_above_stock_cap_roundtrips
 
 echo "== Turning the extension off again on the same volume =="
 start -e FUSEKI_DATASETS=openmetadata
@@ -284,7 +301,7 @@ check "non-numeric FUSEKI_QUERY_TIMEOUT_MS" exits_with_error -e ADMIN_PASSWORD=x
 check "non-boolean OPENMETADATA_EXTENSION_ENABLED" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=yes
 check "invalid OPENMETADATA_STORAGE_MIN_FREE" exits_with_error -e ADMIN_PASSWORD=x -e OPENMETADATA_EXTENSION_ENABLED=true -e OPENMETADATA_STORAGE_MIN_FREE=lots
 
-rm -f "/tmp/$CONTAINER.nt"
+rm -f "/tmp/$CONTAINER.nt" "/tmp/$CONTAINER.trdf"
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES check(s) failed"
   exit 1
