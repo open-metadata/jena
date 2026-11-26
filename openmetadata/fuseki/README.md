@@ -56,6 +56,15 @@ without the extension and 0.23 s with it. The extension receives the whole uploa
 lock, caps its size, and rolls it back if it passes the deadline. `arq:updateTimeout` does not cover
 Graph Store uploads.
 
+It also lifts a limit that Jena 6.3.0 added to RDF Thrift. `TRDF` hard-codes 100,000 bytes per triple or
+quad row (GH-4377), so stock Fuseki answers 500 `Unrecognized: RDF_StreamRow` to an
+`application/rdf+thrift` upload with one row above that, and stores nothing. OpenMetadata uploads
+bulk RDF this way, so one entity with a description or SQL over 100 KB failed a whole batch. With the
+extension, Graph Store POST and PUT read Thrift with a row cap equal to `OPENMETADATA_MAX_UPLOAD_BYTES`
+(`ThriftRows`, called from `BoundedGraphStore`). That bound already limits what one request can
+allocate, so a lower row cap protects nothing more. A body above it still gets 413. Other Thrift
+readers in the server, such as SPARQL `LOAD`, keep Jena's cap.
+
 It also advertises the dataset's guarantees on `OPTIONS /<dataset>/data` (`X-OpenMetadata-*` headers),
 which OpenMetadata reads before indexing. OpenMetadata works without the extension and logs which
 guarantees are missing.
@@ -176,7 +185,7 @@ ships a fixed Shiro.
 
 `mvn verify` in `extension/` runs the unit tests and the Graph Store integration tests on a real Fuseki
 server: upload deadlines and size limits, rollback, and the storage guard. The smoke test starts the
-built image through every environment contract above, including the storage guard's `507`, and checks
+built image through every environment contract above, including the storage guard's `507` and a 150,000 character RDF Thrift row, and checks
 that `/reasoning/*` is not served.
 
 ## Publishing
@@ -237,6 +246,12 @@ What fails after a port, and what it means:
 - **`StockFusekiLockIT`.** Stock Fuseki no longer holds the writer lock while an upload transfers, the
   reason for the extension. Repeat the measurement in "What the extension adds" before keeping or
   removing it.
+- **`StockThriftRowCapIT`.** Jena's own RDF Thrift reader accepts a row above 100,000 bytes, so the
+  cap that `ThriftRows` lifts is gone or configurable. Read `TRDF` in the new release. If the cap is
+  gone, delete `ThriftRows`, the Thrift branch of `BoundedGraphStore.parse`, `ThriftRowCapIT` and the
+  smoke-test check, and correct "What the extension adds". If it is configurable, set it from
+  `OPENMETADATA_MAX_UPLOAD_BYTES` instead of overriding the reader. Also compile errors in
+  `ThriftRows` mean `TRDF`, `ThriftRDF` or Thrift's `TIOStreamTransport` changed.
 - **A smoke-test failure.** An environment contract in this README no longer holds on the new Fuseki.
 
 Publishing is by pull request. The pull request's CI builds and smoke-tests the image and publishes

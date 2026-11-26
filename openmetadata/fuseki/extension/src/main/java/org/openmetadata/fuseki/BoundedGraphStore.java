@@ -13,6 +13,7 @@
 package org.openmetadata.fuseki;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.concurrent.ExecutionException;
@@ -181,10 +182,7 @@ public final class BoundedGraphStore extends GSP_RW {
       final Target target = target(action, dataset, request);
       final StreamRDFCounting sink =
           StreamRDFLib.count(withDeadline(target.sink(), request.deadline()));
-      RDFParser.source(request.path())
-          .base(action.getRequestRequestURL())
-          .lang(request.language())
-          .parse(sink);
+      parse(action, request, sink);
       request.deadline().check();
       action.commit();
       return new UploadResult(sink.countTriples(), sink.countQuads(), target.existed());
@@ -194,6 +192,21 @@ public final class BoundedGraphStore extends GSP_RW {
     } finally {
       action.endWrite();
     }
+  }
+
+  private void parse(final HttpAction action, final UploadRequest request, final StreamRDF sink) {
+    if (Lang.RDFTHRIFT.equals(request.language())) {
+      try {
+        ThriftRows.read(request.path(), maxBytes, sink);
+      } catch (IOException exception) {
+        throw new UncheckedIOException(exception);
+      }
+      return;
+    }
+    RDFParser.source(request.path())
+        .base(action.getRequestRequestURL())
+        .lang(request.language())
+        .parse(sink);
   }
 
   private static Target target(
